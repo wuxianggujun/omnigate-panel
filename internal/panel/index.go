@@ -19,6 +19,12 @@ var indexHTML []byte
 //go:embed app.js
 var appJS []byte
 
+// theme.css 是主面板与 OmniGate 子页共用的设计系统（设计令牌 + 全部通用组件），
+// 由两页 <link rel="stylesheet" href="/panel/theme.css"> 引入，杜绝两页配色割裂。
+//
+//go:embed theme.css
+var themeCSS []byte
+
 // OmniGate 子页面（多上游网关：Runable / 浣熊 / 任意 OpenAI 兼容上游）：
 // 与主面板同源、同一把 API Key，复用统一安全头与严格 CSP。
 //
@@ -67,6 +73,15 @@ func (p *Panel) appScript(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(appJS)
+}
+
+// themeStyle 输出统一设计系统样式表（主面板与 OmniGate 子页共用；
+// 同源样式表，CSP style-src 'self' 放行）。
+func (p *Panel) themeStyle(w http.ResponseWriter, r *http.Request) {
+	setSecurityHeaders(w)
+	w.Header().Set("Content-Type", "text/css; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(themeCSS)
 }
 
 // omniIndex 输出 OmniGate 子页面（多上游网关：Runable / 浣熊 / OpenAI 兼容）。

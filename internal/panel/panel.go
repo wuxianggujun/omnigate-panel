@@ -171,6 +171,8 @@ func (p *Panel) Logs() *Ring { return p.logs }
 func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/{$}", p.index)
 	p.mux.HandleFunc("GET /panel/app.js", p.appScript)
+	// 统一设计系统样式表（主面板与 OmniGate 子页共用）。
+	p.mux.HandleFunc("GET /panel/theme.css", p.themeStyle)
 	// OmniGate 子页面（多上游网关：Runable / 浣熊 / OpenAI 兼容上游）。
 	p.mux.HandleFunc("GET /panel/omni/{$}", p.omniIndex)
 	p.mux.HandleFunc("GET /panel/omni/omni.js", p.omniScript)

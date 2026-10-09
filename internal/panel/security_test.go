@@ -18,6 +18,7 @@ func TestSecurityHeadersOnAllPanelResponses(t *testing.T) {
 	paths := []struct{ method, path string }{
 		{"GET", "/panel/"},
 		{"GET", "/panel/app.js"},
+		{"GET", "/panel/theme.css"},
 		{"GET", "/panel/api/overview"}, // 401（未提供 key）
 		{"POST", "/panel/api/config"},  // 401
 		{"GET", "/panel/api/nonexistent"},
@@ -92,6 +93,56 @@ func TestAppScriptServed(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "'use strict'") {
 		t.Error("app.js body looks wrong")
+	}
+}
+
+// 统一主题：主面板与 OmniGate 子页必须共用同一份 theme.css（设计令牌 + 组件），
+// 否则两页会各自持一套配色、出现割裂感。同时校验 OmniGate 页不含内联脚本
+// （严格 CSP 下会被拦掉，页面将不可用）。
+func TestUnifiedThemeSharedByBothPages(t *testing.T) {
+	p := newTestPanel()
+
+	// theme.css 可取到、类型正确、含明暗两套令牌。
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, httptest.NewRequest("GET", "/panel/theme.css", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("theme.css code=%d want 200", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "css") {
+		t.Errorf("theme.css Content-Type=%q want css", ct)
+	}
+	css := rec.Body.String()
+	for _, must := range []string{":root", `[data-theme="light"]`, ".shell", ".box", ".tag"} {
+		if !strings.Contains(css, must) {
+			t.Errorf("theme.css missing %q (shared design system)", must)
+		}
+	}
+
+	// 两个页面都要 <link> 引入同一份 theme.css。
+	for _, page := range []string{"/panel/", "/panel/omni/"} {
+		rec := httptest.NewRecorder()
+		p.ServeHTTP(rec, httptest.NewRequest("GET", page, nil))
+		body := rec.Body.String()
+		if !strings.Contains(body, `href="/panel/theme.css"`) {
+			t.Errorf("%s must link /panel/theme.css (unified theme)", page)
+		}
+		if strings.Contains(body, "<style>") {
+			t.Errorf("%s still contains an inline <style> block; theme must come from theme.css", page)
+		}
+		if strings.Contains(body, "<script>\n") || strings.Contains(body, "<script> ") {
+			t.Errorf("%s contains an inline <script> block (blocked by CSP)", page)
+		}
+	}
+
+	// OmniGate 页脚本走外部引用 + 与主面板同用 data-theme 令牌。
+	rec = httptest.NewRecorder()
+	p.ServeHTTP(rec, httptest.NewRequest("GET", "/panel/omni/", nil))
+	body := rec.Body.String()
+	if !strings.Contains(body, `<script src="/panel/omni/omni.js"></script>`) {
+		t.Error("omni.html must load omni.js externally")
+	}
+	if !strings.Contains(body, `data-theme="dark"`) {
+		t.Error("omni.html must declare data-theme (shared theme tokens)")
 	}
 }
 

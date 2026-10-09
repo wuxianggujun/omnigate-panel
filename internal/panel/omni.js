@@ -5,6 +5,26 @@
 const LS_KEY = 'wb2api.key';
 const $ = id => document.getElementById(id);
 
+/* ── 主题：与主面板共用同一份 localStorage 键（wb2api.theme）与设计令牌
+   （theme.css）。两态翻转，首次跟随系统偏好；切换按钮与主面板一致。 ── */
+const LS_THEME = 'wb2api.theme';
+let theme = localStorage.getItem(LS_THEME) || 'auto';   // auto | light | dark
+function effTheme() {
+  return theme === 'auto' ? (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark') : theme;
+}
+function applyTheme() {
+  const eff = effTheme();
+  document.documentElement.dataset.theme = eff;
+  const ico = $('icoTheme');
+  if (ico) ico.innerHTML = eff === 'light'
+    ? '<circle cx="8" cy="8" r="3"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3.2 3.2l1.4 1.4M11.4 11.4l1.4 1.4M12.8 3.2l-1.4 1.4M4.6 11.4l-1.4 1.4"/>'
+    : '<path d="M13.2 9.6A5.6 5.6 0 0 1 6.4 2.8a5.6 5.6 0 1 0 6.8 6.8z"/>';
+  const btn = $('btnTheme');
+  if (btn) btn.title = eff === 'light' ? '切换到深色' : '切换到浅色';
+}
+addEventListener('change', applyTheme);
+applyTheme();
+
 function getKey() { return localStorage.getItem(LS_KEY) || ''; }
 function setKey(v) { localStorage.setItem(LS_KEY, v.trim()); }
 
@@ -12,7 +32,7 @@ function msg(id, text, cls) {
   const el = $(id);
   if (!el) return;
   el.textContent = text || '';
-  el.className = 'msg' + (cls ? ' ' + cls : '');
+  el.className = 'og-msg' + (cls ? ' ' + cls : '');
 }
 function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
 
@@ -40,8 +60,12 @@ async function loadAll() {
     renderProviders(info);
     msg('statusMsg', '服务正常 · 模式 ' + (info.mode || '-') + ' · 运行 ' + (info.uptime_seconds || 0) + 's', 'ok');
     $('statusCnt').textContent = Object.keys(info.providers || {}).length + ' 个上游';
+    const nav = $('navState'); if (nav) nav.textContent = '服务正常';
+    const pulse = $('navPulse'); if (pulse) pulse.className = 'pulse';
   } catch (e) {
     msg('statusMsg', '加载失败：' + e.message, 'err');
+    const nav = $('navState'); if (nav) nav.textContent = '连接失败';
+    const pulse = $('navPulse'); if (pulse) pulse.className = 'pulse bad';
   }
   fillRaccoonProviders();
   loadAccounts();
@@ -60,12 +84,12 @@ function renderProviders(info) {
     const accts = p.accounts || [];
     const ready = accts.filter(a => a.indexOf('(ready)') >= 0).length;
     const pills = accts.length
-      ? accts.map(a => '<span class="pill ' + (a.indexOf('(ready)') >= 0 ? 'ok' : 'warn') + '">' + esc(a) + '</span>').join(' ')
-      : '<span class="pill warn">无账号</span>';
-    return `<div class="prov">
-      <div class="t">${esc(name)} <span class="pill">${esc(p.type || '')}</span></div>
-      <div class="s">账号 ${accts.length} 个 · 就绪 ${ready} · active #${p.active == null ? 0 : p.active}</div>
-      <div class="s" style="margin-top:6px">${pills}</div>
+      ? accts.map(a => '<span class="tag ' + (a.indexOf('(ready)') >= 0 ? 'ok' : 'warn') + '">' + esc(a) + '</span>').join(' ')
+      : '<span class="tag warn">无账号</span>';
+    return `<div class="og-card">
+      <div class="og-t">${esc(name)} <span class="tag mute">${esc(p.type || '')}</span></div>
+      <div class="og-s">账号 ${accts.length} 个 · 就绪 ${ready} · active #${p.active == null ? 0 : p.active}</div>
+      <div class="og-s" style="margin-top:6px">${pills}</div>
     </div>`;
   }).join('');
 }
@@ -100,9 +124,9 @@ async function loadAccounts() {
     if (!list.length) { tbody.innerHTML = '<tr><td colspan="4" class="empty">暂无账号，点「＋ 添加账号（网页授权）」开始</td></tr>'; return; }
     tbody.innerHTML = list.map(a => {
       let bal = '-';
-      if (a.balance_error) bal = '<span class="pill warn">' + esc(a.balance_error) + '</span>';
+      if (a.balance_error) bal = '<span class="tag warn">' + esc(a.balance_error) + '</span>';
       else if (a.available != null) bal = '<span class="num">' + esc(a.available) + '</span>';
-      const status = a.has_token ? '<span class="pill ok">已授权</span>' : '<span class="pill warn">未授权</span>';
+      const status = a.has_token ? '<span class="tag ok">已授权</span>' : '<span class="tag warn">未授权</span>';
       const exp = a.expires_at ? '<div style="color:var(--ink-3);font-size:11px">至 ' + esc(a.expires_at) + '</div>' : '';
       return `<tr data-label="${esc(a.label)}">
         <td>${esc(a.label)}${exp}</td>
@@ -340,30 +364,30 @@ function provCard(p, i) {
   const deviceField = type === 'runable' ? `
       <label>device_header<input data-i="${i}" data-f="device_header" value="${esc(p.device_header || '')}" placeholder="留空 = 默认"></label>` : '';
   const accts = (p.accounts || []).map((a, j) => acctRow(a, i, j)).join('');
-  return `<div class="prov">
-    <div class="row" style="justify-content:space-between">
-      <div class="t">供应商 #${i + 1} <span class="pill">${esc(type)}</span></div>
+  return `<div class="og-card">
+    <div class="og-row" style="justify-content:space-between">
+      <div class="og-t">供应商 #${i + 1} <span class="tag mute">${esc(type)}</span></div>
       <button class="danger" data-act="delProv" data-i="${i}">删除</button>
     </div>
-    <div class="fields">
+    <div class="og-fields">
       <label>名称（唯一）<input data-i="${i}" data-f="name" value="${esc(p.name || '')}" placeholder="如 my-openai"></label>
       <label>类型<select data-i="${i}" data-f="type">${typeOpts}</select></label>
-      <label class="full">base_url<input data-i="${i}" data-f="base_url" value="${esc(p.base_url || '')}" placeholder="https://api.example.com/v1"></label>
-      <label class="full">api_key<input data-i="${i}" data-f="api_key" value="${esc(p.api_key || '')}" placeholder="上游密钥（openai 类用）"></label>
+      <label class="og-full">base_url<input data-i="${i}" data-f="base_url" value="${esc(p.base_url || '')}" placeholder="https://api.example.com/v1"></label>
+      <label class="og-full">api_key<input data-i="${i}" data-f="api_key" value="${esc(p.api_key || '')}" placeholder="上游密钥（openai 类用）"></label>
       ${deviceField}${raccoonFields}
-      <label class="full">models（逗号或换行分隔，留空 = 自动发现）<textarea data-i="${i}" data-f="models" rows="2">${esc(modelsText(p))}</textarea></label>
+      <label class="og-full">models（逗号或换行分隔，留空 = 自动发现）<textarea data-i="${i}" data-f="models" rows="2">${esc(modelsText(p))}</textarea></label>
     </div>
-    <div class="sep"></div>
-    <div class="row" style="justify-content:space-between">
-      <span class="s">账号 ${(p.accounts || []).length} 个</span>
+    <div class="og-sep"></div>
+    <div class="og-row" style="justify-content:space-between">
+      <span class="og-s">账号 ${(p.accounts || []).length} 个</span>
       <button data-act="addAcct" data-i="${i}">+ 添加账号</button>
     </div>
-    <div class="accts">${accts || '<div class="empty">暂无账号（raccoon 可用下方「打开浏览器授权」添加）</div>'}</div>
+    <div class="og-accts">${accts || '<div class="empty">暂无账号（raccoon 可用下方「打开浏览器授权」添加）</div>'}</div>
   </div>`;
 }
 
 function acctRow(a, i, j) {
-  return `<div class="row acct" style="margin-top:6px">
+  return `<div class="og-row og-acct" style="margin-top:6px">
     <input data-i="${i}" data-j="${j}" data-f="label" value="${esc(a.label || '')}" placeholder="label" style="width:120px">
     <input data-i="${i}" data-j="${j}" data-f="email" value="${esc(a.email || '')}" placeholder="email" style="flex:1;min-width:130px">
     <input data-i="${i}" data-j="${j}" data-f="password" value="${esc(a.password || '')}" placeholder="password" style="flex:1;min-width:130px">
@@ -605,7 +629,7 @@ async function loadModels() {
     const list = (data && data.data) || [];
     $('modelCnt').textContent = list.length + ' 个模型';
     if (!list.length) { box.innerHTML = '<div class="empty">暂无模型</div>'; return; }
-    box.innerHTML = list.map(m => `<div class="prov"><div class="t">${esc(m.id)}</div><div class="s">${esc(m.owned_by || '')}</div></div>`).join('');
+    box.innerHTML = list.map(m => `<div class="og-card"><div class="og-t">${esc(m.id)}</div><div class="og-s">${esc(m.owned_by || '')}</div></div>`).join('');
   } catch (e) {
     box.innerHTML = '<div class="empty">' + esc(e.message) + '</div>';
   }
@@ -614,6 +638,11 @@ async function loadModels() {
 /* ── 绑定事件 ── */
 function bind() {
   $('key').value = getKey();
+  $('btnTheme').addEventListener('click', () => {
+    theme = effTheme() === 'light' ? 'dark' : 'light';
+    localStorage.setItem(LS_THEME, theme);
+    applyTheme();
+  });
   $('btnSaveKey').addEventListener('click', () => { setKey($('key').value); msg('statusMsg', 'Key 已保存', 'ok'); loadAll(); });
   $('btnRefresh').addEventListener('click', loadAll);
   $('btnAuth').addEventListener('click', authorize);

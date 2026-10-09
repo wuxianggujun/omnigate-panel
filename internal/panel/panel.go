@@ -80,6 +80,13 @@ type Config struct {
 	// 任一为 nil 时对应接口返回 501。
 	LoadOutbound func() (any, error)
 	SaveOutbound func(raw []byte) (restartRequired []string, err error)
+
+	// ExportOmniAccounts / ImportOmniAccounts OmniGate 供应商账号（state.json 的
+	// dyn_accounts 段）的导入导出（账号迁移用）。Export 返回
+	// {provider: [DynAccount...]} 的原始 JSON；Import 合并导入并热重建网关
+	//（导入即生效）。任一为 nil 时 OmniGate 段不参与迁移。
+	ExportOmniAccounts func() (json.RawMessage, error)
+	ImportOmniAccounts func(raw json.RawMessage) (imported, skipped int, err error)
 }
 
 // Panel 管理面板 handler。挂载方式：外层 mux Handle("/panel/", panel)，
@@ -180,6 +187,8 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/api/login/poll", p.withAuth(p.loginPoll))
 	p.mux.HandleFunc("GET /panel/api/login/regions", p.withAuth(p.loginRegions))
 	p.mux.HandleFunc("POST /panel/api/import/cockpit", p.withAuth(p.importCockpit))
+	p.mux.HandleFunc("GET /panel/api/accounts/export", p.withAuth(p.exportAccounts))
+	p.mux.HandleFunc("POST /panel/api/accounts/import", p.withAuth(p.importAccounts))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/revive", p.withAuth(p.accountRevive))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/disable", p.withAuth(p.accountDisable))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/pause", p.withAuth(p.accountPause))

@@ -225,3 +225,71 @@ func (m *omniManager) Save(raw []byte) ([]string, error) {
 	m.logProviders(rt)
 	return nil, nil
 }
+
+// ExportAccountsRaw 导出运行时添加的账号（state.json 的 dyn_accounts 段），按
+// provider 分组返回原始 JSON。仅含运行时账号；配置里声明的账号在 omnigate.json。
+func (m *omniManager) ExportAccountsRaw() (json.RawMessage, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.st == nil {
+		return nil, errors.New("omnigate 未启用")
+	}
+	rt := m.cur.Load()
+	if rt == nil {
+		return nil, errors.New("omnigate 未启用")
+	}
+	out := map[string][]omnistate.DynAccount{}
+	for _, name := range rt.gw.ProviderNames() {
+		if accs := m.st.DynAccounts(name); len(accs) > 0 {
+			out[name] = accs
+		}
+	}
+	return json.Marshal(out)
+}
+
+// ImportAccountsRaw 合并导入 dyn_accounts 并重建运行时（导入即生效）。
+// 未配置的 provider 整组跳过；label 为空的账号跳过。
+func (m *omniManager) ImportAccountsRaw(raw json.RawMessage) (imported, skipped int, err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.st == nil {
+		return 0, 0, errors.New("omnigate 未启用")
+	}
+	rt := m.cur.Load()
+	if rt == nil {
+		return 0, 0, errors.New("omnigate 未启用")
+	}
+	var byProvider map[string][]omnistate.DynAccount
+	if err := json.Unmarshal(raw, &byProvider); err != nil {
+		return 0, 0, fmt.Errorf("解析 OmniGate 账号失败: %w", err)
+	}
+	known := map[string]bool{}
+	for _, name := range rt.gw.ProviderNames() {
+		known[name] = true
+	}
+	for prov, accs := range byProvider {
+		if !known[prov] {
+			skipped += len(accs)
+			continue
+		}
+		for _, a := range accs {
+			if a.Label == "" {
+				skipped++
+				continue
+			}
+			m.st.UpsertDynAccount(prov, a)
+			imported++
+		}
+	}
+	if imported > 0 {
+		newRT, berr := m.build(rt.cfg)
+		if berr != nil {
+			return imported, skipped, berr
+		}
+		if old := m.cur.Swap(newRT); old != nil {
+			old.sched.Stop()
+		}
+		log.Printf("[omnigate] 账号导入完成：新增/更新 %d 个，跳过 %d 个（已热重载）", imported, skipped)
+	}
+	return imported, skipped, nil
+}

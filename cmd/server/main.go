@@ -328,6 +328,8 @@ func main() {
 		pcfg.OmniConfigPath = cfg.OmnigateConfig
 		pcfg.LoadOmniConfig = omni.Load
 		pcfg.SaveOmniConfig = omni.Save
+		pcfg.ExportOmniAccounts = omni.ExportAccountsRaw
+		pcfg.ImportOmniAccounts = omni.ImportAccountsRaw
 	}
 	pn := panel.New(pcfg)
 	// 成长任务队列每日自动执行（与「执行全部待办」同管线）：Sequential 族零点解锁后

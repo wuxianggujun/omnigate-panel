@@ -1117,6 +1117,7 @@ function openAdd() {
   $('addLoad').hidden = true; $('addReady').hidden = true;
   $('addDone').hidden = true; $('addErr').hidden = true;
   $('importDone').hidden = true; $('importErr').hidden = true;
+  $('bundleDone').hidden = true; $('bundleErr').hidden = true;
   $('btnCopyUrl').hidden = true; $('btnOpenUrl').hidden = true;
   $('btnStartLogin').hidden = false; $('btnStartLogin').disabled = false;
   stopPoll();
@@ -1125,6 +1126,7 @@ function switchAddTab(tab) {
   document.querySelectorAll('#addTabs .tab').forEach(b => b.classList.toggle('on', b.dataset.tab === tab));
   $('addTabLogin').hidden = tab !== 'login';
   $('addTabImport').hidden = tab !== 'import';
+  $('addTabBundle').hidden = tab !== 'bundle';
 }
 document.querySelectorAll('#addTabs .tab').forEach(b => {
   b.onclick = () => switchAddTab(b.dataset.tab);
@@ -1198,8 +1200,53 @@ $('importFile').onchange = async () => {
   }
   $('importFile').value = '';
 };
+$('bundleFile').onchange = async () => {
+  const file = $('bundleFile').files[0];
+  if (!file) return;
+  $('bundleDone').hidden = true; $('bundleErr').hidden = true;
+  const fd = new FormData();
+  fd.append('file', file);
+  const h = {};
+  const k = localStorage.getItem(LS_KEY);
+  if (k) h['Authorization'] = 'Bearer ' + k;
+  try {
+    const r = await fetch('/panel/api/accounts/import', { method: 'POST', body: fd, headers: h });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+    const wb = d.workbuddy || {}, om = d.omnigate || {};
+    let msg = '导入完成：WorkBuddy 成功 ' + (wb.imported || 0) + ' 个' + (wb.skipped ? '，跳过 ' + wb.skipped + ' 个' : '');
+    msg += '；OmniGate 成功 ' + (om.imported || 0) + ' 个' + (om.skipped ? '，跳过 ' + om.skipped + ' 个' : '');
+    $('bundleDone').hidden = false;
+    $('bundleDone').textContent = msg;
+    if (d.omnigate_error) { $('bundleErr').hidden = false; $('bundleErr').textContent = 'OmniGate：' + d.omnigate_error; }
+    loadOverview(true);
+  } catch (e) {
+    $('bundleErr').hidden = false;
+    $('bundleErr').textContent = '导入失败：' + e.message;
+  }
+  $('bundleFile').value = '';
+};
 
 /* ── 顶部动作 ─────────────────────────────────────────────────────── */
+$('btnExportAccounts').onclick = async () => {
+  try {
+    const h = {};
+    const k = localStorage.getItem(LS_KEY);
+    if (k) h['Authorization'] = 'Bearer ' + k;
+    const r = await fetch('/panel/api/accounts/export', { headers: h });
+    if (!r.ok) { let m = 'HTTP ' + r.status; try { m = (await r.json()).error || m; } catch (e) {} throw new Error(m); }
+    const blob = await r.blob();
+    const cd = r.headers.get('Content-Disposition') || '';
+    const mm = /filename="?([^";]+)"?/.exec(cd);
+    const name = mm ? mm[1] : ('omnigate-accounts-' + Date.now() + '.json');
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = name;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    toast('账号已导出（含凭证，请妥善保管）', 'ok');
+  } catch (e) { toast('导出失败：' + e.message, 'err'); }
+};
 $('btnAdd').onclick = openAdd;
 $('btnRefresh').onclick = async () => {
   const b = $('btnRefresh');

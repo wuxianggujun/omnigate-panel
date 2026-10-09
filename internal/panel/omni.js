@@ -264,6 +264,49 @@ async function removeAcct(label) {
   }
 }
 
+/* 账号迁移：导出/导入完整账号包（WorkBuddy + OmniGate，含凭证）。
+   导出即下载一个 JSON；导入为合并（同 UID / 同 label 覆盖）。 */
+async function exportAccounts() {
+  try {
+    const headers = {};
+    const key = getKey();
+    if (key) headers['Authorization'] = 'Bearer ' + key;
+    const r = await fetch('/panel/api/accounts/export', { headers });
+    if (!r.ok) { let m = 'HTTP ' + r.status; try { m = (await r.json()).error || m; } catch (e) {} throw new Error(m); }
+    const blob = await r.blob();
+    const cd = r.headers.get('Content-Disposition') || '';
+    const mm = /filename="?([^";]+)"?/.exec(cd);
+    const name = mm ? mm[1] : ('omnigate-accounts-' + Date.now() + '.json');
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = name;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    msg('acctMsg', '账号已导出（含凭证，请妥善保管）', 'ok');
+  } catch (e) { msg('acctMsg', '导出失败：' + e.message, 'err'); }
+}
+async function importAccountsFile(file) {
+  if (!file) return;
+  const fd = new FormData();
+  fd.append('file', file);
+  const headers = {};
+  const key = getKey();
+  if (key) headers['Authorization'] = 'Bearer ' + key;
+  try {
+    const r = await fetch('/panel/api/accounts/import', { method: 'POST', body: fd, headers });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+    const wb = d.workbuddy || {}, om = d.omnigate || {};
+    let text = '导入完成：WorkBuddy 成功 ' + (wb.imported || 0) + ' 个' + (wb.skipped ? '（跳过 ' + wb.skipped + '）' : '');
+    text += '；OmniGate 成功 ' + (om.imported || 0) + ' 个' + (om.skipped ? '（跳过 ' + om.skipped + '）' : '');
+    if (d.omnigate_error) text += '（OmniGate：' + d.omnigate_error + '）';
+    msg('acctMsg', text, 'ok');
+    loadAll();
+  } catch (e) {
+    msg('acctMsg', '导入失败：' + e.message, 'err');
+  }
+}
+
 /* ── 供应商配置（增删改 + 进程内热生效） ── */
 let omniCfg = null;
 
@@ -583,6 +626,9 @@ function bind() {
   $('btnTokenCancel').addEventListener('click', cancelToken);
   $('btnLoadAccts').addEventListener('click', loadAccounts);
   $('btnCheckinAll').addEventListener('click', () => doCheckin(''));
+  $('btnAcctExport').addEventListener('click', exportAccounts);
+  $('btnAcctImport').addEventListener('click', () => $('acctImportFile').click());
+  $('acctImportFile').addEventListener('change', () => { importAccountsFile($('acctImportFile').files[0]); $('acctImportFile').value = ''; });
   $('btnLoadModels').addEventListener('click', loadModels);
   $('raccoonProvider').addEventListener('change', loadAccounts);
   // 供应商配置：增删改 + 保存热生效。

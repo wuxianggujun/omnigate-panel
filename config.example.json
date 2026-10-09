@@ -3,6 +3,11 @@
   "api_key": "test_key",
   "auth_dir": "./auths",
   "state_file": "./data/state.json",
+  "omnigate_config": "./omnigate.json",
+  "outbound": {
+    "proxies": [],
+    "routes": {}
+  },
   "server": {
     "read_timeout": "300s"
   },

@@ -353,7 +353,11 @@ function go(v) {
   // 就卡死。数据只由卡片上的「检查」按钮显式触发；卡片初始隐藏。
   if (v === 'taskscenter') reattachQueueView();
 }
-document.querySelectorAll('.nav a').forEach(a => a.onclick = e => { e.preventDefault(); go(a.dataset.view); history.replaceState(null, '', '#' + a.dataset.view); });
+document.querySelectorAll('.nav a').forEach(a => a.onclick = e => {
+  // 无 data-view 的导航项（如 OmniGate 子页面外链）走默认跳转，不做视图切换。
+  if (!a.dataset.view) return;
+  e.preventDefault(); go(a.dataset.view); history.replaceState(null, '', '#' + a.dataset.view);
+});
 /* 首次进入延到本轮脚本求值之后再 go()。
    原因：go() 会同步触发视图的数据加载（loadUsage/loadLogs/loadPackages…），而这些
    函数读到的模块级 let/const（usageRateWarmAt、PK_* 等）在文件后半段才初始化——

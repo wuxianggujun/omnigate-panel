@@ -1,24 +1,56 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/DGZSbot/ai-icon/refs/heads/main/WorkBuddy.png" alt="WorkBuddy2API" width="120">
+  <img src="https://raw.githubusercontent.com/DGZSbot/ai-icon/refs/heads/main/WorkBuddy.png" alt="OmniGate" width="120">
 </p>
 
-<h1 align="center">WorkBuddy2API Panel</h1>
+<h1 align="center">OmniGate Panel</h1>
 
 <p align="center">
-  <b>把腾讯 CodeBuddy 账号变成 OpenAI 兼容 API 的多账号网关 · 附 Web 管理面板</b><br>
-  Web 面板 · OAuth 浏览器登录 · 账号池轮转 · 熔断与冷却 · 会话粘性 · 定时签到 / 活跃 / 旅行 / 保活 · <b>成长任务一键完成（17/18）</b> · 流式 / 非流式
+  <b>多上游、多账号的 OpenAI 兼容网关 · 附 Web 管理面板</b><br>
+  内置 <b>OmniGate 引擎</b>（Runable · 办公小浣熊 · 任意 OpenAI 兼容上游）· 面板侧 CodeBuddy 账号池轮转 · OAuth 浏览器登录 · 熔断与冷却 · 会话粘性 · 定时签到 / 保活 · 流式 / 非流式
 </p>
 
 <p align="center">
   <img alt="Go" src="https://img.shields.io/badge/Go-1.22.5-00ADD8?logo=go&logoColor=white&style=flat-square">
   <img alt="API" src="https://img.shields.io/badge/API-OpenAI_Compatible-412991?style=flat-square">
-  <img alt="Deploy" src="https://img.shields.io/badge/Deploy-Single_Binary%20%7C%20Docker-2496ED?style=flat-square">
-  <img alt="Transport" src="https://img.shields.io/badge/Transport-SSE%20%2F%20Streaming-0DBD8B?style=flat-square">
+  <img alt="Deploy" src="https://img.shields.io/badge/Deploy-Single_Binary-2496ED?style=flat-square">
+  <img alt="Deps" src="https://img.shields.io/badge/Dependencies-stdlib_only-3fb950?style=flat-square">
 </p>
 
 ---
 
-> **本项目是 [Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api) 的增强分支**（fork）。
+## 内置 OmniGate 引擎（本分支新增）
+
+本项目在原 WorkBuddy/CodeBuddy 面板基础上，内置了一个**通用多上游网关 OmniGate**，把
+Runable、办公小浣熊（Raccoon）以及任意 OpenAI 兼容上游统一成一套 OpenAI 兼容 API：
+
+- 面板左侧导航新增 **「OmniGate 网关」** 页（`/panel/omni/`），与主面板同源、共用同一把 API Key。
+- OmniGate 的 API 挂载在 **`/omni/`** 前缀下：`/omni/v1/models`、`/omni/v1/chat/completions`、
+  `/omni/admin/raccoon/*`（浏览器授权、账号、余额、签到、移除）、`/omni/healthz`。
+- **浣熊账号**支持浏览器授权登录（生成授权链接 → 粘贴 `office-raccoon://auth/callback?...` 回调），
+  也支持直接粘贴 access/refresh token；账号与刷新后的 token 落盘在 `data/omnigate/state.json`。
+- OmniGate 使用**独立配置文件** `omnigate.json`（示例见 `omnigate.example.json`），与面板的
+  `config.json` 互不干扰；面板 `config.json` 里的 `omnigate_config` 指向它（缺省 `./omnigate.json`）。
+  文件不存在时自动跳过，面板其余功能照常运行。
+
+```bash
+# 1) 生成配置
+copy config.example.json config.json
+copy omnigate.example.json omnigate.json     # 编辑其中的 providers / accounts
+
+# 2) 构建并启动（单一二进制，纯标准库，零第三方依赖，可离线构建）
+go build -o bin/omnigate-panel.exe ./cmd/server
+bin/omnigate-panel.exe -config config.json
+
+# 3) 打开面板： http://127.0.0.1:7863/panel/        （主面板）
+#               http://127.0.0.1:7863/panel/omni/   （OmniGate 网关）
+```
+
+> OmniGate 引擎的代码位于 `internal/omnigate/`（config / gateway / provider / state / scheduler /
+> server 等），与原面板的 `internal/*` 完全隔离，互不影响。
+
+---
+
+> **本项目基于 [Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api) 的增强分支**（fork）。
 > 上游仓库现已删除；本项目**已同步至上游删库前的最后一次更新**（`ea8b1e5`），此后由本分支独立维护演进。
 > 在上游基础上重构了可视化运维层；差异概览见 [与上游的差异](#-与上游的差异)，上游设计的精巧之处（账号池调度、错误分类、提示词体系）原样保留，详见下文。
 
@@ -45,7 +77,7 @@
 
 ## 项目简介
 
-WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾讯 CodeBuddy（`copilot.tencent.com`）账号包装为统一的 `/v1/chat/completions` 服务。
+OmniGate 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾讯 CodeBuddy（`copilot.tencent.com`）账号包装为统一的 `/v1/chat/completions` 服务。
 
 - 官方不提供 OpenAI 形态的开放 API，本项目通过 **OAuth 设备授权**（面板「添加账号」或 `login.sh`）获取账号凭证，在网关侧做 token 自动刷新、账号池调度与流量治理；
 - 面向 **个人多账号** 场景：多账号共享、单号故障自动换号、冷却 / 熔断防止雪崩、会话粘性保证多轮上下文不跳号；
@@ -194,7 +226,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 flowchart LR
     Client["客户端 / SDK\nOpenAI 兼容请求"] --> H
 
-    subgraph GWI["WorkBuddy2API 网关 :7863"]
+    subgraph GWI["OmniGate 网关 :7863"]
         H["HTTP Handler\n鉴权 · 请求体上限 · 提示词改写 · 轮转"] --> P
         H --> S
         P["账号池\n快过期加权 · 成本分层 · 熔断 · 冷却 · 租约"] --> U
@@ -230,16 +262,16 @@ mkdir -p auths data && cp config.example.json config.json
 #    建议编辑 config.json 设置 api_key（或留空由程序自动生成随机密钥）
 
 # 2. 拉取并运行
-docker run -d --name workbuddy2api \
+docker run -d --name omnigate-panel \
   -p 7863:7863 -e TZ=Asia/Shanghai \
   -v ./auths:/app/auths -v ./data:/app/data -v ./config.json:/app/config.json \
-  ghcr.io/linguo2625469/workbuddy2api-panel:latest
+  ghcr.io/wuxianggujun/omnigate-panel:latest
 
 # 3. 健康检查（无可用账号时返回 503）
 curl -s http://localhost:7863/healthz
 ```
 
-> **首次发布后须将包设为公开**：GitHub 仓库页 → Packages → `workbuddy2api-panel` →
+> **首次发布后须将包设为公开**：GitHub 仓库页 → Packages → `omnigate-panel` →
 > Package settings → Change visibility → Public，否则拉取需要 `docker login ghcr.io`。
 >
 > 镜像 tag 规则：`main` 分支推送 `latest` / `main` / `sha-xxxxxx`；打 `v*` tag 额外发布
@@ -249,8 +281,8 @@ curl -s http://localhost:7863/healthz
 
 ```bash
 # 1. 克隆
-git clone https://github.com/linguo2625469/workbuddy2api-panel.git
-cd workbuddy2api-panel
+git clone https://github.com/wuxianggujun/omnigate-panel.git
+cd omnigate-panel
 
 # 2. 准备配置（compose 挂载此文件，缺失会导致容器启动失败）
 cp config.example.json config.json
@@ -277,11 +309,11 @@ docker compose down             # 停止并移除容器（数据在 ./auths 与 
 ### 方式二：Windows 单文件运行（无需 Docker）
 
 ```powershell
-# 1) 下载 Release 中的 wb2api.exe，或从源码构建
-go build -trimpath -ldflags="-s -w" -o wb2api.exe ./cmd/server
+# 1) 下载 Release 中的 omnigate-panel.exe，或从源码构建
+go build -trimpath -ldflags="-s -w" -o omnigate-panel.exe ./cmd/server
 
 # 2) 直接运行：首次启动自动生成 config.json（含随机 api_key，日志打印一次）
-.\wb2api.exe -config config.json
+.\omnigate-panel.exe -config config.json
 
 # 3) 浏览器打开面板添加账号
 #    http://127.0.0.1:7863/panel/
@@ -301,7 +333,7 @@ go run ./cmd/server -config config.json
 构建全部二进制：
 
 ```bash
-CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o wb2api ./cmd/server
+CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o omnigate-panel ./cmd/server
 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o signin_bin ./cmd/signin
 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o login ./cmd/login
 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o credit ./cmd/credit
@@ -594,7 +626,7 @@ WARN: [server] stream ...: saw M native tool call block(s) but repaired none (to
 
 - 一条上报同时点亮 growth 连登 + 解锁 `first_buddy` 任务（领养前置）
 - 每号每天 1 次即可（单时点）：日活跃奖励按天去重，重复上报无额外收益
-- `conversationId` 由网关生成（`wb2api-<ms>`），无需真实会话
+- `conversationId` 由网关生成（`omnigate-<ms>`），无需真实会话
 - 限速：账号间间隔 800ms（与旅行同口径）
 - **streak 自检**：上报成功后回读连登天数（只读 oracle），日志每号一行可 grep：`activity <uid>: streak days=N`。`days=0` 记 **warn**（`report OK but streak.days=0 (silent drop?)`，对应上游「200 但静默丢弃」）；回读失败记 warn 但不影响主流程（上报按天幂等，不重试，只观测）
 - 手动诊断 / 补跑用 `python3 scripts/probe_active.py`（只读探测；写操作默认 dry-run，需 `--yes`）
@@ -772,7 +804,7 @@ http://127.0.0.1:7863/panel/
 
 多阶段镜像（`golang:1.23-alpine` 构建 → `alpine:3.20` 运行）一次编译全部四个二进制并随镜像分发：
 
-- **wb2api**（主服务）、**signin_bin**、**login**、**credit** + 脚本（`login.sh` / `signin.sh` / `credit.sh` / `scripts/probe_active.py`）
+- **omnigate-panel**（主服务）、**signin_bin**、**login**、**credit** + 脚本（`login.sh` / `signin.sh` / `credit.sh` / `scripts/probe_active.py`）
 - 以 `app` 用户（uid 10001）运行，`app/auths` 与 `app/data` 预建
 - 镜像内默认落 `config.example.json` 作为空配置（不含密钥），生产用挂载卷覆盖 `/app/config.json`
 - 内置 `HEALTHCHECK`（`wget /healthz`，30s 间隔）

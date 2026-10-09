@@ -10,15 +10,17 @@ data/
 # Binaries (anchored to repo root only — bare "login"/"credit" would also ignore cmd/login/, cmd/credit/)
 /login
 /credit
-/wb2api
+/omnigate-panel
 /signin_bin
 
-# Config with secrets (use config.example.json)
+# Config with secrets (use config.example.json / omnigate.example.json)
 config.json
+omnigate.json
 
 # Build artifacts
 *.tmp
 __pycache__/
+/bin/
 
 # Backups (contains auth tokens)
 backups/
@@ -36,7 +38,7 @@ docs/
 !README.md
 
 # Windows binaries
-/wb2api.exe
+/omnigate-panel.exe
 /login.exe
 /credit.exe
 

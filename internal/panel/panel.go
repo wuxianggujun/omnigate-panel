@@ -21,14 +21,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/httpauth"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/reqlog"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/scheduler"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/usage"
+	"github.com/wuxianggujun/omnigate-panel/internal/auth"
+	"github.com/wuxianggujun/omnigate-panel/internal/httpauth"
+	"github.com/wuxianggujun/omnigate-panel/internal/livecfg"
+	"github.com/wuxianggujun/omnigate-panel/internal/pool"
+	"github.com/wuxianggujun/omnigate-panel/internal/reqlog"
+	"github.com/wuxianggujun/omnigate-panel/internal/scheduler"
+	"github.com/wuxianggujun/omnigate-panel/internal/upstream"
+	"github.com/wuxianggujun/omnigate-panel/internal/usage"
 )
 
 // Config 面板依赖（main 装配注入）。
@@ -65,6 +65,21 @@ type Config struct {
 	// 写入；空或文件不存在 = model_probes 端点返回空集，面板不显示任何实测标注）。
 	// 只读展示：网关不解析、不依赖其内容做任何路由/出站决策。
 	ProbeFile string
+
+	// OmniConfigPath 内置 OmniGate 引擎的配置文件（omnigate.json）路径与读写器
+	// （OmniGate 供应商配置页用）。LoadOmniConfig 返回解析后的供应商配置对象；
+	// SaveOmniConfig 完成「校验 → 落盘 → 进程内热重载」，返回需重启字段列表。
+	// 任一为 nil 时对应接口返回 501（OmniGate 未启用）。
+	OmniConfigPath string
+	LoadOmniConfig func() (any, error)
+	SaveOmniConfig func(raw []byte) (restartRequired []string, err error)
+
+	// LoadOutbound / SaveOutbound 出站代理配置（config.json 的 outbound 段）
+	// 读写器（OmniGate 页「出站代理」卡片用）。SaveOutbound 完成「合并 → 校验
+	// → 落盘 → 热应用」；出站代理全部热生效，返回的需重启列表恒为空。
+	// 任一为 nil 时对应接口返回 501。
+	LoadOutbound func() (any, error)
+	SaveOutbound func(raw []byte) (restartRequired []string, err error)
 }
 
 // Panel 管理面板 handler。挂载方式：外层 mux Handle("/panel/", panel)，
@@ -149,6 +164,13 @@ func (p *Panel) Logs() *Ring { return p.logs }
 func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/{$}", p.index)
 	p.mux.HandleFunc("GET /panel/app.js", p.appScript)
+	// OmniGate 子页面（多上游网关：Runable / 浣熊 / OpenAI 兼容上游）。
+	p.mux.HandleFunc("GET /panel/omni/{$}", p.omniIndex)
+	p.mux.HandleFunc("GET /panel/omni/omni.js", p.omniScript)
+	p.mux.HandleFunc("GET /panel/api/omni/config", p.withAuth(p.getOmniConfig))
+	p.mux.HandleFunc("POST /panel/api/omni/config", p.withAuth(p.saveOmniConfig))
+	p.mux.HandleFunc("GET /panel/api/omni/outbound", p.withAuth(p.getOutbound))
+	p.mux.HandleFunc("POST /panel/api/omni/outbound", p.withAuth(p.saveOutbound))
 	p.mux.HandleFunc("GET /panel/api/overview", p.withAuth(p.overview))
 	p.mux.HandleFunc("GET /panel/api/logs", p.withAuth(p.logsHandler))
 	p.mux.HandleFunc("GET /panel/api/request_metrics", p.withAuth(p.requestMetrics))

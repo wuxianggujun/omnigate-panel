@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/wuxianggujun/omnigate-panel/internal/auth"
 )
 
 // trialPath global trial 加油包端点（Maquer/workbuddy-checkin 实测）。

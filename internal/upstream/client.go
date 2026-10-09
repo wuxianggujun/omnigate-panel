@@ -20,8 +20,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
+	"github.com/wuxianggujun/omnigate-panel/internal/auth"
+	"github.com/wuxianggujun/omnigate-panel/internal/logfmt"
 )
 
 // ErrKind 错误分类，pool 据此决定冷却时长。
@@ -700,6 +700,21 @@ func New() *Client {
 	}
 	c.SanitizeFingerprints.Store(true)
 	return c
+}
+
+// SetProxy 设置/更新出站代理（fn 为 nil = 直连）。HTTP 与 ChatHTTP 共用同一
+// Transport，故一次设置即全路径生效；改完清空空闲连接池，让新代理立即对后续
+// 新建连接生效（在途连接不受影响）。可热调用（面板保存 outbound 时）。
+func (c *Client) SetProxy(fn func(*http.Request) (*url.URL, error)) {
+	for _, hc := range []*http.Client{c.HTTP, c.ChatHTTP} {
+		if hc == nil {
+			continue
+		}
+		if tr, ok := hc.Transport.(*http.Transport); ok {
+			tr.Proxy = fn
+			tr.CloseIdleConnections()
+		}
+	}
 }
 
 // chatHTTP 返回聊天专用 client；未设置（如测试只注入 HTTP）时回落 HTTP。

@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/wuxianggujun/omnigate-panel/internal/auth"
 )
 
 // cockpitAccount 映射 cockpit tools 导出格式的单个账号。

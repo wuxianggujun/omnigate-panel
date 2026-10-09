@@ -1,0 +1,52 @@
+{
+  "server": {
+    "host": "127.0.0.1",
+    "port": 8317
+  },
+  "data_dir": "data/omnigate",
+  "default_provider": "raccoon",
+  "default_model": "raccoon/raccoon-8c4485",
+  "mode": "text",
+  "reasoning": false,
+  "api_keys": [],
+  "providers": [
+    {
+      "name": "raccoon",
+      "type": "raccoon",
+      "main_origin": "https://xiaohuanxiong.com",
+      "accounts": []
+    },
+    {
+      "name": "runable",
+      "type": "runable",
+      "base_url": "https://api.runable.com",
+      "device_header": "dweb/a69d4f72ddd711c660237adaf5c76287ac5473f5",
+      "accounts": []
+    },
+    {
+      "name": "deepseek",
+      "type": "openai",
+      "base_url": "https://api.deepseek.com/v1",
+      "api_key": "sk-xxxxxxxxxxxxxxxx",
+      "models": ["deepseek-chat", "deepseek-reasoner"]
+    }
+  ],
+  "checkin": {
+    "enabled": true,
+    "interval_minutes": 360,
+    "tasks": [
+      {
+        "name": "runable-keepalive",
+        "type": "runable",
+        "provider": "runable",
+        "interval_minutes": 360
+      },
+      {
+        "name": "raccoon-checkin",
+        "type": "raccoon",
+        "provider": "raccoon",
+        "interval_minutes": 720
+      }
+    ]
+  }
+}

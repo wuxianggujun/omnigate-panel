@@ -3,7 +3,7 @@ package pool
 import (
 	"testing"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/wuxianggujun/omnigate-panel/internal/auth"
 )
 
 // TestCountsPausedSeparate 暂停号在两种口径下的计数（issue #125）。

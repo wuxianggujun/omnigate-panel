@@ -8,7 +8,7 @@ scripts/__pycache__/
 # 根目录已提交/未提交的二进制产物不进构建上下文（与 .gitignore 对齐）
 /login
 /credit
-/wb2api
+/omnigate-panel
 /signin_bin
 # 真实配置不进镜像（镜像默认用 config.example.json，生产以挂载卷覆盖）
 config.json

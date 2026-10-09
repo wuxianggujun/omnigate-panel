@@ -21,7 +21,7 @@ import (
 	"net/http"
 	"net/url"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/wuxianggujun/omnigate-panel/internal/auth"
 )
 
 // growth 域任务路径（与 scripts/task_common.py 对齐）。

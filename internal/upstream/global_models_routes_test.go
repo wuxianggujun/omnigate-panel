@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/wuxianggujun/omnigate-panel/internal/auth"
 )
 
 // TestMergeV3RoutesPriority 主路字段权威：同 id 在三路都出现时，字段取自主路

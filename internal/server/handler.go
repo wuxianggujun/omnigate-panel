@@ -16,16 +16,16 @@ import (
 	"sync"
 	"time"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/httpauth"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/prompt"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/reqlog"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/session"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/usage"
+	"github.com/wuxianggujun/omnigate-panel/internal/auth"
+	"github.com/wuxianggujun/omnigate-panel/internal/httpauth"
+	"github.com/wuxianggujun/omnigate-panel/internal/livecfg"
+	"github.com/wuxianggujun/omnigate-panel/internal/logfmt"
+	"github.com/wuxianggujun/omnigate-panel/internal/pool"
+	"github.com/wuxianggujun/omnigate-panel/internal/prompt"
+	"github.com/wuxianggujun/omnigate-panel/internal/reqlog"
+	"github.com/wuxianggujun/omnigate-panel/internal/session"
+	"github.com/wuxianggujun/omnigate-panel/internal/upstream"
+	"github.com/wuxianggujun/omnigate-panel/internal/usage"
 )
 
 // Config handler 依赖。

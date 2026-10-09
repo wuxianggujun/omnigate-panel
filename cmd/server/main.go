@@ -1,4 +1,4 @@
-// main.go workbuddy2api 入口：加载配置、构建 pool、起调度器与 HTTP 服务。
+// main.go omnigate-panel 入口：加载配置、构建 pool、起调度器与 HTTP 服务。
 package main
 
 import (
@@ -14,20 +14,22 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/panel"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/redisstore"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/reqlog"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/scheduler"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/server"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/session"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/usage"
+	"github.com/wuxianggujun/omnigate-panel/internal/auth"
+	"github.com/wuxianggujun/omnigate-panel/internal/livecfg"
+	"github.com/wuxianggujun/omnigate-panel/internal/outbound"
+	"github.com/wuxianggujun/omnigate-panel/internal/panel"
+	"github.com/wuxianggujun/omnigate-panel/internal/pool"
+	"github.com/wuxianggujun/omnigate-panel/internal/redisstore"
+	"github.com/wuxianggujun/omnigate-panel/internal/reqlog"
+	"github.com/wuxianggujun/omnigate-panel/internal/scheduler"
+	"github.com/wuxianggujun/omnigate-panel/internal/server"
+	"github.com/wuxianggujun/omnigate-panel/internal/session"
+	"github.com/wuxianggujun/omnigate-panel/internal/upstream"
+	"github.com/wuxianggujun/omnigate-panel/internal/usage"
 )
 
 // appVersion 网关版本（fork 版：面板 + 任务体系），透出到 /panel/api/overview。
@@ -132,6 +134,10 @@ func main() {
 	}
 
 	up := upstream.New()
+
+	// 出站代理（config.json 的 outbound 段）：面板上游目标 "workbuddy" 启动即
+	// 生效（nil = 直连）。保存配置时 saveConfig 会热更新同一 Transport。
+	up.SetProxy(cfg.Outbound.ProxyFunc(outbound.TargetWorkbuddy))
 
 	// 积分保底的「收费」兜底判据：接上游模型目录的积分倍率表。本地实测台账无观测
 	// 时用它判收费——否则「没学过」恒等于「放行」，高价新模型会把触底号一笔打穿
@@ -262,7 +268,14 @@ func main() {
 		log.Printf("[reqlog] 请求指标已启用；JSONL 归档已关闭")
 	}
 
-	pn := panel.New(panel.Config{
+	// 内置 OmniGate 引擎（Runable / 浣熊 / 任意 OpenAI 兼容上游）：先装配，
+	// 好把供应商配置读写器注入面板（保存即热重载，无需重启进程）。
+	omni := newOmniManager(cfg)
+	if omni.Enabled() {
+		defer omni.Stop()
+	}
+
+	pcfg := panel.Config{
 		Pool:        p,
 		Usage:       rec,
 		RequestLog:  requestLog,
@@ -284,7 +297,39 @@ func main() {
 		SaveConfig: func(raw []byte) ([]string, error) {
 			return saveConfig(raw, *cfgPath, live, p, up, sch)
 		},
-	})
+		// 出站代理配置（config.json 的 outbound 段）读写：面板 OmniGate 页
+		// 「出站代理」卡片用。保存后热应用到面板上游 + 内置 OmniGate 供应商。
+		LoadOutbound: func() (any, error) {
+			c, err := Load(*cfgPath)
+			if err != nil {
+				return nil, err
+			}
+			return c.Outbound, nil
+		},
+		SaveOutbound: func(raw []byte) ([]string, error) {
+			wrapped := make([]byte, 0, len(raw)+16)
+			wrapped = append(wrapped, `{"outbound":`...)
+			wrapped = append(wrapped, raw...)
+			wrapped = append(wrapped, '}')
+			if _, err := saveConfig(wrapped, *cfgPath, live, p, up, sch); err != nil {
+				return nil, err
+			}
+			if omni.Enabled() {
+				if c, err := Load(*cfgPath); err == nil {
+					if err := omni.SetOutbound(c.Outbound); err != nil {
+						log.Printf("WARN: [omnigate] 应用出站代理失败: %v", err)
+					}
+				}
+			}
+			return nil, nil
+		},
+	}
+	if omni.Enabled() {
+		pcfg.OmniConfigPath = cfg.OmnigateConfig
+		pcfg.LoadOmniConfig = omni.Load
+		pcfg.SaveOmniConfig = omni.Save
+	}
+	pn := panel.New(pcfg)
 	// 成长任务队列每日自动执行（与「执行全部待办」同管线）：Sequential 族零点解锁后
 	// 无需手动扫描；hook 返回即启动（异步执行），已在跑时内部跳过。
 	sch.SetGrowthHook(pn.RunGrowthQueueOnce)
@@ -312,6 +357,10 @@ func main() {
 		GlobalEnabled: cfg.Global.Enabled,
 	})
 
+	// 内置 OmniGate 引擎挂到本服务的 /omni/ 前缀下（同源，面板前端直接调用）。
+	// 供应商配置页保存后由 omniManager 进程内重建运行时，无需重启。
+	omniRoot := omni.Handler()
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go sch.Run(ctx)
@@ -327,7 +376,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:              cfg.Listen,
-		Handler:           h,
+		Handler:           mountRoot(h, omniRoot),
 		ReadHeaderTimeout: 30 * time.Second,
 		// ReadTimeout 覆盖整个请求读取（含 body 上传）：防慢速 body 拖死连接。
 		// 请求体已无网关侧上限（max_body_mb 移除）。缺省 300s（issue #100：旧固定
@@ -348,7 +397,7 @@ func main() {
 		_ = srv.Shutdown(shutdownCtx)
 	}()
 
-	log.Printf("workbuddy2api listening on %s (api_key=%v)，管理面板 http://127.0.0.1%s/panel/", cfg.Listen, cfg.APIKey != "", panelListenPath(cfg.Listen))
+	log.Printf("omnigate-panel listening on %s (api_key=%v)，管理面板 http://127.0.0.1%s/panel/", cfg.Listen, cfg.APIKey != "", panelListenPath(cfg.Listen))
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("http: %v", err)
 	}
@@ -404,6 +453,22 @@ func panelListenPath(listen string) string {
 		}
 	}
 	return listen
+}
+
+// mountRoot 把内置 OmniGate 引擎挂到 /omni/ 前缀下（剥前缀后交给 OmniGate 路由），
+// 其余请求全部交给 WorkBuddy 网关 handler。omni 为 nil 时直接返回 h。
+func mountRoot(h http.Handler, omni http.Handler) http.Handler {
+	if omni == nil {
+		return h
+	}
+	omniStripped := http.StripPrefix("/omni", omni)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/omni" || strings.HasPrefix(r.URL.Path, "/omni/") {
+			omniStripped.ServeHTTP(w, r)
+			return
+		}
+		h.ServeHTTP(w, r)
+	})
 }
 
 // saveConfig 面板保存配置：校验 → 落盘 → 热应用 → 返回需重启的字段列表。
@@ -505,6 +570,8 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 		!newCfg.Schedule.GrowthEnabled)
 	sch.SetBalanceInterval(newCfg.BalanceRefreshInterval)
 	sch.SetIncludeDisabledInTasks(newCfg.Schedule.IncludeDisabledInTasks)
+	// 出站代理（outbound）：热更新面板上游 Transport 的代理（清空闲池即时生效）。
+	up.SetProxy(newCfg.Outbound.ProxyFunc(outbound.TargetWorkbuddy))
 
 	return restartRequiredFields(newCfg), nil
 }

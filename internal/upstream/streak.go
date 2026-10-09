@@ -12,7 +12,7 @@ import (
 	"encoding/json"
 
 	"fmt"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/wuxianggujun/omnigate-panel/internal/auth"
 	"net/http"
 )
 

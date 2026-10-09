@@ -1,7 +1,17 @@
+# 服务名 / 容器名 = omnigate-panel。
+#
+# 旧部署用的是 workbuddy2api / wb2api，本次已全套改名，所以升级时要在旧部署目录里
+# 先 `docker compose down`（停掉旧容器），再 `docker compose up -d --build`。
+# 这是**一次性**动作：auths/ data/ config.json 走的是 bind mount，数据不丢，
+# 旧账号 / state / 配置可直接复用。
+#
+# 注意 compose 的「项目名」默认取本文件所在目录名。请在**旧部署目录**里更新代码
+# （保持目录名不变）；若换了新目录，需把旧的 auths/ data/ config.json 拷过来，
+# 或把下面的挂载改成旧数据的绝对路径。
 services:
-  wb2api:
+  omnigate-panel:
     build: .
-    container_name: workbuddy2api
+    container_name: omnigate-panel
     restart: unless-stopped
     # 容器默认以 app 用户（uid 10001）运行。宿主机挂载目录属主不同会导致
     # 「写入 auths/*.json.tmp 失败 permission denied」，三种解法任选：
@@ -23,3 +33,8 @@ services:
       # 但前提是它能以文件形式写入 —— 挂载目录会挡住这条路径）。
       # 不挂 :ro：面板「配置」页需要写回此文件（保存后热生效）。
       - ./config.json:/app/config.json
+      # OmniGate 引擎的独立配置（Runable / 浣熊 / OpenAI 兼容上游）。
+      # 可选：缺失时面板自动跳过 OmniGate，其余功能照常。先用
+      #   cp omnigate.example.json omnigate.json
+      # 生成后再挂载（同样不挂 :ro，面板可写回）。
+      - ./omnigate.json:/app/omnigate.json

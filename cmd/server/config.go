@@ -12,7 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/prompt"
+	"github.com/wuxianggujun/omnigate-panel/internal/outbound"
+	"github.com/wuxianggujun/omnigate-panel/internal/prompt"
 )
 
 // Config 顶层配置。
@@ -21,6 +22,17 @@ type Config struct {
 	APIKey    string `json:"api_key"`    // 空 = 不鉴权
 	AuthDir   string `json:"auth_dir"`   // ./auths
 	StateFile string `json:"state_file"` // ./data/state.json
+
+	// OmnigateConfig 是内置 OmniGate 引擎（Runable / 浣熊 / 任意 OpenAI 兼容
+	// 上游 + 账号池 + 自动签到）的独立配置文件路径。文件存在时把 OmniGate 的
+	// OpenAI 兼容 API 与浣熊管理接口挂载到本服务的 /omni/ 前缀下；文件不存在
+	// 则跳过（面板其余功能不受影响）。缺省 ./omnigate.json。
+	OmnigateConfig string `json:"omnigate_config"`
+
+	// Outbound 出站代理：命名代理（http/https/socks5）+ 「目标 → 代理」路由。
+	// 目标 "workbuddy" 作用于面板自身上游；"omnigate:<provider>" 作用于内置
+	// OmniGate 的某个供应商。未配置的目标直连。全部热生效（保存即应用）。
+	Outbound outbound.Config `json:"outbound"`
 
 	Panel struct {
 		// PackageDetailLimit 积分构成页单账号默认展示的最近到期包数；<=0 回落 5。
@@ -455,6 +467,13 @@ func (c *Config) normalize() error {
 	var err error
 	if c.Panel.PackageDetailLimit <= 0 {
 		c.Panel.PackageDetailLimit = 5
+	}
+	if c.OmnigateConfig == "" {
+		c.OmnigateConfig = "omnigate.json"
+	}
+	// 出站代理：校验命名/协议/路由引用（非法 fail fast，避免静默直连）。
+	if err := c.Outbound.Normalize(); err != nil {
+		return err
 	}
 	if c.Logging.RequestRetentionDays <= 0 {
 		c.Logging.RequestRetentionDays = 7

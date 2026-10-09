@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OmniGate · 多上游网关</title>
+<style>
+  :root{
+    --bg:#0d1117; --surface:#161b22; --surface-2:#1c2330; --line:#2a3240; --line-soft:#222a36;
+    --ink:#e6edf3; --ink-2:#b6c2cf; --ink-3:#7d8896; --accent:#4c8dff;
+    --ok:#3fb950; --warn:#d29922; --err:#f85149; --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 var(--sans)}
+  a{color:var(--accent);text-decoration:none}
+  .wrap{max-width:1080px;margin:0 auto;padding:22px 18px 60px}
+  header{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:18px}
+  header .logo{font-weight:650;font-size:18px;letter-spacing:.2px}
+  header .tag{font-size:12px;color:var(--ink-3);border:1px solid var(--line);border-radius:999px;padding:2px 9px}
+  header .grow{flex:1}
+  .keybox{display:flex;gap:6px;align-items:center}
+  input,select,textarea{background:var(--surface);border:1px solid var(--line);color:var(--ink);border-radius:8px;padding:7px 10px;font:13px var(--mono);outline:none}
+  input:focus,textarea:focus,select:focus{border-color:var(--accent)}
+  button{background:var(--surface-2);border:1px solid var(--line);color:var(--ink);border-radius:8px;padding:7px 12px;font:550 13px var(--sans);cursor:pointer}
+  button:hover{border-color:var(--accent);color:#fff}
+  button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+  button.primary:hover{filter:brightness(1.08)}
+  button.danger:hover{border-color:var(--err);color:var(--err)}
+  .card{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:16px}
+  .card h2{margin:0 0 12px;font-size:14px;font-weight:600;display:flex;align-items:center;gap:8px}
+  .card h2 .cnt{color:var(--ink-3);font-weight:400;font-size:12px}
+  .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:10px}
+  .prov{background:var(--surface-2);border:1px solid var(--line-soft);border-radius:10px;padding:12px}
+  .prov .t{font-weight:600}
+  .prov .s{font-size:12px;color:var(--ink-3);margin-top:2px}
+  .pill{display:inline-block;font:11px var(--mono);padding:1px 7px;border-radius:999px;border:1px solid var(--line);color:var(--ink-2);margin:1px 2px 0 0}
+  .pill.ok{color:var(--ok);border-color:#1f4a2b}
+  .pill.warn{color:var(--warn);border-color:#4a3c16}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line-soft);vertical-align:middle}
+  th{color:var(--ink-3);font-weight:500;font-size:12px}
+  td .num{font-family:var(--mono)}
+  .empty{color:var(--ink-3);padding:10px 0;font-size:13px}
+  .msg{font-size:12.5px;color:var(--ink-2);min-height:18px;white-space:pre-wrap;word-break:break-all}
+  .msg.err{color:var(--err)} .msg.ok{color:var(--ok)}
+  code{font-family:var(--mono);font-size:12px;background:var(--surface-2);padding:1px 5px;border-radius:5px}
+  .hint{font-size:12px;color:var(--ink-3);margin-top:6px}
+  .sep{height:1px;background:var(--line-soft);margin:12px 0}
+  label.inline{display:flex;flex-direction:column;gap:3px;font-size:12px;color:var(--ink-3)}
+  .fields{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:8px;margin-top:10px}
+  .fields label{display:flex;flex-direction:column;gap:3px;font-size:12px;color:var(--ink-3)}
+  .fields label.full{grid-column:1/-1}
+  .fields input,.fields select,.fields textarea{font-size:12px;width:100%}
+  .accts .acct input{font-size:12px}
+  .subpanel{border:1px solid var(--line);border-radius:10px;padding:12px;margin-top:8px;background:var(--surface-2)}
+  pre{white-space:pre-wrap;word-break:break-all;background:var(--surface-2);border:1px solid var(--line-soft);border-radius:8px;padding:10px;font-family:var(--mono);font-size:12px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <span class="logo">OmniGate</span>
+    <span class="tag">多上游 · 多账号 · OpenAI 兼容</span>
+    <span class="grow"></span>
+    <span class="keybox">
+      <input id="key" type="password" placeholder="面板 API Key" autocomplete="off">
+      <button id="btnSaveKey">保存</button>
+    </span>
+    <a href="/panel/">← 返回主面板</a>
+  </header>
+
+  <div class="card">
+    <h2>上游与账号 <span class="cnt" id="statusCnt"></span></h2>
+    <div class="row" style="margin-bottom:10px">
+      <button id="btnRefresh">刷新</button>
+      <span class="msg" id="statusMsg"></span>
+    </div>
+    <div class="grid" id="providers"></div>
+    <div class="hint">账号来源于 <code>omnigate.json</code>（静态）与网页授权（运行时，落盘 <code>data/omnigate/state.json</code>）。Runable / OpenAI 上游账号在 <code>omnigate.json</code> 里配置。</div>
+  </div>
+
+  <div class="card">
+    <h2>供应商配置 <span class="cnt" id="cfgPath"></span></h2>
+    <div class="hint">在这里增删改上游供应商与账号，保存后<strong>进程内热生效</strong>（写入 <code>omnigate.json</code>，无需重启进程）。类型 <code>runable</code>=办公助手、<code>raccoon</code>=办公小浣熊、<code>openai</code>=任意 OpenAI 兼容上游。</div>
+    <div class="row" style="margin-top:10px">
+      <label class="inline">默认 provider<select id="cfgDefaultProvider"></select></label>
+      <label class="inline">默认模型<input id="cfgDefaultModel" placeholder="留空 = 上游默认" style="width:200px"></label>
+      <label class="inline">模式<select id="cfgMode"><option value="text">text</option><option value="native">native</option></select></label>
+      <label class="inline" style="flex-direction:row;align-items:center;gap:6px;margin-top:16px"><input type="checkbox" id="cfgReasoning" style="width:auto"> 透传 reasoning</label>
+    </div>
+    <div class="sep"></div>
+    <div id="provEditor"></div>
+    <div class="row" style="margin-top:10px">
+      <button id="btnAddProv">+ 添加供应商</button>
+      <button class="primary" id="btnSaveCfg">保存并生效</button>
+      <button id="btnReloadCfg">重新加载</button>
+      <span class="msg" id="cfgMsg"></span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>出站代理 <span class="cnt" id="obCnt"></span></h2>
+    <div class="hint">给面板上游（WorkBuddy）或某个供应商指定出站代理，未指定则直连。支持 <code>http</code>/<code>https</code>/<code>socks5</code>。保存后<strong>热生效</strong>（无需重启），写入 <code>config.json</code> 的 <code>outbound</code> 段。</div>
+    <div class="row" style="margin:10px 0 6px">
+      <button id="btnObAdd">＋ 添加代理</button>
+      <button class="primary" id="btnObSave">保存并热生效</button>
+      <button id="btnObReload">重新载入</button>
+      <span class="msg" id="obMsg"></span>
+    </div>
+
+    <div id="obForm" class="subpanel" style="display:none">
+      <div class="row" style="justify-content:space-between">
+        <strong id="obFormTitle">添加代理</strong>
+        <button class="danger" id="btnObCancel">取消</button>
+      </div>
+      <div class="fields" style="margin-top:8px">
+        <label>名称<input id="obName" placeholder="如 cn-home"></label>
+        <label>地址<input id="obUrl" placeholder="socks5://127.0.0.1:1080 或 http://host:8080"></label>
+        <label>用户名（可空）<input id="obUser" autocomplete="off"></label>
+        <label>密码（可空）<input id="obPass" type="password" autocomplete="off"></label>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <button class="primary" id="btnObFormSave">确定</button>
+        <span class="msg" id="obFormMsg"></span>
+      </div>
+    </div>
+
+    <table>
+      <thead><tr><th>名称</th><th>地址</th><th>认证</th><th>操作</th></tr></thead>
+      <tbody id="obProxies"><tr><td colspan="4" class="empty">暂无代理，点「＋ 添加代理」开始</td></tr></tbody>
+    </table>
+
+    <div class="sep"></div>
+    <div class="hint">按目标选择代理：<code>WorkBuddy</code> 是面板自身上游，其余为 OmniGate 供应商。保存后供应商的代理即时生效。</div>
+    <table>
+      <thead><tr><th>目标</th><th>使用代理</th></tr></thead>
+      <tbody id="obRoutes"></tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>账号管理 · 多账号 <span class="cnt" id="acctCnt"></span></h2>
+    <div class="row" style="margin-bottom:8px">
+      <label class="inline">上游<select id="raccoonProvider"></select></label>
+      <button class="primary" id="btnAuth">＋ 添加账号（网页授权）</button>
+      <button id="btnSetToken">直接粘贴 Token</button>
+      <button id="btnLoadAccts">刷新</button>
+      <button id="btnCheckinAll">一键签到</button>
+    </div>
+
+    <div id="authPanel" class="subpanel" style="display:none">
+      <div class="row" style="justify-content:space-between">
+        <span><strong>网页授权添加账号</strong> <span class="pill" id="authMode"></span></span>
+        <button class="danger" id="btnAuthCancel">取消</button>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <label class="inline" style="flex:1;min-width:220px">账号名（可改）<input id="authLabel" style="width:100%"></label>
+        <button id="btnOpenAuth" style="margin-top:16px">① 打开登录页</button>
+      </div>
+      <div class="hint" style="margin-top:6px">登录后浏览器会跳到 <code>office-raccoon://auth/callback?code=...&amp;state=...</code>（不会真的打开桌面应用）；把整段地址，或只把 <code>code</code> 粘到下面提交即可。可重复添加多个账号。</div>
+      <div class="row" style="margin-top:6px">
+        <input id="callback" style="flex:1;min-width:280px" placeholder="office-raccoon://auth/callback?code=...&state=...">
+        <button class="primary" id="btnSubmitCb">② 提交回调</button>
+      </div>
+      <div class="row" style="margin-top:6px">
+        <input id="authUrl" readonly style="flex:1;min-width:280px" placeholder="授权链接（生成后自动打开）">
+        <button id="btnCopyAuth">复制链接</button>
+      </div>
+      <div class="msg" id="authMsg"></div>
+    </div>
+
+    <div id="tokenPanel" class="subpanel" style="display:none">
+      <div class="row" style="justify-content:space-between">
+        <strong>直接粘贴 Token</strong>
+        <button class="danger" id="btnTokenCancel">取消</button>
+      </div>
+      <div class="fields" style="margin-top:8px">
+        <label>账号名<input id="tokLabel" placeholder="账号名"></label>
+        <label class="full">access_token（JWT）<input id="tokAccess" placeholder="粘贴 access_token"></label>
+        <label class="full">refresh_token（可空）<input id="tokRefresh" placeholder="粘贴 refresh_token"></label>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <button class="primary" id="btnTokenSave">保存账号</button>
+        <span class="msg" id="tokenMsg"></span>
+      </div>
+    </div>
+
+    <div class="sep"></div>
+    <table>
+      <thead><tr><th>账号</th><th>余额</th><th>状态</th><th>操作</th></tr></thead>
+      <tbody id="accts"><tr><td colspan="4" class="empty">暂无账号</td></tr></tbody>
+    </table>
+    <div class="msg" id="acctMsg"></div>
+  </div>
+
+  <div class="card">
+    <h2>模型目录 <span class="cnt" id="modelCnt"></span></h2>
+    <div class="row" style="margin-bottom:10px"><button id="btnLoadModels">刷新模型</button></div>
+    <div class="grid" id="models"></div>
+  </div>
+
+  <div class="card">
+    <h2>OpenAI 兼容调用</h2>
+    <div class="hint">Base URL：<code id="baseUrl"></code>　·　在任意 OpenAI 客户端里把 API Key 填成上面的面板 Key。</div>
+    <pre id="callExample"></pre>
+  </div>
+</div>
+<script src="/panel/omni/omni.js" defer></script>
+</body>
+</html>

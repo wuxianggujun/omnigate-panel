@@ -1,0 +1,124 @@
+// Package openai contains the subset of the OpenAI HTTP schema omnigate speaks,
+// plus a streaming (SSE) emitter.
+package openai
+
+import (
+	"bytes"
+	"encoding/json"
+	"strings"
+)
+
+// Content accepts either a plain string or an array of {type,text} parts and
+// always marshals back to a plain string, matching how most clients read it.
+type Content struct {
+	Text string
+}
+
+// UnmarshalJSON implements json.Unmarshaler.
+func (c *Content) UnmarshalJSON(b []byte) error {
+	b = bytes.TrimSpace(b)
+	if len(b) == 0 || string(b) == "null" {
+		c.Text = ""
+		return nil
+	}
+	if b[0] == '"' {
+		var s string
+		if err := json.Unmarshal(b, &s); err != nil {
+			return err
+		}
+		c.Text = s
+		return nil
+	}
+	var parts []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(b, &parts); err != nil {
+		// Unknown shape: keep the raw text so nothing is silently lost.
+		c.Text = string(b)
+		return nil
+	}
+	var sb strings.Builder
+	for _, p := range parts {
+		if p.Type == "" || p.Type == "text" {
+			sb.WriteString(p.Text)
+		}
+	}
+	c.Text = sb.String()
+	return nil
+}
+
+// MarshalJSON implements json.Marshaler.
+func (c Content) MarshalJSON() ([]byte, error) { return json.Marshal(c.Text) }
+
+// Message is a chat message.
+type Message struct {
+	Role       string     `json:"role"`
+	Content    Content    `json:"content"`
+	Name       string     `json:"name,omitempty"`
+	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string     `json:"tool_call_id,omitempty"`
+}
+
+// ToolFunction carries a tool call's name and JSON-encoded arguments.
+type ToolFunction struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments,omitempty"`
+}
+
+// ToolCall is a function call emitted by (or requested of) the model.
+type ToolCall struct {
+	Index    int          `json:"index,omitempty"`
+	ID       string       `json:"id,omitempty"`
+	Type     string       `json:"type,omitempty"`
+	Function ToolFunction `json:"function"`
+}
+
+// ToolDef describes a callable function.
+type ToolDef struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	Parameters  json.RawMessage `json:"parameters,omitempty"`
+}
+
+// Tool is a tool definition in a chat request.
+type Tool struct {
+	Type     string  `json:"type"`
+	Function ToolDef `json:"function"`
+}
+
+// ChatRequest is the incoming /v1/chat/completions body.
+type ChatRequest struct {
+	Model    string    `json:"model"`
+	Messages []Message `json:"messages"`
+	Stream   bool      `json:"stream"`
+	Tools    []Tool    `json:"tools,omitempty"`
+}
+
+// Model is one entry in GET /v1/models.
+type Model struct {
+	ID            string `json:"id"`
+	Object        string `json:"object"`
+	Created       int64  `json:"created,omitempty"`
+	OwnedBy       string `json:"owned_by,omitempty"`
+	ContextWindow int64  `json:"context_window,omitempty"`
+	MaxTokens     int64  `json:"max_tokens,omitempty"`
+}
+
+// ModelList is the GET /v1/models response.
+type ModelList struct {
+	Object string  `json:"object"`
+	Data   []Model `json:"data"`
+}
+
+// ErrorBody is the OpenAI error envelope.
+type ErrorBody struct {
+	Error ErrorDetail `json:"error"`
+}
+
+// ErrorDetail is the inner error object.
+type ErrorDetail struct {
+	Message string `json:"message"`
+	Type    string `json:"type"`
+	Code    string `json:"code,omitempty"`
+}

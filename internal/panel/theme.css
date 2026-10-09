@@ -1,10 +1,11 @@
-/* theme.css — OmniGate Panel 统一设计系统（主面板 /panel/ 与 OmniGate 子页
- * /panel/omni/ 共用同一份样式，杜绝两页各持一套配色的割裂感）。
+/* theme.css — OmniGate Panel 统一设计系统（主面板 /panel/ 唯一页面；OmniGate 的
+ * 供应商 / 出站代理 / 账号池视图已并入主面板，共用同一份样式，杜绝多套配色的割裂感）。
  *
- * 来源：原主面板 index.html 的内联 <style>，原样抽出为独立文件后由两页 <link> 引入。
+ * 来源：原主面板 index.html 的内联 <style>，原样抽出为独立文件后由页面 <link> 引入。
  * 该文件是设计令牌（:root / [data-theme=light]）与全部通用组件（.shell/.nav/.topbar/
  * .box/.pad/.stat/.tag/.acc/button/input/.fld/.grid2/.hr/.dlg/.tst…）的唯一真源。
- * 文件末尾的 .og-* 段是 OmniGate 子页特有的少量类，同样只使用这里的 token。
+ * 文件末尾的 .og-* 段是 OmniGate 并入主面板后的专用类（供应商 / 出站代理 / 账号授权），
+ * 同样只使用这里的 token。
  */
 /* ── 设计令牌：明暗两套独立色板 ─────────────────────────────────────────
    冷石墨基调（仪表盘语言，非营销页）：底色分层 + 单一靛蓝强调（仅交互），
@@ -588,9 +589,9 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
   .exp-main.err { color: var(--bad); }
 
 /* ══════════════════════════════════════════════════════════════════════
-   OmniGate 子页（/panel/omni/）专用类（.og-*）
+   OmniGate 并入主面板后的专用类（.og-*：上游供应商 / 出站代理 / 账号授权）
    与主面板共用同一套 token 与组件（.shell/.nav/.topbar/.box/.pad/.tag/
-   .acc/button/.fld/.grid2/.hr…）；这里只补该页特有的少量类，全部基于同一套
+   .acc/button/.fld/.grid2/.hr…）；这里只补这些视图特有的少量类，全部基于同一套
    变量，保证同色 / 同圆角 / 同间距——不再有独立配色。
    ══════════════════════════════════════════════════════════════════════ */
 .og-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 10px; }
@@ -613,11 +614,3 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
 .og-hint { font-size: 12px; color: var(--ink-3); margin-top: 6px; }
 .og-hint code, .og-code { font-family: var(--mono); font-size: 12px; background: var(--surface-2); border: 1px solid var(--line-soft); padding: 1px 5px; border-radius: 5px; }
 .og-pre { white-space: pre-wrap; word-break: break-all; background: var(--surface-2); border: 1px solid var(--line-soft); border-radius: 8px; padding: 10px; font-family: var(--mono); font-size: 12px; color: var(--ink-2); margin-top: 8px; }
-.og-keybox { display: flex; gap: 6px; align-items: center; }
-.og-keybox input { width: 190px; padding: 5px 10px; font-size: 12.5px; border-radius: 6px; }
-.og-keybox button { padding: 5px 11px; font-size: 12.5px; border-radius: 6px; }
-.og-hd { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.og-hd .grow { flex: 1; }
-/* OmniGate 子页顶栏：标题 / 元信息 / 按钮不换行——否则会被右侧 Key 输入框
-   挤到 min-content 宽度，中文被折成竖排两行。 */
-.og-topbar h2, .og-topbar .meta, .og-topbar button { white-space: nowrap; }

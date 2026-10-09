@@ -29,15 +29,18 @@
       <li><a href="#models" data-view="models">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M8 1.8 14 5v6L8 14.2 2 11V5z"/><path d="M2 5l6 3.2L14 5M8 8.2v6"/></svg>
         模型与档位</a></li>
+      <li><a href="#providers" data-view="providers">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="8" r="5.8"/><path d="M2.2 8h11.6M8 2.2c1.9 1.9 1.9 9.7 0 11.6M8 2.2c-1.9 1.9-1.9 9.7 0 11.6"/></svg>
+        上游供应商</a></li>
+      <li><a href="#outbound" data-view="outbound">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="3.5" cy="8" r="1.8"/><circle cx="12.5" cy="4" r="1.8"/><circle cx="12.5" cy="12" r="1.8"/><path d="M5.2 7.2 10.8 4.6M5.2 8.8l5.6 2.6"/></svg>
+        出站代理</a></li>
       <li><a href="#config" data-view="config">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.6v1.9M8 12.5v1.9M1.6 8h1.9M12.5 8h1.9M3.5 3.5l1.3 1.3M11.2 11.2l1.3 1.3M12.5 3.5l-1.3 1.3M4.8 11.2l-1.3 1.3"/></svg>
         配置</a></li>
       <li><a href="#logs" data-view="logs">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.5 3.5h11M2.5 8h11M2.5 12.5h7"/></svg>
         运行日志</a></li>
-      <li><a href="/panel/omni/">
-        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="8" r="5.8"/><path d="M2.2 8h11.6M8 2.2c1.9 1.9 1.9 9.7 0 11.6M8 2.2c-1.9 1.9-1.9 9.7 0 11.6"/></svg>
-        OmniGate 网关</a></li>
     </ul>
     <div class="sig">
       <div class="row"><span class="pulse" id="navPulse"></span><span id="navState">连接中</span></div>
@@ -85,6 +88,9 @@
         <header>
           <h3>账号池</h3>
           <span class="grow"></span>
+          <label class="sel-note">来源
+            <select id="accSource"><option value="">全部来源</option><option value="__wb">WorkBuddy</option></select>
+          </label>
           <span class="note" id="accNote"></span>
           <button class="xs" id="btnCheckinAll">全部签到</button>
           <button class="xs" id="btnTravelAll">旅行巡检</button>
@@ -95,7 +101,7 @@
         <table class="acc">
           <thead><tr>
             <th class="mark" aria-hidden="true"></th>
-            <th>账号</th><th>状态</th><th>积分</th>
+            <th>来源</th><th>账号</th><th>状态</th><th>积分</th>
             <th>成功 / 失败</th><th>在途</th><th>用量</th><th>最近成功</th><th class="c-acts"></th>
           </tr></thead>
           <tbody id="accBody"></tbody>
@@ -561,6 +567,164 @@
           <button class="xs" id="btnLogPin">自动滚动：开</button>
         </header>
         <pre id="logBox"></pre>
+      </div>
+    </section>
+
+    <!-- 上游供应商（OmniGate：供应商配置 / 账号授权 / 模型目录 / 调用示例） -->
+    <section class="view" id="view-providers" hidden>
+      <div class="box">
+        <header>
+          <h3>上游供应商 <span class="hint" id="ogCfgPath"></span></h3>
+        </header>
+        <div class="pad">
+          <div class="og-hint" style="margin-top:0">在这里增删改上游供应商与账号，保存后<strong>进程内热生效</strong>（写入 <code>omnigate.json</code>，无需重启）。类型 <code>runable</code>=办公助手、<code>raccoon</code>=办公小浣熊、<code>openai</code>=任意 OpenAI 兼容上游。全部账号也会出现在「账号池」里。</div>
+          <div class="grid3" style="margin-top:12px">
+            <label class="fld"><span class="lb">默认 provider</span><select id="cfgDefaultProvider"></select></label>
+            <label class="fld"><span class="lb">默认模型</span><input id="cfgDefaultModel" placeholder="留空 = 上游默认"></label>
+            <label class="fld"><span class="lb">模式</span><select id="cfgMode"><option value="text">text</option><option value="native">native</option></select></label>
+          </div>
+          <label class="switch"><span class="lb">透传 reasoning</span><input type="checkbox" id="cfgReasoning"></label>
+          <div class="hr"></div>
+          <div id="provEditor"></div>
+          <div class="og-row" style="margin-top:10px">
+            <button id="btnAddProv">+ 添加供应商</button>
+            <button class="primary" id="btnSaveCfg">保存并生效</button>
+            <button id="btnReloadCfg">重新加载</button>
+            <span class="og-msg" id="cfgMsg"></span>
+          </div>
+        </div>
+      </div>
+
+      <div class="box">
+        <header>
+          <h3>上游账号授权 <span class="hint" id="acctCnt"></span></h3>
+        </header>
+        <div class="pad">
+          <div class="og-hint" style="margin-top:0">为 raccoon（办公小浣熊）供应商添加账号：走浏览器授权自动捕获，或直接粘贴 access_token。Runable / OpenAI 供应商的账号在上面的「供应商」卡片里配置。</div>
+          <div class="og-row" style="margin-top:8px">
+            <label style="display:inline-flex;align-items:center;gap:6px;font-size:12.5px;color:var(--ink-3)">上游<select id="raccoonProvider" style="width:auto;min-width:150px"></select></label>
+            <button class="primary" id="btnAuth">＋ 添加账号（网页授权）</button>
+            <button id="btnSetToken">直接粘贴 Token</button>
+            <button id="btnLoadAccts">刷新</button>
+            <button id="btnAcctExport" title="导出全部账号（WorkBuddy + OmniGate，含凭证，请妥善保管）">导出账号</button>
+            <button id="btnAcctImport" title="导入账号包（.json，覆盖两个池）">导入账号</button>
+            <input type="file" id="acctImportFile" accept=".json" hidden>
+          </div>
+
+          <div id="authPanel" class="og-sub" style="display:none">
+            <div class="og-row" style="justify-content:space-between">
+              <span><strong>网页授权添加账号</strong> <span class="tag mute" id="authMode"></span></span>
+              <button class="danger" id="btnAuthCancel">取消</button>
+            </div>
+            <div class="og-row" style="margin-top:8px">
+              <label style="flex:1;min-width:220px;display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--ink-3)">账号名（可改）<input id="authLabel"></label>
+              <button id="btnOpenAuth">① 打开登录页</button>
+            </div>
+            <div class="og-hint">登录后浏览器会跳到 <code>office-raccoon://auth/callback?code=...&amp;state=...</code>（不会真的打开桌面应用）；把整段地址，或只把 <code>code</code> 粘到下面提交即可。可重复添加多个账号。</div>
+            <div class="og-row" style="margin-top:6px">
+              <input id="callback" style="flex:1;min-width:280px" placeholder="office-raccoon://auth/callback?code=...&state=...">
+              <button class="primary" id="btnSubmitCb">② 提交回调</button>
+            </div>
+            <div class="og-row" style="margin-top:6px">
+              <input id="authUrl" readonly style="flex:1;min-width:280px" placeholder="授权链接（生成后自动打开）">
+              <button id="btnCopyAuth">复制链接</button>
+            </div>
+            <div class="og-msg" id="authMsg"></div>
+          </div>
+
+          <div id="tokenPanel" class="og-sub" style="display:none">
+            <div class="og-row" style="justify-content:space-between">
+              <strong>直接粘贴 Token</strong>
+              <button class="danger" id="btnTokenCancel">取消</button>
+            </div>
+            <div class="og-fields">
+              <label>账号名<input id="tokLabel" placeholder="账号名"></label>
+              <label class="og-full">access_token（JWT）<input id="tokAccess" placeholder="粘贴 access_token"></label>
+              <label class="og-full">refresh_token（可空）<input id="tokRefresh" placeholder="粘贴 refresh_token"></label>
+            </div>
+            <div class="og-row" style="margin-top:8px">
+              <button class="primary" id="btnTokenSave">保存账号</button>
+              <span class="og-msg" id="tokenMsg"></span>
+            </div>
+          </div>
+
+          <div class="hr"></div>
+          <div class="tbl-wrap">
+            <table class="acc">
+              <thead><tr><th>账号</th><th>余额</th><th>状态</th><th>操作</th></tr></thead>
+              <tbody id="accts"><tr><td colspan="4" class="empty">暂无账号，点「＋ 添加账号（网页授权）」开始</td></tr></tbody>
+            </table>
+          </div>
+          <div class="og-msg" id="acctMsg"></div>
+        </div>
+      </div>
+
+      <div class="box">
+        <header>
+          <h3>上游模型目录 <span class="hint" id="modelCnt"></span></h3>
+          <span class="grow"></span>
+          <button class="xs" id="btnLoadModels">刷新模型</button>
+        </header>
+        <div class="pad"><div class="og-grid" id="models"></div></div>
+      </div>
+
+      <div class="box">
+        <header><h3>OpenAI 兼容调用</h3></header>
+        <div class="pad">
+          <div class="og-hint" style="margin-top:0">Base URL：<code id="baseUrl"></code>　·　在任意 OpenAI 客户端里把 API Key 填成上面的面板 Key。</div>
+          <pre class="og-pre" id="callExample"></pre>
+        </div>
+      </div>
+    </section>
+
+    <!-- 出站代理（OmniGate：命名代理 + 目标路由） -->
+    <section class="view" id="view-outbound" hidden>
+      <div class="box">
+        <header>
+          <h3>出站代理 <span class="hint" id="obCnt"></span></h3>
+        </header>
+        <div class="pad">
+          <div class="og-hint" style="margin-top:0">给面板上游（WorkBuddy）或某个供应商指定出站代理，未指定则直连。支持 <code>http</code>/<code>https</code>/<code>socks5</code>。保存后<strong>热生效</strong>（无需重启），写入 <code>config.json</code> 的 <code>outbound</code> 段。</div>
+          <div class="og-row" style="margin:10px 0 6px">
+            <button id="btnObAdd">＋ 添加代理</button>
+            <button class="primary" id="btnObSave">保存并热生效</button>
+            <button id="btnObReload">重新载入</button>
+            <span class="og-msg" id="obMsg"></span>
+          </div>
+
+          <div id="obForm" class="og-sub" style="display:none">
+            <div class="og-row" style="justify-content:space-between">
+              <strong id="obFormTitle">添加代理</strong>
+              <button class="danger" id="btnObCancel">取消</button>
+            </div>
+            <div class="og-fields">
+              <label>名称<input id="obName" placeholder="如 cn-home"></label>
+              <label>地址<input id="obUrl" placeholder="socks5://127.0.0.1:1080 或 http://host:8080"></label>
+              <label>用户名（可空）<input id="obUser" autocomplete="off"></label>
+              <label>密码（可空）<input id="obPass" type="password" autocomplete="off"></label>
+            </div>
+            <div class="og-row" style="margin-top:8px">
+              <button class="primary" id="btnObFormSave">确定</button>
+              <span class="og-msg" id="obFormMsg"></span>
+            </div>
+          </div>
+
+          <div class="tbl-wrap">
+            <table class="acc">
+              <thead><tr><th>名称</th><th>地址</th><th>认证</th><th>操作</th></tr></thead>
+              <tbody id="obProxies"><tr><td colspan="4" class="empty">暂无代理，点「＋ 添加代理」开始</td></tr></tbody>
+            </table>
+          </div>
+
+          <div class="hr"></div>
+          <div class="og-hint">按目标选择代理：<code>WorkBuddy</code> 是面板自身上游，其余为 OmniGate 供应商。保存后供应商的代理即时生效。</div>
+          <div class="tbl-wrap">
+            <table class="acc">
+              <thead><tr><th>目标</th><th>使用代理</th></tr></thead>
+              <tbody id="obRoutes"></tbody>
+            </table>
+          </div>
+        </div>
       </div>
     </section>
   </div>

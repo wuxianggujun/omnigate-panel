@@ -10,6 +10,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -292,4 +293,121 @@ func (m *omniManager) ImportAccountsRaw(raw json.RawMessage) (imported, skipped 
 		log.Printf("[omnigate] 账号导入完成：新增/更新 %d 个，跳过 %d 个（已热重载）", imported, skipped)
 	}
 	return imported, skipped, nil
+}
+
+// ---------------------------------------------------------------------------
+// 统一账号池（面板「账号池」视图聚合 WorkBuddy + OmniGate 全部账号）
+// ---------------------------------------------------------------------------
+
+// omniProviderAccounts 是归一化后的「一个 provider 一组账号」视图。
+type omniProviderAccounts struct {
+	Name     string           `json:"name"`
+	Type     string           `json:"type"`
+	Accounts []map[string]any `json:"accounts"`
+}
+
+// Accounts 汇总全部 provider 的账号（归一化），供面板统一账号池展示。
+// withBalance=true 时对支持余额的 provider（raccoon）实时查上游；否则仅内存视图
+// （快，适合每次概览轮询）。账号名/用户 ID 等元数据取自运行时 DynAccount。
+func (m *omniManager) Accounts(ctx context.Context, withBalance bool) (any, error) {
+	rt := m.cur.Load()
+	if rt == nil {
+		return nil, errors.New("omnigate 未启用")
+	}
+	names := rt.gw.ProviderNames()
+	out := make([]omniProviderAccounts, 0, len(names))
+	for _, name := range names {
+		typ := rt.gw.ProviderType(name)
+		meta := map[string]omnistate.DynAccount{}
+		if m.st != nil {
+			for _, d := range m.st.DynAccounts(name) {
+				meta[d.Label] = d
+			}
+		}
+		pa := omniProviderAccounts{Name: name, Type: typ, Accounts: []map[string]any{}}
+		if typ == "raccoon" && withBalance {
+			rows, err := rt.gw.RaccoonAccounts(ctx, name)
+			if err != nil {
+				return nil, err
+			}
+			for _, r := range rows {
+				enrichOmniAccount(r, meta)
+			}
+			pa.Accounts = rows
+		} else {
+			for _, a := range rt.gw.Accounts(name) {
+				item := map[string]any{"label": a.Label, "has_token": a.Cookie != ""}
+				enrichOmniAccount(item, meta)
+				pa.Accounts = append(pa.Accounts, item)
+			}
+		}
+		out = append(out, pa)
+	}
+	return map[string]any{"providers": out}, nil
+}
+
+// enrichOmniAccount 用运行时 DynAccount 元数据补全 name / user_id / org。
+func enrichOmniAccount(item map[string]any, meta map[string]omnistate.DynAccount) {
+	label, _ := item["label"].(string)
+	d, ok := meta[label]
+	if !ok {
+		return
+	}
+	if d.Name != "" {
+		item["name"] = d.Name
+	}
+	if d.UserID != "" {
+		item["user_id"] = d.UserID
+	}
+	if d.OrgName != "" {
+		item["org_name"] = d.OrgName
+	}
+}
+
+// Checkin 触发某 provider 单账号（label 为空 = 该 provider 全账号）签到。
+func (m *omniManager) Checkin(ctx context.Context, provider, label string) (any, error) {
+	rt := m.cur.Load()
+	if rt == nil {
+		return nil, errors.New("omnigate 未启用")
+	}
+	res, err := rt.gw.RaccoonCheckin(ctx, provider, label)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"results": res}, nil
+}
+
+// Remove 移除某 provider 的运行时账号（含 tokens）。
+func (m *omniManager) Remove(provider, label string) (any, error) {
+	rt := m.cur.Load()
+	if rt == nil {
+		return nil, errors.New("omnigate 未启用")
+	}
+	if label == "" {
+		return nil, errors.New("label 不能为空")
+	}
+	removed := rt.gw.RaccoonRemoveAccount(provider, label)
+	return map[string]any{"ok": true, "removed": removed}, nil
+}
+
+// CheckinAll 对全部 raccoon provider 触发全账号签到（面板「全部签到」覆盖 OmniGate）。
+func (m *omniManager) CheckinAll(ctx context.Context) (any, error) {
+	rt := m.cur.Load()
+	if rt == nil {
+		return nil, errors.New("omnigate 未启用")
+	}
+	out := []map[string]any{}
+	for _, name := range rt.gw.ProviderNames() {
+		if rt.gw.ProviderType(name) != "raccoon" {
+			continue
+		}
+		item := map[string]any{"provider": name}
+		if res, err := rt.gw.RaccoonCheckin(ctx, name, ""); err != nil {
+			item["error"] = err.Error()
+		} else {
+			item["results"] = res
+		}
+		out = append(out, item)
+	}
+	return map[string]any{"providers": out}, nil
 }

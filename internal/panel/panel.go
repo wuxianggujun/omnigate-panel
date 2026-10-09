@@ -87,6 +87,15 @@ type Config struct {
 	//（导入即生效）。任一为 nil 时 OmniGate 段不参与迁移。
 	ExportOmniAccounts func() (json.RawMessage, error)
 	ImportOmniAccounts func(raw json.RawMessage) (imported, skipped int, err error)
+
+	// 统一账号池（面板「账号池」视图聚合 WorkBuddy + OmniGate 全部账号）。
+	// OmniAccounts 返回归一化的各 provider 账号（includeBalance=true 时对支持
+	// 余额的 provider 实时查上游）；OmniCheckin/OmniRemove 为单账号运维；
+	// OmniCheckinAll 让「全部签到」也覆盖 OmniGate。任一为 nil 时对应能力跳过。
+	OmniAccounts   func(includeBalance bool) (any, error)
+	OmniCheckin    func(provider, label string) (any, error)
+	OmniRemove     func(provider, label string) (any, error)
+	OmniCheckinAll func() (any, error)
 }
 
 // Panel 管理面板 handler。挂载方式：外层 mux Handle("/panel/", panel)，
@@ -171,15 +180,19 @@ func (p *Panel) Logs() *Ring { return p.logs }
 func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/{$}", p.index)
 	p.mux.HandleFunc("GET /panel/app.js", p.appScript)
-	// 统一设计系统样式表（主面板与 OmniGate 子页共用）。
+	// 统一设计系统样式表（面板唯一页面）。
 	p.mux.HandleFunc("GET /panel/theme.css", p.themeStyle)
-	// OmniGate 子页面（多上游网关：Runable / 浣熊 / OpenAI 兼容上游）。
-	p.mux.HandleFunc("GET /panel/omni/{$}", p.omniIndex)
-	p.mux.HandleFunc("GET /panel/omni/omni.js", p.omniScript)
+	// 旧的 OmniGate 独立子页已并入主面板（供应商/出站代理/账号池统一视图）；
+	// 保留 URL 302 重定向，避免旧书签失效。
+	p.mux.HandleFunc("GET /panel/omni/{$}", p.omniRedirect)
 	p.mux.HandleFunc("GET /panel/api/omni/config", p.withAuth(p.getOmniConfig))
 	p.mux.HandleFunc("POST /panel/api/omni/config", p.withAuth(p.saveOmniConfig))
 	p.mux.HandleFunc("GET /panel/api/omni/outbound", p.withAuth(p.getOutbound))
 	p.mux.HandleFunc("POST /panel/api/omni/outbound", p.withAuth(p.saveOutbound))
+	// 统一账号池：OmniGate 账号（归一化）+ 单账号运维 + 全量签到。
+	p.mux.HandleFunc("GET /panel/api/omni/accounts", p.withAuth(p.omniAccounts))
+	p.mux.HandleFunc("POST /panel/api/omni/account/checkin", p.withAuth(p.omniAccountCheckin))
+	p.mux.HandleFunc("POST /panel/api/omni/account/remove", p.withAuth(p.omniAccountRemove))
 	p.mux.HandleFunc("GET /panel/api/overview", p.withAuth(p.overview))
 	p.mux.HandleFunc("GET /panel/api/logs", p.withAuth(p.logsHandler))
 	p.mux.HandleFunc("GET /panel/api/request_metrics", p.withAuth(p.requestMetrics))
@@ -632,13 +645,25 @@ func (p *Panel) accountRemove(w http.ResponseWriter, r *http.Request) {
 // ---------------------------------------------------------------------------
 
 // checkinAll 手动触发全量签到（异步执行，进度看日志区/账号状态变化）。
+// 覆盖两个来源：WorkBuddy 池（含猫猫旅行）+ OmniGate 各 raccoon 供应商。
 func (p *Panel) checkinAll(w http.ResponseWriter, r *http.Request) {
-	if p.cfg.Scheduler == nil {
+	if p.cfg.Scheduler == nil && p.cfg.OmniCheckinAll == nil {
 		writeErr(w, http.StatusNotImplemented, "scheduler not available")
 		return
 	}
-	go p.cfg.Scheduler.RunCheckinNow()
-	log.Printf("panel: 手动全量签到已触发（含猫猫旅行）")
+	if p.cfg.Scheduler != nil {
+		go p.cfg.Scheduler.RunCheckinNow()
+		log.Printf("panel: 手动全量签到已触发（WorkBuddy，含猫猫旅行）")
+	}
+	if p.cfg.OmniCheckinAll != nil {
+		go func() {
+			if _, err := p.cfg.OmniCheckinAll(); err != nil {
+				log.Printf("panel: OmniGate 全量签到失败: %v", err)
+			} else {
+				log.Printf("panel: OmniGate 全量签到已完成")
+			}
+		}()
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "started": true})
 }
 

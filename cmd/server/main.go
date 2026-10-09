@@ -330,6 +330,24 @@ func main() {
 		pcfg.SaveOmniConfig = omni.Save
 		pcfg.ExportOmniAccounts = omni.ExportAccountsRaw
 		pcfg.ImportOmniAccounts = omni.ImportAccountsRaw
+		// 统一账号池：把 OmniGate 各供应商账号聚合进面板「账号池」视图，并支持
+		// 单账号签到/移除、全量签到。全部走进程内运行时，不经过 /omni/* HTTP。
+		pcfg.OmniAccounts = func(withBalance bool) (any, error) {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+			return omni.Accounts(ctx, withBalance)
+		}
+		pcfg.OmniCheckin = func(provider, label string) (any, error) {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+			return omni.Checkin(ctx, provider, label)
+		}
+		pcfg.OmniRemove = omni.Remove
+		pcfg.OmniCheckinAll = func() (any, error) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+			defer cancel()
+			return omni.CheckinAll(ctx)
+		}
 	}
 	pn := panel.New(pcfg)
 	// 成长任务队列每日自动执行（与「执行全部待办」同管线）：Sequential 族零点解锁后
@@ -611,6 +629,14 @@ func restartRequiredFields(c *Config) []string {
 // 未提交的兄弟键（含用户手写的未知键）保持原样。
 func mergeConfigMaps(cur, incoming map[string]any) map[string]any {
 	for k, v := range incoming {
+		// outbound 是「整段替换」语义：命名代理列表 + 「目标 → 代理」路由是一个整体，
+		// 由「出站代理」卡片一次性提交。若对它做深合并，被删除的代理/路由会残留在旧
+		// 配置里（例如删了代理但路由还引用它 → 校验失败 400）。配置页不提交 outbound，
+		// 所以这里直接覆盖是安全的。
+		if k == "outbound" {
+			cur[k] = v
+			continue
+		}
 		if inMap, ok := v.(map[string]any); ok {
 			if curMap, ok := cur[k].(map[string]any); ok {
 				cur[k] = mergeConfigMaps(curMap, inMap)

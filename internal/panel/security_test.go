@@ -96,10 +96,10 @@ func TestAppScriptServed(t *testing.T) {
 	}
 }
 
-// 统一主题：主面板与 OmniGate 子页必须共用同一份 theme.css（设计令牌 + 组件），
-// 否则两页会各自持一套配色、出现割裂感。同时校验 OmniGate 页不含内联脚本
-// （严格 CSP 下会被拦掉，页面将不可用）。
-func TestUnifiedThemeSharedByBothPages(t *testing.T) {
+// 统一主题 + OmniGate 并入主面板：主面板是唯一页面，必须外链同一份 theme.css
+// （设计令牌 + 组件）且不含内联 <style>/<script>（严格 CSP）。旧的 OmniGate 独立
+// 子页已并入主面板，其 URL 302 到主面板账号池。
+func TestUnifiedThemeAndMergedOmni(t *testing.T) {
 	p := newTestPanel()
 
 	// theme.css 可取到、类型正确、含明暗两套令牌。
@@ -112,37 +112,43 @@ func TestUnifiedThemeSharedByBothPages(t *testing.T) {
 		t.Errorf("theme.css Content-Type=%q want css", ct)
 	}
 	css := rec.Body.String()
-	for _, must := range []string{":root", `[data-theme="light"]`, ".shell", ".box", ".tag"} {
+	for _, must := range []string{":root", `[data-theme="light"]`, ".shell", ".box", ".tag", ".og-hint"} {
 		if !strings.Contains(css, must) {
 			t.Errorf("theme.css missing %q (shared design system)", must)
 		}
 	}
 
-	// 两个页面都要 <link> 引入同一份 theme.css。
-	for _, page := range []string{"/panel/", "/panel/omni/"} {
-		rec := httptest.NewRecorder()
-		p.ServeHTTP(rec, httptest.NewRequest("GET", page, nil))
-		body := rec.Body.String()
-		if !strings.Contains(body, `href="/panel/theme.css"`) {
-			t.Errorf("%s must link /panel/theme.css (unified theme)", page)
-		}
-		if strings.Contains(body, "<style>") {
-			t.Errorf("%s still contains an inline <style> block; theme must come from theme.css", page)
-		}
-		if strings.Contains(body, "<script>\n") || strings.Contains(body, "<script> ") {
-			t.Errorf("%s contains an inline <script> block (blocked by CSP)", page)
+	// 主面板（唯一页面）要 <link> 引入 theme.css，且无内联样式/脚本。
+	rec = httptest.NewRecorder()
+	p.ServeHTTP(rec, httptest.NewRequest("GET", "/panel/", nil))
+	body := rec.Body.String()
+	if !strings.Contains(body, `href="/panel/theme.css"`) {
+		t.Error("/panel/ must link /panel/theme.css (unified theme)")
+	}
+	if strings.Contains(body, "<style>") {
+		t.Error("/panel/ still contains an inline <style> block; theme must come from theme.css")
+	}
+	if strings.Contains(body, "<script>\n") || strings.Contains(body, "<script> ") {
+		t.Error("/panel/ contains an inline <script> block (blocked by CSP)")
+	}
+	if !strings.Contains(body, `data-theme="dark"`) {
+		t.Error("/panel/ must declare data-theme (shared theme tokens)")
+	}
+	// OmniGate 的供应商 / 出站代理视图与统一账号池的来源筛选，都并入主面板。
+	for _, must := range []string{`id="view-providers"`, `id="view-outbound"`, `id="accSource"`, `id="accBody"`} {
+		if !strings.Contains(body, must) {
+			t.Errorf("/panel/ must embed merged OmniGate view markup %q", must)
 		}
 	}
 
-	// OmniGate 页脚本走外部引用 + 与主面板同用 data-theme 令牌。
+	// 旧的 OmniGate 独立子页 URL → 302 到主面板账号池。
 	rec = httptest.NewRecorder()
 	p.ServeHTTP(rec, httptest.NewRequest("GET", "/panel/omni/", nil))
-	body := rec.Body.String()
-	if !strings.Contains(body, `<script src="/panel/omni/omni.js"></script>`) {
-		t.Error("omni.html must load omni.js externally")
+	if rec.Code != http.StatusFound {
+		t.Errorf("/panel/omni/ code=%d want 302 (merged into main panel)", rec.Code)
 	}
-	if !strings.Contains(body, `data-theme="dark"`) {
-		t.Error("omni.html must declare data-theme (shared theme tokens)")
+	if loc := rec.Header().Get("Location"); loc != "/panel/#accounts" {
+		t.Errorf("/panel/omni/ Location=%q want /panel/#accounts", loc)
 	}
 }
 

@@ -19,20 +19,14 @@ var indexHTML []byte
 //go:embed app.js
 var appJS []byte
 
-// theme.css 是主面板与 OmniGate 子页共用的设计系统（设计令牌 + 全部通用组件），
-// 由两页 <link rel="stylesheet" href="/panel/theme.css"> 引入，杜绝两页配色割裂。
+// theme.css 是面板统一设计系统（设计令牌 + 全部通用组件 + OmniGate 并入后的
+// .og-* 专用类），由主面板 <link rel="stylesheet" href="/panel/theme.css"> 引入。
 //
 //go:embed theme.css
 var themeCSS []byte
 
-// OmniGate 子页面（多上游网关：Runable / 浣熊 / 任意 OpenAI 兼容上游）：
-// 与主面板同源、同一把 API Key，复用统一安全头与严格 CSP。
-//
-//go:embed omni.html
-var omniHTML []byte
-
-//go:embed omni.js
-var omniJS []byte
+// OmniGate 子页面（多上游网关）已并入主面板：供应商配置、出站代理、账号池都成为
+// 主面板内的视图，不再有独立页面；旧 URL 由 panel.go 的 omniRedirect 兜底跳转。
 
 // csp 内容安全策略（严格版，无需 unsafe-inline）：
 //   - default-src 'none'        默认全禁，逐个开口
@@ -75,8 +69,7 @@ func (p *Panel) appScript(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(appJS)
 }
 
-// themeStyle 输出统一设计系统样式表（主面板与 OmniGate 子页共用；
-// 同源样式表，CSP style-src 'self' 放行）。
+// themeStyle 输出统一设计系统样式表（同源样式表，CSP style-src 'self' 放行）。
 func (p *Panel) themeStyle(w http.ResponseWriter, r *http.Request) {
 	setSecurityHeaders(w)
 	w.Header().Set("Content-Type", "text/css; charset=utf-8")
@@ -84,18 +77,9 @@ func (p *Panel) themeStyle(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(themeCSS)
 }
 
-// omniIndex 输出 OmniGate 子页面（多上游网关：Runable / 浣熊 / OpenAI 兼容）。
-func (p *Panel) omniIndex(w http.ResponseWriter, r *http.Request) {
+// omniRedirect 旧的 OmniGate 独立子页已并入主面板（供应商 / 出站代理 / 账号池统一
+// 视图）；302 到统一账号池，避免旧书签/外链失效。
+func (p *Panel) omniRedirect(w http.ResponseWriter, r *http.Request) {
 	setSecurityHeaders(w)
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(omniHTML)
-}
-
-// omniScript 输出 OmniGate 子页面逻辑（同源脚本，CSP script-src 'self'）。
-func (p *Panel) omniScript(w http.ResponseWriter, r *http.Request) {
-	setSecurityHeaders(w)
-	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(omniJS)
+	http.Redirect(w, r, "/panel/#accounts", http.StatusFound)
 }

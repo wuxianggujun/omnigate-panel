@@ -23,7 +23,9 @@
 本项目在原 WorkBuddy/CodeBuddy 面板基础上，内置了一个**通用多上游网关 OmniGate**，把
 Runable、办公小浣熊（Raccoon）以及任意 OpenAI 兼容上游统一成一套 OpenAI 兼容 API：
 
-- 面板左侧导航新增 **「OmniGate 网关」** 页（`/panel/omni/`），与主面板同源、共用同一把 API Key。
+- 面板左侧导航新增 **「上游供应商」**（供应商增删改 + 账号授权）与 **「出站代理」** 两个视图；
+  统一账号池（「账号池」页）聚合展示 WorkBuddy 与 OmniGate 全部账号（含「来源」列与来源筛选）。
+  全部与主面板同源、共用同一把 API Key（旧地址 `/panel/omni/` 302 跳转到账号池）。
 - OmniGate 的 API 挂载在 **`/omni/`** 前缀下：`/omni/v1/models`、`/omni/v1/chat/completions`、
   `/omni/admin/raccoon/*`（浏览器授权、账号、余额、签到、移除）、`/omni/healthz`。
 - **浣熊账号**支持浏览器授权登录（生成授权链接 → 粘贴 `office-raccoon://auth/callback?...` 回调），
@@ -41,8 +43,7 @@ copy omnigate.example.json omnigate.json     # 编辑其中的 providers / accou
 go build -o bin/omnigate-panel.exe ./cmd/server
 bin/omnigate-panel.exe -config config.json
 
-# 3) 打开面板： http://127.0.0.1:7863/panel/        （主面板）
-#               http://127.0.0.1:7863/panel/omni/   （OmniGate 网关）
+# 3) 打开面板： http://127.0.0.1:7863/panel/        （统一控制台：账号池 / 上游供应商 / 出站代理 …）
 ```
 
 > OmniGate 引擎的代码位于 `internal/omnigate/`（config / gateway / provider / state / scheduler /

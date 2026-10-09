@@ -1,5 +1,9 @@
 # syntax=docker/dockerfile:1
 FROM golang:1.23-alpine AS build
+# 国内构建：直连 proxy.golang.org 不通，改用 goproxy.cn 镜像；GOSUMDB=off 避免
+# sum.golang.org 校验超时。海外 / CI 如需官方源，删掉下面两行即可。
+ENV GOPROXY=https://goproxy.cn,direct \
+    GOSUMDB=off
 WORKDIR /src
 COPY go.mod ./
 RUN go mod download

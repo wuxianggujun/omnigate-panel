@@ -413,16 +413,28 @@ func enrichOmniAccount(item map[string]any, meta map[string]omnistate.DynAccount
 }
 
 // Checkin 触发某 provider 单账号（label 为空 = 该 provider 全账号）签到。
+// 按 provider 类型分派：raccoon=桌面登录奖励，runable=会话验活 + 积分刷新。
 func (m *omniManager) Checkin(ctx context.Context, provider, label string) (any, error) {
 	rt := m.cur.Load()
 	if rt == nil {
 		return nil, errors.New("omnigate 未启用")
 	}
-	res, err := rt.gw.RaccoonCheckin(ctx, provider, label)
-	if err != nil {
-		return nil, err
+	switch rt.gw.ProviderType(provider) {
+	case "raccoon":
+		res, err := rt.gw.RaccoonCheckin(ctx, provider, label)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"results": res}, nil
+	case "runable":
+		res, err := rt.gw.RunableCheckin(ctx, provider, label)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"results": res}, nil
+	default:
+		return nil, fmt.Errorf("provider %q 不支持签到", provider)
 	}
-	return map[string]any{"results": res}, nil
 }
 
 // Remove 移除某 provider 的运行时账号（含 tokens）。
@@ -438,7 +450,8 @@ func (m *omniManager) Remove(provider, label string) (any, error) {
 	return map[string]any{"ok": true, "removed": removed}, nil
 }
 
-// CheckinAll 对全部 raccoon provider 触发全账号签到（面板「全部签到」覆盖 OmniGate）。
+// CheckinAll 对全部支持签到的 provider 触发全账号签到（面板「全部签到」覆盖 OmniGate）。
+// raccoon 走桌面登录奖励，runable 走会话验活 + 积分刷新。
 func (m *omniManager) CheckinAll(ctx context.Context) (any, error) {
 	rt := m.cur.Load()
 	if rt == nil {
@@ -446,14 +459,22 @@ func (m *omniManager) CheckinAll(ctx context.Context) (any, error) {
 	}
 	out := []map[string]any{}
 	for _, name := range rt.gw.ProviderNames() {
-		if rt.gw.ProviderType(name) != "raccoon" {
-			continue
-		}
 		item := map[string]any{"provider": name}
-		if res, err := rt.gw.RaccoonCheckin(ctx, name, ""); err != nil {
-			item["error"] = err.Error()
-		} else {
-			item["results"] = res
+		switch rt.gw.ProviderType(name) {
+		case "raccoon":
+			if res, err := rt.gw.RaccoonCheckin(ctx, name, ""); err != nil {
+				item["error"] = err.Error()
+			} else {
+				item["results"] = res
+			}
+		case "runable":
+			if res, err := rt.gw.RunableCheckin(ctx, name, ""); err != nil {
+				item["error"] = err.Error()
+			} else {
+				item["results"] = res
+			}
+		default:
+			continue
 		}
 		out = append(out, item)
 	}

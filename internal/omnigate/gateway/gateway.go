@@ -580,53 +580,89 @@ func (g *Gateway) getConv(key string) *conv {
 	return c
 }
 
-// RunRunableCheckin validates every Runable account, refreshes cookies when
-// possible, and records the current credit balance.
-func (g *Gateway) RunRunableCheckin(providerName string) {
+// RunableCheckinOutcome mirrors RaccoonCheckinOutcome so the panel renders
+// runable check-in results with the same shape ({label, success, msg, error}).
+type RunableCheckinOutcome struct {
+	Label   string `json:"label"`
+	Success bool   `json:"success"`
+	Message string `json:"msg"`
+	Error   string `json:"error,omitempty"`
+}
+
+// RunableCheckin verifies the provider's Runable accounts (all, or just the one
+// with the given label), refreshing/persisting cookies when possible and
+// recording the current credit balance. It is the runable counterpart of
+// RaccoonCheckin, so the panel's per-account / 全部签到 buttons work for both.
+func (g *Gateway) RunableCheckin(ctx context.Context, providerName, label string) ([]RunableCheckinOutcome, error) {
 	pcfg := g.cfg.Provider(providerName)
 	if pcfg == nil || pcfg.Type != "runable" {
-		return
+		return nil, fmt.Errorf("provider %q 不是 runable 类型", providerName)
 	}
 	rp, ok := g.providers[providerName].(*runable.Provider)
 	if !ok {
-		return
+		return nil, fmt.Errorf("provider %q 不是 runable 类型", providerName)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-
+	out := []RunableCheckinOutcome{}
+	matched := false
 	for _, acc := range g.accounts[providerName] {
+		if label != "" && acc.Label != label {
+			continue
+		}
+		matched = true
 		cookie := acc.Cookie
 		if cookie == "" && acc.Email != "" && acc.Password != "" {
 			c, err := rp.Client().SignIn(ctx, acc.Email, acc.Password)
 			if err != nil {
-				g.log.Warn("签到：账号「%s」登录失败: %v", acc.Label, err)
+				out = append(out, RunableCheckinOutcome{Label: acc.Label, Error: "登录失败：" + err.Error()})
 				continue
 			}
 			cookie = c
 		}
 		if cookie == "" {
-			g.log.Warn("签到：账号「%s」没有可用凭证", acc.Label)
+			out = append(out, RunableCheckinOutcome{Label: acc.Label, Error: "没有可用凭证，请重新复制 Cookie"})
 			continue
 		}
 		sess := rp.Client().FetchSession(ctx, cookie)
 		if !sess.Alive && acc.Email != "" && acc.Password != "" {
-			c, err := rp.Client().SignIn(ctx, acc.Email, acc.Password)
-			if err == nil {
+			if c, err := rp.Client().SignIn(ctx, acc.Email, acc.Password); err == nil {
 				cookie = c
 				sess = rp.Client().FetchSession(ctx, cookie)
 			}
 		}
 		if !sess.Alive {
-			g.log.Warn("签到：账号「%s」会话无效或已过期", acc.Label)
+			out = append(out, RunableCheckinOutcome{Label: acc.Label, Error: "会话无效或已过期，请重新在 runable.com 登录后复制 Cookie"})
 			continue
 		}
 		acc.Cookie = cookie
 		g.st.SetCookie(providerName, acc.Label, cookie)
-		cr := rp.Client().FetchCredits(ctx, cookie)
-		if cr.OK {
-			g.log.Info("签到/保活 %s「%s」会话有效，积分 %d（日 %d + 月 %d）", providerName, acc.Label, cr.Total, cr.Daily, cr.Monthly)
+		oc := RunableCheckinOutcome{Label: acc.Label, Success: true, Message: "会话有效"}
+		if cr := rp.Client().FetchCredits(ctx, cookie); cr.OK {
+			oc.Message = fmt.Sprintf("会话有效，积分 %d（日 %d + 月 %d）", cr.Total, cr.Daily, cr.Monthly)
+		} else if cr.Error != "" {
+			oc.Message = "会话有效（读取积分失败：" + cr.Error + "）"
+		}
+		out = append(out, oc)
+	}
+	if label != "" && !matched {
+		return nil, fmt.Errorf("账号「%s」不存在", label)
+	}
+	return out, nil
+}
+
+// RunRunableCheckin is the scheduler entrypoint for type "runable" tasks.
+func (g *Gateway) RunRunableCheckin(providerName string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	out, err := g.RunableCheckin(ctx, providerName, "")
+	if err != nil {
+		g.log.Warn("签到：%v", err)
+		return
+	}
+	for _, o := range out {
+		if o.Error != "" {
+			g.log.Warn("签到/保活 %s「%s」%s", providerName, o.Label, o.Error)
 		} else {
-			g.log.Warn("签到：账号「%s」会话有效，但读取积分失败: %s", acc.Label, cr.Error)
+			g.log.Info("签到/保活 %s「%s」%s", providerName, o.Label, o.Message)
 		}
 	}
 }

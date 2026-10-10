@@ -947,11 +947,17 @@ func (p *Provider) ListModels(ctx context.Context) ([]openai.Model, error) {
 // 可用账号。
 func (p *Provider) ListModelsWithAccount(ctx context.Context, acc *provider.Account) ([]openai.Model, error) {
 	if acc == nil || strings.TrimSpace(acc.Cookie) == "" {
+		// 冷启动无账号：退回内置目录（无价格），不算失败。
 		return fallbackModels(p.name), nil
 	}
 	models, err := p.client.FetchModelCatalog(ctx, acc.Cookie)
-	if err != nil || len(models) == 0 {
-		return fallbackModels(p.name), nil
+	if err != nil {
+		// 降级目录 + 错误一起返回：网关优先沿用最近一次成功缓存（保留计费价），
+		// 只有在完全没有缓存时才用这份无价格的内置表。
+		return fallbackModels(p.name), err
+	}
+	if len(models) == 0 {
+		return fallbackModels(p.name), errors.New("raccoon: empty model catalog")
 	}
 	for i := range models {
 		if models[i].OwnedBy == "raccoon" {

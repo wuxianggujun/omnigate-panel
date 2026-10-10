@@ -76,6 +76,10 @@ type modelEntry struct {
 	at     time.Time
 }
 
+// modelCacheTTL 是每个 provider 模型目录的缓存时长。到期后重新拉取，拉取失败则
+// 继续沿用旧结果（见 models）。
+const modelCacheTTL = 10 * time.Minute
+
 type conv struct {
 	chatID     string
 	systemSent bool
@@ -236,10 +240,11 @@ func (g *Gateway) Accounts(name string) []*provider.Account {
 	return g.accounts[name]
 }
 
-// models returns a provider's models, cached for 10 minutes.
+// models returns a provider's models, cached for 10 minutes. 刷新失败时退回「最近一次
+// 成功结果」（哪怕已过期）——目录里带着计费 / 积分价，不能因为账号临时不可用就丢掉。
 func (g *Gateway) models(ctx context.Context, name string) ([]openai.Model, error) {
 	g.modelMu.Lock()
-	if e, ok := g.modelCache[name]; ok && time.Since(e.at) < 10*time.Minute {
+	if e, ok := g.modelCache[name]; ok && time.Since(e.at) < modelCacheTTL {
 		g.modelMu.Unlock()
 		return e.models, nil
 	}
@@ -249,8 +254,10 @@ func (g *Gateway) models(ctx context.Context, name string) ([]openai.Model, erro
 	if prov == nil {
 		return nil, fmt.Errorf("unknown provider %q", name)
 	}
-	var models []openai.Model
-	var err error
+	var (
+		models []openai.Model
+		err    error
+	)
 	if lister, ok := prov.(provider.AccountModelLister); ok {
 		// 需要鉴权的目录（raccoon）：带上一个可用账号才能拿到计费 / 积分价。
 		models, err = lister.ListModelsWithAccount(ctx, g.pickAccount(name))
@@ -258,12 +265,34 @@ func (g *Gateway) models(ctx context.Context, name string) ([]openai.Model, erro
 		models, err = prov.ListModels(ctx)
 	}
 	if err != nil {
+		// 拉取失败：优先沿用最近一次成功结果（保留计费价）；没有缓存时才退回上游
+		// 给的降级目录（如内置模型表，无价格）。降级结果绝不写进缓存，避免把
+		// 带价格的目录覆盖掉。
+		if e, ok := g.cachedModels(name); ok {
+			g.log.Warn("刷新 %s 模型失败，沿用缓存: %v", name, err)
+			return e, nil
+		}
+		if len(models) > 0 {
+			g.log.Warn("刷新 %s 模型失败，使用降级目录: %v", name, err)
+			return models, nil
+		}
 		return nil, err
 	}
 	g.modelMu.Lock()
 	g.modelCache[name] = modelEntry{models: models, at: time.Now()}
 	g.modelMu.Unlock()
 	return models, nil
+}
+
+// cachedModels 返回某 provider 最近一次成功缓存的模型（不判过期）。
+func (g *Gateway) cachedModels(name string) ([]openai.Model, bool) {
+	g.modelMu.Lock()
+	defer g.modelMu.Unlock()
+	e, ok := g.modelCache[name]
+	if !ok || len(e.models) == 0 {
+		return nil, false
+	}
+	return e.models, true
 }
 
 // pickAccount 返回该 provider 的一个可用账号（有凭证），无则 nil。

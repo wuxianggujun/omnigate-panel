@@ -869,6 +869,11 @@ func (p *Provider) Client() *Client { return p.client }
 // SetProxy routes this provider's outbound requests through u (nil = direct).
 func (p *Provider) SetProxy(u *url.URL) { p.client.SetProxy(u) }
 
+// SetProxySelector routes this provider's outbound requests through the proxy pool
+// selected per request by sel (nil = direct). The gateway installs this via a
+// type assertion on the Provider (not the Client), so it must live here.
+func (p *Provider) SetProxySelector(sel outbound.Selector) { p.client.SetProxySelector(sel) }
+
 // ListModels fetches the upstream catalog, falling back to built-in defaults.
 func (p *Provider) ListModels(ctx context.Context) ([]openai.Model, error) {
 	models, err := p.client.FetchModelCatalog(ctx, "")

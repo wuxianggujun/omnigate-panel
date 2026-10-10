@@ -112,6 +112,22 @@ func WithPoolResolver(fn func(providerName string) outbound.Selector) Option {
 	return func(g *Gateway) { g.poolFor = fn }
 }
 
+// 编译期断言：每个可代理的 Provider 都必须在 Provider 本身上实现 SetProxySelector
+// （而不只是它的 Client）。历史上 runable/raccoon 只把该方法实现在 Client 上，导致
+// 网关的类型断言静默失败、代理池从未生效（请求悄悄走了直连）。这里用编译期断言把
+// 这类回归钉死：谁漏了，编译不过。
+var (
+	_ interface {
+		SetProxySelector(outbound.Selector)
+	} = (*runable.Provider)(nil)
+	_ interface {
+		SetProxySelector(outbound.Selector)
+	} = (*raccoon.Provider)(nil)
+	_ interface {
+		SetProxySelector(outbound.Selector)
+	} = (*openaibackend.Provider)(nil)
+)
+
 // New builds a Gateway from config and state.
 func New(cfg *config.Config, st *state.State, log *logx.Logger, opts ...Option) (*Gateway, error) {
 	g := &Gateway{

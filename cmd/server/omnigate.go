@@ -30,6 +30,7 @@ import (
 	omnisrv "github.com/wuxianggujun/omnigate-panel/internal/omnigate/server"
 	omnistate "github.com/wuxianggujun/omnigate-panel/internal/omnigate/state"
 	"github.com/wuxianggujun/omnigate-panel/internal/outbound"
+	"github.com/wuxianggujun/omnigate-panel/internal/reqlog"
 )
 
 // omniRuntime 是一份自洽的 OmniGate 运行时（构建后只读，替换而非修改）。
@@ -54,12 +55,26 @@ type omniManager struct {
 	// outbound 面板出站代理路由（config.json 的 outbound 段）。用于把
 	// "omnigate:<provider>" 解析成代理 URL，在 build 时注入各供应商。
 	outbound outbound.Config
+
+	// reqlog 与 WorkBuddy 网关共用同一份请求记录器（面板「请求记录」页），
+	// 让 OmniGate 的 raccoon/runable 请求也同表可见；clientInfo 报告是否记录
+	// 调用来源（客户端 IP / UA），复用 logging.request_client_info 开关。
+	reqlog     *reqlog.Recorder
+	clientInfo func() bool
 }
 
 // newOmniManager 按 cfg.OmnigateConfig 装配 OmniGate。配置文件缺失/解析失败时
-// 返回未启用的 manager（不报错，面板其余功能照常）。
-func newOmniManager(cfg *Config) *omniManager {
-	m := &omniManager{path: cfg.OmnigateConfig, apiKey: cfg.APIKey, logger: omnilogx.New(300), outbound: cfg.Outbound}
+// 返回未启用的 manager（不报错，面板其余功能照常）。requestLog 为共享请求记录器
+// （可为 nil）；clientInfo 报告是否记录调用来源（可为 nil）。
+func newOmniManager(cfg *Config, requestLog *reqlog.Recorder, clientInfo func() bool) *omniManager {
+	m := &omniManager{
+		path:       cfg.OmnigateConfig,
+		apiKey:     cfg.APIKey,
+		logger:     omnilogx.New(300),
+		outbound:   cfg.Outbound,
+		reqlog:     requestLog,
+		clientInfo: clientInfo,
+	}
 	if m.path == "" {
 		return m
 	}
@@ -108,6 +123,8 @@ func (m *omniManager) build(cfg *omniconfig.Config) (*omniRuntime, error) {
 	sched := omnisched.New(cfg, gw, m.logger)
 	sched.Start()
 	srv := omnisrv.New(cfg, gw, m.logger)
+	// 请求记录：把 OmniGate 的 chat/responses 也记进与 WorkBuddy 同一份 reqlog。
+	srv.SetRequestLog(m.reqlog, m.clientInfo)
 	return &omniRuntime{cfg: cfg, gw: gw, sched: sched, srv: srv}, nil
 }
 

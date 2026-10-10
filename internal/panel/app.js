@@ -1177,11 +1177,15 @@ function reqCreditCell(e) {
 
 /* reqRealmCell 实际调度域：裸名请求经 realm_routing 选号后，这里显示**服务账号**的域
    （国内版/国际版），回答「这次到底走了国内版还是国际版、扣哪套上游的积分」。
-   旧归档条目（该字段上线前写入）没有 realm → 显示 —，而不是误判成国内版。 */
+   旧归档条目（该字段上线前写入）没有 realm → 显示 —，而不是误判成国内版。
+   OmniGate（/omni/*，raccoon/runable）没有 cn/global 之分，退而显示 provider 名，
+   让"所有 AI 请求"在同一张表里也能看出落到了哪个上游。 */
 function reqRealmCell(e) {
   const r = e && e.realm;
-  if (r !== 'cn' && r !== 'global') return '<span class="muted">—</span>';
-  return '<span class="realm-tag">' + realmLabel(r) + '</span>';
+  if (r === 'cn' || r === 'global') return '<span class="realm-tag">' + realmLabel(r) + '</span>';
+  const p = e && e.provider;
+  if (p) return '<span class="realm-tag">' + esc(String(p)) + '</span>';
+  return '<span class="muted">—</span>';
 }
 
 /* reqThinkCell 实际思考程度：网关注入 + 降级后真正发给模型的 reasoning_effort 档位
@@ -1330,7 +1334,8 @@ function requestLogText(e) {
     when,
     String(e && e.status || '—') + ' ' + (outcomeLabel[e && e.outcome] || (e && e.outcome) || '—'),
     e && e.model || '—',
-    e && e.realm ? (e.realm === 'global' ? '国际版' : '国内版') : '',
+    e && e.realm ? (e.realm === 'global' ? '国际版' : '国内版')
+      : (e && e.provider ? String(e.provider) : ''),
     think,
     e && e.account || '—',
     e && e.client_ip || '—',

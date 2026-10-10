@@ -93,6 +93,10 @@ type Event struct {
 	ReasoningTokens int64 `json:"reasoning_tokens,omitempty"`
 	ClientIP        string `json:"client_ip,omitempty"`
 	UserAgent       string `json:"user_agent,omitempty"`
+	// Provider 实际服务的上游供应商名（OmniGate 的 raccoon/runable/deepseek…；
+	// WorkBuddy 网关为空，其"上游"由 Realm 表达）。面板「域/供应商」列在无 realm
+	// 时用它显示请求落到了哪个供应商——让 OmniGate 请求也能和 WorkBuddy 同表可见。
+	Provider string `json:"provider,omitempty"`
 }
 
 // Filter 用于从归档中筛选最近记录。字符串字段一律「包含」匹配（大小写不敏感），

@@ -291,7 +291,7 @@ func main() {
 
 	// 内置 OmniGate 引擎（Runable / 浣熊 / 任意 OpenAI 兼容上游）：先装配，
 	// 好把供应商配置读写器注入面板（保存即热重载，无需重启进程）。
-	omni := newOmniManager(cfg)
+	omni := newOmniManager(cfg, requestLog, func() bool { return live.Load().RecordClientInfo })
 	if omni.Enabled() {
 		defer omni.Stop()
 	}

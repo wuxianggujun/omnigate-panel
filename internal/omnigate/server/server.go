@@ -18,6 +18,7 @@ import (
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/gateway"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/logx"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/openai"
+	"github.com/wuxianggujun/omnigate-panel/internal/reqlog"
 )
 
 const maxBody = 32 << 20 // 32 MiB
@@ -30,6 +31,12 @@ type Server struct {
 	http     *http.Server
 	started  time.Time
 	requests atomic.Int64
+
+	// reqlog 与 WorkBuddy 网关共用同一份请求记录器（面板「请求记录」页）。
+	// nil = 关闭 OmniGate 请求记录。clientInfo 报告是否记录调用来源
+	// （客户端 IP / UA），复用面板 logging.request_client_info 开关。
+	reqlog     *reqlog.Recorder
+	clientInfo func() bool
 }
 
 // New builds a Server.
@@ -45,6 +52,15 @@ func New(cfg *config.Config, gw *gateway.Gateway, log *logx.Logger) *Server {
 
 // Addr returns the listen address.
 func (s *Server) Addr() string { return s.http.Addr }
+
+// SetRequestLog 注入请求记录器（与 WorkBuddy 网关共用同一份）。rec 为 nil 时
+// 关闭 OmniGate 请求记录。clientInfo 报告是否记录调用来源（客户端 IP / UA），
+// 复用面板 logging.request_client_info 开关；nil 视为不记录来源。构造后、开始
+// 服务前调用一次即可。
+func (s *Server) SetRequestLog(rec *reqlog.Recorder, clientInfo func() bool) {
+	s.reqlog = rec
+	s.clientInfo = clientInfo
+}
 
 // ServeHTTP implements http.Handler.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -68,12 +84,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if !s.authorized(w, r) {
 			return
 		}
-		s.handleChat(w, r)
+		s.serveLogged(w, r, s.handleChat)
 	case r.Method == http.MethodPost && (path == "/v1/responses" || path == "/responses"):
 		if !s.authorized(w, r) {
 			return
 		}
-		s.handleResponses(w, r)
+		s.serveLogged(w, r, s.handleResponses)
 	case r.Method == http.MethodGet && path == "/healthz":
 		s.handleHealth(w, r)
 	case r.Method == http.MethodGet && path == "/":
@@ -91,6 +107,117 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeJSON(w, 404, openai.ErrorJSON("not_found", "not found"))
 	}
+}
+
+// omniMountPrefix 是 OmniGate 在本服务里的挂载前缀（见 cmd/server 的
+// http.StripPrefix("/omni", …)）。请求记录里补回前缀，让 /omni/* 路径可读、
+// 且与 WorkBuddy 的 /v1/* 区分开。
+const omniMountPrefix = "/omni"
+
+// serveLogged 包裹一次 chat/responses 调用：注入路由记账、捕获状态码与首字节
+// 时间，出口把结果写进请求记录。未注入记录器时退化为直接调用（零开销）。
+func (s *Server) serveLogged(w http.ResponseWriter, r *http.Request, fn func(http.ResponseWriter, *http.Request)) {
+	if s.reqlog == nil {
+		fn(w, r)
+		return
+	}
+	start := time.Now()
+	id := reqlog.NewRequestID()
+	meta := &gateway.ReqMeta{}
+	r = r.WithContext(gateway.WithReqMeta(r.Context(), meta))
+	lw := &logWriter{ResponseWriter: w, start: start}
+	s.reqlog.Begin()
+	fn(lw, r)
+
+	status := lw.status
+	if status == 0 {
+		status = http.StatusOK
+	}
+	ok := status >= 200 && status < 300
+	ev := reqlog.Event{
+		Time:       start,
+		RequestID:  id,
+		Path:       omniMountPrefix + r.URL.Path,
+		Provider:   meta.Provider,
+		Model:      meta.Model,
+		Account:    meta.Account,
+		Status:     status,
+		OK:         ok,
+		Outcome:    outcomeOf(status),
+		DurationMs: time.Since(start).Milliseconds(),
+		TTFBMs:     lw.ttfbMs(),
+	}
+	if s.clientInfo != nil && s.clientInfo() {
+		ev.ClientIP = clientIP(r)
+		ev.UserAgent = r.UserAgent()
+	}
+	s.reqlog.Record(ev)
+}
+
+// outcomeOf 把 HTTP 状态码映射成请求记录口径（与 WorkBuddy 侧一致：2xx 记
+// success，其余记 http_error）。
+func outcomeOf(status int) string {
+	if status >= 200 && status < 300 {
+		return reqlog.OutcomeSuccess
+	}
+	return reqlog.OutcomeHTTPError
+}
+
+// clientIP 取调用来源 IP：优先反向代理写入的 X-Forwarded-For 首段 / X-Real-IP，
+// 退回 RemoteAddr 主机部分。
+func clientIP(r *http.Request) string {
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		if i := strings.IndexByte(xff, ','); i >= 0 {
+			return strings.TrimSpace(xff[:i])
+		}
+		return strings.TrimSpace(xff)
+	}
+	if xr := r.Header.Get("X-Real-IP"); xr != "" {
+		return strings.TrimSpace(xr)
+	}
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		return host
+	}
+	return r.RemoteAddr
+}
+
+// logWriter 记录响应状态码与首字节时间，供请求记录使用；透传 Flush 以便 SSE
+// 流式输出照常逐帧下发。
+type logWriter struct {
+	http.ResponseWriter
+	start     time.Time
+	status    int
+	firstByte time.Time
+}
+
+func (lw *logWriter) WriteHeader(code int) {
+	if lw.status == 0 {
+		lw.status = code
+	}
+	lw.ResponseWriter.WriteHeader(code)
+}
+
+func (lw *logWriter) Write(b []byte) (int, error) {
+	if lw.status == 0 {
+		lw.status = http.StatusOK
+	}
+	if lw.firstByte.IsZero() {
+		lw.firstByte = time.Now()
+	}
+	return lw.ResponseWriter.Write(b)
+}
+
+func (lw *logWriter) Flush() {
+	if f, ok := lw.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func (lw *logWriter) ttfbMs() int64 {
+	if lw.firstByte.IsZero() {
+		return 0
+	}
+	return lw.firstByte.Sub(lw.start).Milliseconds()
 }
 
 // authorized enforces the optional API-key gate.

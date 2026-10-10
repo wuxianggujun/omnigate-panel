@@ -283,6 +283,11 @@ func (g *Gateway) HandleChat(ctx context.Context, req *openai.ChatRequest, w htt
 	if displayModel == "" {
 		displayModel = provName + "/" + upstreamModel
 	}
+	// 请求记录：回填路由结果（provider + 展示模型名），供 server 出口落盘。
+	if m := ReqMetaFrom(ctx); m != nil {
+		m.Provider = provName
+		m.Model = displayModel
+	}
 
 	id := openai.NewID()
 	created := time.Now().Unix()
@@ -470,6 +475,9 @@ func (g *Gateway) openStream(ctx context.Context, provName string, prov provider
 	// Stateless upstreams (api-key based) need no account pool.
 	if len(accts) == 0 {
 		if prov.Type() == "openai" {
+			if m := ReqMetaFrom(ctx); m != nil {
+				m.Account = "api-key"
+			}
 			return prov.StreamChat(ctx, &provider.Account{}, in)
 		}
 		return nil, fmt.Errorf("provider %q has no accounts configured", provName)
@@ -507,6 +515,10 @@ func (g *Gateway) openStream(ctx context.Context, provName string, prov provider
 			if idx != start {
 				g.st.SetActive(provName, idx)
 				g.log.Info("⇄ 自动切换账号「%s」", acc.Label)
+			}
+			// 请求记录：回填实际服务的账号 label。
+			if m := ReqMetaFrom(ctx); m != nil {
+				m.Account = acc.Label
 			}
 			return stream, nil
 		}

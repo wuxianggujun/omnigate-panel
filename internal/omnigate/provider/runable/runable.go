@@ -177,6 +177,20 @@ type modelInfo struct {
 	Tags          []string `json:"tags"`
 	Created       int64    `json:"created"`
 	OwnedBy       string   `json:"owned_by"`
+
+	// 计费：credits 是每百万 token 消耗的积分（creditsPerMillionTokens=true 时），
+	// pricing 是上游给出的每 token 美元价。
+	Credits                 float64       `json:"credits"`
+	CreditsPerMillionTokens bool          `json:"creditsPerMillionTokens"`
+	Pricing                 *modelPricing `json:"pricing"`
+}
+
+// modelPricing 是 runable 上游的每 token 美元价。
+type modelPricing struct {
+	Input           float64 `json:"input"`
+	Output          float64 `json:"output"`
+	InputCacheRead  float64 `json:"input_cache_read"`
+	InputCacheWrite float64 `json:"input_cache_write"`
 }
 
 // ListModels returns the language models offered by Runable.
@@ -216,20 +230,40 @@ func (c *Client) ListModels(ctx context.Context) ([]openai.Model, error) {
 		if m.Type != "" && m.Type != "language" {
 			continue
 		}
-		owned := m.OwnedBy
-		if owned == "" {
-			owned = "runable"
-		}
-		out = append(out, openai.Model{
-			ID:            m.ID,
-			Object:        "model",
-			Created:       m.Created,
-			OwnedBy:       owned,
-			ContextWindow: m.ContextWindow,
-			MaxTokens:     m.MaxTokens,
-		})
+		out = append(out, runableModel(m))
 	}
 	return out, nil
+}
+
+// runableModel 把上游模型条目映射为 openai.Model（含积分价 / 美元价 / 免费标记）。
+func runableModel(m modelInfo) openai.Model {
+	owned := m.OwnedBy
+	if owned == "" {
+		owned = "runable"
+	}
+	model := openai.Model{
+		ID:            m.ID,
+		Object:        "model",
+		Created:       m.Created,
+		OwnedBy:       owned,
+		ContextWindow: m.ContextWindow,
+		MaxTokens:     m.MaxTokens,
+		IsFree:        m.IsFree,
+	}
+	if m.Credits > 0 {
+		c := m.Credits
+		model.Credits = &c
+		model.CreditUnit = "credits_per_million_tokens"
+	}
+	if m.Pricing != nil {
+		model.Pricing = &openai.ModelPricing{
+			Input:           m.Pricing.Input,
+			Output:          m.Pricing.Output,
+			InputCacheRead:  m.Pricing.InputCacheRead,
+			InputCacheWrite: m.Pricing.InputCacheWrite,
+		}
+	}
+	return model
 }
 
 // Credits is the parsed billing balance.

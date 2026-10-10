@@ -289,6 +289,26 @@ func toInt64Ptr(v any) (int64, bool) {
 	}
 }
 
+// toFloat64Ptr 宽松地把上游 JSON 数值（或数字字符串）解析为 float64。
+func toFloat64Ptr(v any) (float64, bool) {
+	switch t := v.(type) {
+	case float64:
+		return t, true
+	case int64:
+		return float64(t), true
+	case int:
+		return float64(t), true
+	case json.Number:
+		f, err := t.Float64()
+		return f, err == nil
+	case string:
+		f, err := strconv.ParseFloat(strings.TrimSpace(t), 64)
+		return f, err == nil
+	default:
+		return 0, false
+	}
+}
+
 func firstNonEmpty(vals ...string) string {
 	for _, v := range vals {
 		if v != "" {
@@ -798,16 +818,55 @@ func parseCatalog(payload map[string]any) []openai.Model {
 			}
 			seen[id] = true
 			params, _ := entry["params"].(map[string]any)
-			out = append(out, openai.Model{
+			model := openai.Model{
 				ID:            id,
 				Object:        "model",
 				OwnedBy:       "raccoon",
 				ContextWindow: pickInt(entry, params, "context_window", "contextWindow"),
 				MaxTokens:     pickInt(entry, params, "max_tokens", "maxTokens"),
-			})
+			}
+			applyBilling(&model, entry)
+			out = append(out, model)
 		}
 	}
 	return out
+}
+
+// applyBilling 把上游 catalog 条目的 billing_* 字段映射进 openai.Model：
+// 生效倍率（含促销）优先于牌价倍率，单位记为 "multiplier"；原始元数据整体保留。
+func applyBilling(m *openai.Model, entry map[string]any) {
+	mult, hasMult := toFloat64Ptr(entry["billing_multiplier"])
+	eff, hasEff := toFloat64Ptr(entry["billing_effective_multiplier"])
+	switch {
+	case hasEff:
+		m.Credits = &eff
+	case hasMult:
+		m.Credits = &mult
+	}
+	if m.Credits != nil {
+		m.CreditUnit = "multiplier"
+	}
+	b := &openai.ModelBilling{
+		Category: strOf(entry, "billing_category"),
+		Status:   strOf(entry, "billing_status"),
+		Note:     strOf(entry, "billing_status_note"),
+	}
+	if hasMult {
+		b.Multiplier = mult
+	}
+	if hasEff {
+		b.Effective = eff
+	}
+	if ds, ok := entry["billing_discounts"].([]any); ok {
+		for _, d := range ds {
+			if dm, ok := d.(map[string]any); ok {
+				b.Discounts = append(b.Discounts, dm)
+			}
+		}
+	}
+	if b.Category != "" || b.Status != "" || b.Note != "" || hasMult || hasEff || len(b.Discounts) > 0 {
+		m.Billing = b
+	}
 }
 
 func pickInt(entry, params map[string]any, keys ...string) int64 {

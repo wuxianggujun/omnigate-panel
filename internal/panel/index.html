@@ -252,6 +252,21 @@
         </table>
         </div>
       </div>
+
+      <div class="box">
+        <header>
+          <h3>OmniGate 模型 <span class="hint">raccoon / runable：上游目录里的积分消耗价（计费倍率 / 每百万 token 积分）</span></h3>
+          <span class="grow"></span>
+          <span class="note" id="omNote"></span>
+          <button class="xs" id="btnOmModels">刷新</button>
+        </header>
+        <div class="tbl-wrap">
+          <table class="acc md">
+            <thead><tr><th class="mark" aria-hidden="true"></th><th>模型</th><th>来源</th><th>积分消耗价</th><th>上下文长度</th><th>最大输出</th></tr></thead>
+            <tbody id="omBody"></tbody>
+          </table>
+        </div>
+      </div>
     </section>
 
     <!-- 积分构成 -->

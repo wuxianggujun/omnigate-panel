@@ -110,7 +110,10 @@ type ChatRequest struct {
 	StreamOptions *StreamOptions `json:"stream_options,omitempty"`
 }
 
-// Model is one entry in GET /v1/models.
+// Model is one entry in GET /v1/models. The credit/price fields below are
+// non-standard extensions: they are omitted when the upstream doesn't report
+// them, and standard OpenAI clients ignore unknown fields, so compatibility is
+// unaffected.
 type Model struct {
 	ID            string `json:"id"`
 	Object        string `json:"object"`
@@ -118,6 +121,35 @@ type Model struct {
 	OwnedBy       string `json:"owned_by,omitempty"`
 	ContextWindow int64  `json:"context_window,omitempty"`
 	MaxTokens     int64  `json:"max_tokens,omitempty"`
+
+	// Credits 是统一后的「积分消耗价」：raccoon 为计费倍率（×），runable 为每
+	// 百万 token 消耗的积分。CreditUnit 解释单位。
+	Credits    *float64 `json:"credits,omitempty"`
+	CreditUnit string   `json:"credit_unit,omitempty"` // "multiplier" | "credits_per_million_tokens"
+	// IsFree 上游标记的当前免费模型（runable）。
+	IsFree bool `json:"is_free,omitempty"`
+	// Pricing 上游给出的每 token 美元价（runable）。
+	Pricing *ModelPricing `json:"pricing,omitempty"`
+	// Billing 上游原始计费元数据（raccoon）。
+	Billing *ModelBilling `json:"billing,omitempty"`
+}
+
+// ModelPricing 是上游给出的每 token 美元价（runable）。
+type ModelPricing struct {
+	Input           float64 `json:"input,omitempty"`
+	Output          float64 `json:"output,omitempty"`
+	InputCacheRead  float64 `json:"input_cache_read,omitempty"`
+	InputCacheWrite float64 `json:"input_cache_write,omitempty"`
+}
+
+// ModelBilling 是上游原始计费元数据（raccoon 的 billing_* 字段）。
+type ModelBilling struct {
+	Category   string           `json:"category,omitempty"`
+	Status     string           `json:"status,omitempty"`
+	Note       string           `json:"status_note,omitempty"`
+	Multiplier float64          `json:"multiplier,omitempty"`
+	Effective  float64          `json:"effective_multiplier,omitempty"`
+	Discounts  []map[string]any `json:"discounts,omitempty"`
 }
 
 // ModelList is the GET /v1/models response.

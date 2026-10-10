@@ -12,6 +12,8 @@ let refTimer = null;
 /* 视图级筛选状态（模块级声明放在文件顶部，避免顶层 go() 早于声明执行时踩 TDZ）。 */
 let mdFilter = { q: '', realm: '', cap: '', effort: '', promo: '', sort: 'default' };
 let mdAll = [], mdProbes = {}, mdProbeOf = () => undefined;
+// OmniGate（raccoon / runable）模型目录：含上游给出的积分消耗价。
+let omAll = [];
 let reqFilter = { q: '', outcome: '', provider: '' };
 let reqEntries = [];
 let usDim = 'account', usCreditDim = 'account', usSort = 'total';
@@ -421,7 +423,11 @@ function go(v) {
   document.querySelectorAll('.view').forEach(s => s.hidden = s.id !== 'view-' + v);
   document.querySelectorAll('.nav a').forEach(a => a.classList.toggle('on', a.dataset.view === v));
   $('ttl').textContent = TITLES[v];
-  if (v === 'models') { if (!$('mdBody').children.length) loadModels(); loadRealmRouting(); }
+  if (v === 'models') {
+    if (!$('mdBody').children.length) loadModels();
+    if ($('omBody') && !$('omBody').children.length) loadOmniModels();
+    loadRealmRouting();
+  }
   if (v === 'providers') loadOmniConfig();
   if (v === 'outbound') loadOutbound();
   if (v === 'config') loadConfig();
@@ -3965,6 +3971,30 @@ async function removeOmniAccountFromConfig(provider, label) {
 }
 
 /* ── 上游模型目录 ── */
+
+/* omniPriceText 把 OmniGate 模型的价格扩展字段格式化成一行：
+   raccoon = 计费倍率（×N），runable = 每百万 token 消耗的积分 + 免费标记 + 美元价。
+   上游没给价格时返回空串（不编造）。 */
+function omniPriceText(m) {
+  const bits = [];
+  if (m.credits != null) {
+    if (m.credit_unit === 'multiplier') bits.push('×' + m.credits + ' 倍率');
+    else if (m.credit_unit === 'credits_per_million_tokens') bits.push(m.credits + ' 积分 / 1M token');
+    else bits.push(String(m.credits));
+  }
+  if (m.is_free) bits.push('免费');
+  if (m.pricing) {
+    const per1m = v => (v == null ? '' : '$' + (v * 1e6).toFixed(2));
+    const inp = per1m(m.pricing.input), out = per1m(m.pricing.output);
+    if (inp && out) bits.push('in ' + inp + ' / out ' + out + ' / 1M');
+  }
+  if (m.billing && m.billing.multiplier != null && m.billing.effective_multiplier != null &&
+      m.billing.multiplier !== m.billing.effective_multiplier) {
+    bits.push('牌价 ×' + m.billing.multiplier);
+  }
+  return bits.join(' · ');
+}
+
 async function loadUpstreamModels() {
   const box = $('models');
   if (!box) return;
@@ -3973,10 +4003,51 @@ async function loadUpstreamModels() {
     const list = (data && data.data) || [];
     $('modelCnt').textContent = list.length + ' 个模型';
     if (!list.length) { box.innerHTML = '<div class="empty">暂无模型</div>'; return; }
-    box.innerHTML = list.map(m => '<div class="og-card"><div class="og-t">' + esc(m.id) + '</div><div class="og-s">' + esc(m.owned_by || '') + '</div></div>').join('');
+    box.innerHTML = list.map(m => {
+      const sub = [];
+      if (m.owned_by) sub.push(esc(m.owned_by));
+      const price = omniPriceText(m);
+      if (price) sub.push(esc(price));
+      return '<div class="og-card"><div class="og-t">' + esc(m.id) + '</div><div class="og-s">' + sub.join(' · ') + '</div></div>';
+    }).join('');
   } catch (e) {
     box.innerHTML = '<div class="empty">' + esc(e.message) + '</div>';
   }
+}
+
+/* ── OmniGate 模型目录（raccoon / runable，含积分消耗价）── */
+async function loadOmniModels() {
+  const tb = $('omBody');
+  if (!tb) return;
+  tb.innerHTML = '<tr><td colspan="6"><div class="empty">正在向上游查询…</div></td></tr>';
+  try {
+    const data = await apiAbs('/omni/v1/models');
+    omAll = (data && data.data) || [];
+    if ($('omNote')) $('omNote').textContent = omAll.length ? omAll.length + ' 个模型' : '上游未返回模型';
+    renderOmniModels();
+  } catch (e) {
+    omAll = [];
+    if ($('omNote')) $('omNote').textContent = '';
+    tb.innerHTML = '<tr><td colspan="6"><div class="empty">' + esc(e.message) + '</div></td></tr>';
+  }
+}
+
+function renderOmniModels() {
+  const tb = $('omBody');
+  if (!tb) return;
+  if (!omAll.length) {
+    tb.innerHTML = '<tr><td colspan="6"><div class="empty">上游未返回模型</div></td></tr>';
+    return;
+  }
+  tb.innerHTML = omAll.map(m => {
+    const price = omniPriceText(m) || '—';
+    return '<tr><td class="mark" aria-hidden="true"><i></i></td>' +
+      '<td class="who"><div class="nm">' + esc(m.id) + '</div></td>' +
+      '<td>' + esc(m.owned_by || '—') + '</td>' +
+      '<td class="num">' + esc(price) + '</td>' +
+      '<td class="num">' + (m.context_window ? fmtK(m.context_window) : '—') + '</td>' +
+      '<td class="num">' + (m.max_tokens ? fmtK(m.max_tokens) : '—') + '</td></tr>';
+  }).join('');
 }
 
 /* ── 出站代理（命名代理 + 目标路由；保存即热生效） ── */
@@ -4188,6 +4259,7 @@ async function saveOutbound() {
   on('btnOgGoProv', () => { closeAdd(); go('providers'); history.replaceState(null, '', '#providers'); });
   on('addSource', switchAddSource, 'change');
   on('btnLoadModels', loadUpstreamModels);
+  on('btnOmModels', loadOmniModels);
   // 出站代理
   on('btnObAdd', () => obShowForm());
   on('btnObCancel', obCancelForm);

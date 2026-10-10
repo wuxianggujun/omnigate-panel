@@ -693,21 +693,31 @@ func (g *Gateway) RunableVerify(ctx context.Context, providerName, email, passwo
 	if !ok {
 		return nil, fmt.Errorf("provider %q 不是 runable 类型", providerName)
 	}
-	cookie = normalizeRunableCookie(cookie)
 	email = strings.TrimSpace(email)
-	if cookie == "" && (email == "" || password == "") {
+	candidates := runableCookieCandidates(cookie)
+	if len(candidates) == 0 && (email == "" || password == "") {
 		return nil, fmt.Errorf("请粘贴 session_token（Cookie）")
 	}
 	lctx, cancel := context.WithTimeout(ctx, 40*time.Second)
 	defer cancel()
-	if cookie == "" {
+	if len(candidates) == 0 {
 		c, err := rp.Client().SignIn(lctx, email, password)
 		if err != nil {
 			return nil, err
 		}
-		cookie = c
+		candidates = []string{c}
 	}
-	sess := rp.Client().FetchSession(lctx, cookie)
+	// runable 用 better-auth，真实 Cookie 名是 __Secure-better-auth.session_token；
+	// 用户往往只复制「值」，所以裸值要依次试真实名，命中哪个就用哪个（并把命中的
+	// 完整 Cookie 头回写，供后续聊天直接使用）。
+	var sess runable.Session
+	cookie = ""
+	for _, cand := range candidates {
+		if s := rp.Client().FetchSession(lctx, cand); s.Alive {
+			sess, cookie = s, cand
+			break
+		}
+	}
 	if !sess.Alive {
 		return nil, fmt.Errorf("会话无效或已过期：请重新在 runable.com 登录后复制 session_token")
 	}
@@ -725,18 +735,26 @@ func (g *Gateway) RunableVerify(ctx context.Context, providerName, email, passwo
 	return out, nil
 }
 
-// normalizeRunableCookie 把用户粘贴的内容规范成可用的 Cookie 头：
-//   - 只给 session_token 的值（无 "="）→ 补 "session_token="；
-//   - 已含 "session_token=" 或整段 Cookie 头 → 原样返回。
-func normalizeRunableCookie(raw string) string {
+// runableCookieCandidates 把用户粘贴的内容展开成候选 Cookie 头，按可能性排序：
+//   - 已含 "=" → 视为完整 Cookie（`名称=值` 或整段 Cookie 头），原样返回；
+//   - 只给值（无 "="）→ 依次尝试 better-auth 的真实 Cookie 名。
+//
+// runable 的会话 Cookie 实测名为 `__Secure-better-auth.session_token`（better-auth
+// 在生产 https 下加的 `__Secure-` 前缀）；只写 `session_token` 会被服务端判为未登录，
+// 所以裸值必须优先补真实名，否则「粘贴值」这条最常用的路径会失败。
+func runableCookieCandidates(raw string) []string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
-		return ""
+		return nil
 	}
 	if strings.Contains(raw, "=") {
-		return raw
+		return []string{raw}
 	}
-	return "session_token=" + raw
+	return []string{
+		"__Secure-better-auth.session_token=" + raw,
+		"better-auth.session_token=" + raw,
+		"session_token=" + raw,
+	}
 }
 
 // LastCheckin returns when a named check-in task last ran.

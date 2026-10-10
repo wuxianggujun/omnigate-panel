@@ -895,18 +895,18 @@
         </div>
       </div>
 
-      <!-- OmniGate · runable：浏览器登录（在浏览器登录后复制 session_token） -->
+      <!-- OmniGate · runable：浏览器登录（在浏览器登录后复制 __Secure-better-auth.session_token） -->
       <div id="addTabOgCreds" class="tab-panel" hidden>
         <div class="og-fields">
           <label>账号名（唯一）<input id="ogAcctLabel" placeholder="如 runable-1"></label>
         </div>
         <div class="og-hint">runable 只支持 <b>Google / Facebook</b> 登录（没有邮箱密码），且登录后的会话是 <code>api.runable.com</code> 上的 <b>httpOnly Cookie</b>——网页读不到、也没有跳转授权，所以面板无法自动抓取，只能手动复制一次：</div>
-        <div class="og-hint" style="margin-top:6px">① 点「打开 runable 登录页」，用 <b>Google</b> 登录；<br>② 按 <b>F12</b> → <b>Application（应用）</b> → <b>Cookies</b> → <code>https://api.runable.com</code>，复制 <code>session_token</code> 的值；<br>③ 粘到下面，点「保存并校验」。</div>
+        <div class="og-hint" style="margin-top:6px">① 点「打开 runable 登录页」，用 <b>Google</b> 登录；<br>② 按 <b>F12</b> → <b>Application（应用）</b> → <b>Cookies</b> → <code>https://runable.com</code>，找到 <code>__Secure-better-auth.session_token</code>（列表里显示为 <code>_Secure-better-auth…</code>，特征是 <b>HttpOnly ✓</b>、域 <code>.runable.com</code>），复制它的<b>值</b>；<br>③ 粘到下面，点「保存并校验」。</div>
         <div class="og-row" style="margin-top:8px">
           <button id="btnOgOpenLogin">打开 runable 登录页</button>
         </div>
         <div class="og-row" style="margin-top:8px">
-          <input id="ogAcctCookie" style="flex:1;min-width:280px" placeholder="粘贴 session_token 的值（或 session_token=...）">
+          <input id="ogAcctCookie" style="flex:1;min-width:280px" placeholder="粘贴 __Secure-better-auth.session_token 的值（或整段 名称=值）">
         </div>
         <div class="og-row" style="margin-top:8px">
           <button class="primary" id="btnOgCredsSave">保存并校验</button>

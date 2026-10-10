@@ -3794,7 +3794,7 @@ async function loginOgCreds() {
   const label = $('ogAcctLabel').value.trim();
   const cookie = $('ogAcctCookie').value.trim();
   if (!label) { ogMsg('ogCredsMsg', '请填写账号名', 'err'); return; }
-  if (!cookie) { ogMsg('ogCredsMsg', '请粘贴 session_token', 'err'); return; }
+  if (!cookie) { ogMsg('ogCredsMsg', '请粘贴 __Secure-better-auth.session_token 的值', 'err'); return; }
   const btn = $('btnOgCredsSave');
   const oldText = btn ? btn.textContent : '';
   if (btn) { btn.disabled = true; btn.textContent = '校验中…'; }

@@ -26,6 +26,7 @@ let omniCfg = null;              // OmniGate 供应商配置（/panel/api/omni/c
 let omniCfgPath = '';
 let obState = { proxies: [], routes: {} };
 let obEditIdx = -1;
+let addSource = '__wb';           // 「添加账号」当前来源：'__wb' 或 OmniGate provider 名
 
 const $ = id => document.getElementById(id);
 
@@ -463,7 +464,7 @@ function renderAccountRows() {
   const ogCount = omniProvs.reduce((a, p) => a + ((p.accounts || []).length), 0);
   if (!wbList.length && !ogCount) {
     tb.innerHTML = '<tr><td colspan="10"><div class="empty"><div class="big">这里还没有账号</div>' +
-      (f === '' ? '点击右上角「添加账号」登录 WorkBuddy；或到「上游供应商」添加 OmniGate 账号' : '当前来源没有账号') +
+      (f === '' ? '点击右上角「添加账号」，在弹窗里选择来源（WorkBuddy 或任一上游供应商）即可添加' : '当前来源没有账号') +
       '</div></td></tr>';
     return;
   }
@@ -579,8 +580,8 @@ function ogRowHtml(p, a) {
   else balHtml = '<span style="color:var(--ink-3)">—</span>';
   const acts = p.type === 'raccoon'
     ? '<button class="xs ghost" data-src="omni" data-a="ogcheckin" data-prov="' + esc(p.name) + '" data-label="' + esc(label) + '">签到</button>' +
-      '<button class="xs ghost danger" data-src="omni" data-a="ogremove" data-prov="' + esc(p.name) + '" data-label="' + esc(label) + '">移除</button>'
-    : '<span style="color:var(--ink-3);font-size:11.5px">配置账号</span>';
+      '<button class="xs ghost danger" data-src="omni" data-a="ogremove" data-type="raccoon" data-prov="' + esc(p.name) + '" data-label="' + esc(label) + '">移除</button>'
+    : '<button class="xs ghost danger" data-src="omni" data-a="ogremove" data-type="' + esc(p.type || '') + '" data-prov="' + esc(p.name) + '" data-label="' + esc(label) + '">移除</button>';
   return '<tr title="' + esc(p.name + ' / ' + label) + '">' +
     '<td class="mark" aria-hidden="true"><i></i></td>' +
     '<td><span class="tag mute">' + esc(p.name) + '</span><div class="id">' + esc(p.type || '') + '</div></td>' +
@@ -705,7 +706,12 @@ $('accBody').addEventListener('click', async ev => {
         const results = (r && r.results) || [];
         toast(results.map(x => x.label + '：' + (x.error ? ('失败 ' + x.error) : ((x.success ? '成功 ' : '未成功 ') + (x.msg || '')))).join('；') || '签到完成', 'ok');
       } else if (a === 'ogremove') {
-        await api('omni/account/remove', { method: 'POST', body: JSON.stringify({ provider: prov, label }) });
+        if (b.dataset.type && b.dataset.type !== 'raccoon') {
+          // runable / openai 等账号是 omnigate.json 静态配置，须改配置后热生效。
+          await removeOmniAccountFromConfig(prov, label);
+        } else {
+          await api('omni/account/remove', { method: 'POST', body: JSON.stringify({ provider: prov, label }) });
+        }
         toast('已移除 ' + label, 'ok');
       }
     } catch (e) { toast(e.message, 'err'); }
@@ -1504,29 +1510,73 @@ if ($('paccBox')) {
   });
 }
 
-/* ── 添加账号 ─────────────────────────────────────────────────────── */
-function openAdd() {
+/* ── 添加账号（来源驱动：WorkBuddy / OmniGate 供应商） ─────────────── */
+// addSourceType 返回某来源的供应商类型（'raccoon' / 'runable' / 'openai'…）。
+function addSourceType(name) {
+  const p = (lastOmni || []).find(x => x.name === name);
+  return p ? (p.type || '') : '';
+}
+// addTabsForSource 返回该来源可用的标签页 [[key, label], ...]。
+function addTabsForSource(src) {
+  if (src === '__wb') return [['login', '浏览器登录'], ['import', '导入 cockpit'], ['bundle', '导入账号包']];
+  const t = addSourceType(src);
+  if (t === 'raccoon') return [['ogauth', '网页授权'], ['ogtoken', '粘贴 Token']];
+  if (t === 'runable') return [['ogcreds', '账号密码']];
+  return [['ognone', '说明']];
+}
+const ADD_PANELS = {
+  login: 'addTabLogin', import: 'addTabImport', bundle: 'addTabBundle',
+  ogauth: 'addTabOgAuth', ogtoken: 'addTabOgToken', ogcreds: 'addTabOgCreds', ognone: 'addTabOgNone',
+};
+async function openAdd() {
+  // 来源列表依赖 OmniGate 账号聚合；首次打开若尚未加载则先取一次。
+  if (!lastOmni || !lastOmni.length) {
+    try { lastOmni = await loadOmniAccounts(); } catch (e) { /* 无 OmniGate 时忽略 */ }
+  }
   $('addVeil').classList.add('on');
-  // 重置到登录标签
-  switchAddTab('login');
+  const sel = $('addSource');
+  const opts = ['<option value="__wb">WorkBuddy</option>'];
+  (lastOmni || []).forEach(p => opts.push('<option value="' + esc(p.name) + '">' + esc(p.name) + ' · ' + esc(p.type || '') + '</option>'));
+  sel.innerHTML = opts.join('');
+  sel.value = '__wb';
+  addSource = '__wb';
+  // 重置 WorkBuddy 登录面板
   $('addPick').hidden = false;
   $('addLoad').hidden = true; $('addReady').hidden = true;
   $('addDone').hidden = true; $('addErr').hidden = true;
   $('importDone').hidden = true; $('importErr').hidden = true;
   $('bundleDone').hidden = true; $('bundleErr').hidden = true;
-  $('btnCopyUrl').hidden = true; $('btnOpenUrl').hidden = true;
-  $('btnStartLogin').hidden = false; $('btnStartLogin').disabled = false;
   stopPoll();
+  loginState = null;
+  rebuildAddTabs();
+}
+function switchAddSource() {
+  addSource = $('addSource').value || '__wb';
+  stopPoll(); loginState = null;
+  rebuildAddTabs();
+}
+function rebuildAddTabs() {
+  const tabs = addTabsForSource(addSource);
+  $('addTabs').innerHTML = tabs.map(([k, label], i) =>
+    '<button class="tab' + (i === 0 ? ' on' : '') + '" data-tab="' + k + '">' + esc(label) + '</button>').join('');
+  $('addTabs').querySelectorAll('.tab').forEach(b => { b.onclick = () => switchAddTab(b.dataset.tab); });
+  switchAddTab(tabs[0][0]);
 }
 function switchAddTab(tab) {
   document.querySelectorAll('#addTabs .tab').forEach(b => b.classList.toggle('on', b.dataset.tab === tab));
-  $('addTabLogin').hidden = tab !== 'login';
-  $('addTabImport').hidden = tab !== 'import';
-  $('addTabBundle').hidden = tab !== 'bundle';
+  Object.keys(ADD_PANELS).forEach(k => { const el = $(ADD_PANELS[k]); if (el) el.hidden = (k !== tab); });
+  // 底部按钮只服务 WorkBuddy 浏览器登录
+  const wbLogin = addSource === '__wb' && tab === 'login';
+  $('btnStartLogin').hidden = !wbLogin || !!loginState;
+  $('btnStartLogin').disabled = false;
+  $('btnCopyUrl').hidden = !(wbLogin && !!loginState);
+  $('btnOpenUrl').hidden = !(wbLogin && !!loginState);
+  // 预填 OmniGate 账号名
+  if (tab === 'ogauth' && $('authLabel')) $('authLabel').value = ogNextLabel();
+  if (tab === 'ogtoken' && $('tokLabel')) $('tokLabel').value = ogNextLabel();
+  if (tab === 'ogcreds' && $('ogAcctLabel')) $('ogAcctLabel').value = ogNextLabel();
+  ogMsg('authMsg', ''); ogMsg('tokenMsg', ''); ogMsg('ogCredsMsg', '');
 }
-document.querySelectorAll('#addTabs .tab').forEach(b => {
-  b.onclick = () => switchAddTab(b.dataset.tab);
-});
 function startAddLogin() {
   const realm = (document.querySelector('input[name="addRealm"]:checked') || {}).value || 'cn';
   $('btnStartLogin').disabled = true;
@@ -3391,26 +3441,11 @@ async function loadOmniConfig() {
     $('cfgMode').value = omniCfg.mode || 'text';
     $('cfgReasoning').checked = !!omniCfg.reasoning;
     renderProvEditor();
-    fillRaccoonProviders();
     ogMsg('cfgMsg', '已加载 ' + omniCfg.providers.length + ' 个供应商', 'ok');
   } catch (e) {
     $('provEditor').innerHTML = '<div class="empty">供应商配置不可用：' + esc(e.message) + '</div>';
     ogMsg('cfgMsg', '加载失败：' + e.message, 'err');
   }
-}
-
-// fillRaccoonProviders 用配置里的 raccoon 供应商填充「上游账号授权」的下拉。
-function fillRaccoonProviders() {
-  const sel = $('raccoonProvider');
-  if (!sel) return;
-  const provs = (omniCfg && omniCfg.providers) || [];
-  const raccoon = provs.filter(p => (p.type || '') === 'raccoon').map(p => p.name).filter(Boolean);
-  const names = raccoon.length ? raccoon : provs.map(p => p.name).filter(Boolean);
-  const cur = sel.value;
-  sel.innerHTML = names.length
-    ? names.map(n => '<option value="' + esc(n) + '">' + esc(n) + '</option>').join('')
-    : '<option value="raccoon">raccoon</option>';
-  if (names.indexOf(cur) >= 0) sel.value = cur;
 }
 
 function omniModelsText(p) { return Array.isArray(p.models) ? p.models.join('\n') : (p.models || ''); }
@@ -3425,7 +3460,6 @@ function provCard(p, i) {
       '<label>auth_base<input data-i="' + i + '" data-f="auth_base" value="' + esc(p.auth_base || '') + '"></label>' : '';
   const deviceField = type === 'runable' ? '' +
       '<label>device_header<input data-i="' + i + '" data-f="device_header" value="' + esc(p.device_header || '') + '" placeholder="留空 = 默认"></label>' : '';
-  const accts = (p.accounts || []).map((a, j) => acctRow(a, i, j)).join('');
   return '<div class="og-card">' +
     '<div class="og-row" style="justify-content:space-between">' +
       '<div class="og-t">供应商 #' + (i + 1) + ' <span class="tag mute">' + esc(type) + '</span></div>' +
@@ -3441,21 +3475,9 @@ function provCard(p, i) {
     '</div>' +
     '<div class="og-sep"></div>' +
     '<div class="og-row" style="justify-content:space-between">' +
-      '<span class="og-s">账号 ' + ((p.accounts || []).length) + ' 个</span>' +
-      '<button data-act="addAcct" data-i="' + i + '">+ 添加账号</button>' +
+      '<span class="og-s">账号 ' + ((p.accounts || []).length) + ' 个 · 在「账号池」统一添加与管理</span>' +
+      '<button data-act="goPool" data-i="' + i + '">去账号池添加 / 管理</button>' +
     '</div>' +
-    '<div class="og-accts">' + (accts || '<div class="empty">暂无账号（raccoon 可用下方「上游账号授权」添加）</div>') + '</div>' +
-  '</div>';
-}
-
-function acctRow(a, i, j) {
-  return '<div class="og-row og-acct" style="margin-top:6px">' +
-    '<input data-i="' + i + '" data-j="' + j + '" data-f="label" value="' + esc(a.label || '') + '" placeholder="label" style="width:120px">' +
-    '<input data-i="' + i + '" data-j="' + j + '" data-f="email" value="' + esc(a.email || '') + '" placeholder="email" style="flex:1;min-width:130px">' +
-    '<input data-i="' + i + '" data-j="' + j + '" data-f="password" value="' + esc(a.password || '') + '" placeholder="password" style="flex:1;min-width:130px">' +
-    '<input data-i="' + i + '" data-j="' + j + '" data-f="cookie" value="' + esc(a.cookie || '') + '" placeholder="cookie / access_token" style="flex:1;min-width:150px">' +
-    '<input data-i="' + i + '" data-j="' + j + '" data-f="refresh_token" value="' + esc(a.refresh_token || '') + '" placeholder="refresh_token" style="width:150px">' +
-    '<button class="danger" data-act="delAcct" data-i="' + i + '" data-j="' + j + '">×</button>' +
   '</div>';
 }
 
@@ -3477,28 +3499,28 @@ function onProvInput(ev) {
   const p = omniCfg.providers[+el.dataset.i];
   if (!p) return;
   if (el.dataset.f === 'type') { p.type = el.value; renderProvEditor(); return; }
-  if (el.dataset.j != null) {
-    p.accounts = p.accounts || [];
-    const j = +el.dataset.j;
-    p.accounts[j] = p.accounts[j] || {};
-    p.accounts[j][el.dataset.f] = el.value;
-  } else {
-    p[el.dataset.f] = el.value;
-  }
+  p[el.dataset.f] = el.value;
 }
 
 function onProvClick(ev) {
   const btn = ev.target.closest('button[data-act]');
   if (!btn) return;
-  const act = btn.dataset.act, i = +btn.dataset.i, j = +btn.dataset.j;
+  const act = btn.dataset.act, i = +btn.dataset.i;
   if (act === 'delProv') {
     if (!confirm('删除供应商「' + (omniCfg.providers[i].name || i) + '」？')) return;
     omniCfg.providers.splice(i, 1);
-  } else if (act === 'addAcct') {
-    omniCfg.providers[i].accounts = omniCfg.providers[i].accounts || [];
-    omniCfg.providers[i].accounts.push({});
-  } else if (act === 'delAcct') {
-    omniCfg.providers[i].accounts.splice(j, 1);
+  } else if (act === 'goPool') {
+    // 跳「账号池」并打开「添加账号」，来源预选为该供应商。
+    const name = omniCfg.providers[i].name;
+    go('accounts');
+    history.replaceState(null, '', '#accounts');
+    openAdd().then(() => {
+      const sel = $('addSource');
+      if (sel && Array.prototype.some.call(sel.options, o => o.value === name)) {
+        sel.value = name; addSource = name; rebuildAddTabs();
+      }
+    });
+    return;
   } else {
     return;
   }
@@ -3541,38 +3563,16 @@ async function saveOmniConfig() {
   }
 }
 
-/* ── 账号授权（多账号：网页授权 / Token 粘贴） ── */
-function provName() { return ($('raccoonProvider') && $('raccoonProvider').value) || 'raccoon'; }
-function acctCount() { return $('accts').querySelectorAll('tr[data-label]').length; }
-function nextLabel() { return '浣熊账号' + (acctCount() + 1); }
-
-async function loadProvAccounts() {
-  const tbody = $('accts');
-  if (!tbody) return;
-  try {
-    const data = await apiAbs('/omni/admin/raccoon/accounts?provider=' + encodeURIComponent(provName()));
-    const list = (data && data.accounts) || [];
-    $('acctCnt').textContent = list.length + ' 个账号';
-    if (!list.length) { tbody.innerHTML = '<tr><td colspan="4" class="empty">暂无账号，点「＋ 添加账号（网页授权）」开始</td></tr>'; return; }
-    tbody.innerHTML = list.map(a => {
-      let bal = '-';
-      if (a.balance_error) bal = '<span class="tag warn">' + esc(a.balance_error) + '</span>';
-      else if (a.available != null) bal = '<span class="num">' + esc(a.available) + '</span>';
-      const status = a.has_token ? '<span class="tag ok">已授权</span>' : '<span class="tag warn">未授权</span>';
-      const exp = a.expires_at ? '<div style="color:var(--ink-3);font-size:11px">至 ' + esc(a.expires_at) + '</div>' : '';
-      return '<tr data-label="' + esc(a.label) + '">' +
-        '<td>' + esc(a.label) + exp + '</td>' +
-        '<td>' + bal + '</td>' +
-        '<td>' + status + '</td>' +
-        '<td>' +
-          '<button data-action="checkin" data-label="' + esc(a.label) + '">签到</button>' +
-          '<button class="danger" data-action="remove" data-label="' + esc(a.label) + '">移除</button>' +
-        '</td>' +
-      '</tr>';
-    }).join('');
-  } catch (e) {
-    tbody.innerHTML = '<tr><td colspan="4" class="empty">' + esc(e.message) + '</td></tr>';
-  }
+/* ── OmniGate 账号授权（raccoon 网页授权 / 粘贴 Token；runable 账号密码） ── */
+function provName() { return (addSource && addSource !== '__wb') ? addSource : 'raccoon'; }
+function ogAcctCount() {
+  const p = (lastOmni || []).find(x => x.name === provName());
+  return p ? (p.accounts || []).length : 0;
+}
+function ogNextLabel() {
+  const t = addSourceType(addSource);
+  const base = t === 'raccoon' ? '浣熊账号' : (t === 'runable' ? '办公助手账号' : '账号');
+  return base + (ogAcctCount() + 1);
 }
 
 let autoPollTimer = null;
@@ -3580,9 +3580,6 @@ function stopAutoPoll() { if (autoPollTimer) { clearInterval(autoPollTimer); aut
 
 async function authorizeOmni() {
   stopAutoPoll();
-  $('tokenPanel').style.display = 'none';
-  $('authPanel').style.display = 'block';
-  $('authLabel').value = nextLabel();
   $('callback').value = '';
   $('authUrl').value = '';
   $('authMode').textContent = '';
@@ -3596,7 +3593,7 @@ async function authorizeOmni() {
     $('authUrl').value = url;
     if (data.mode === 'auto') {
       $('authMode').textContent = '自动捕获';
-      ogMsg('authMsg', '已打开登录页；登录并完成验证后会自动添加账号，本页将自动刷新。若未自动完成，可把回调地址粘到下面提交。', 'ok');
+      ogMsg('authMsg', '已打开登录页；登录并完成验证后会自动添加账号，本窗口将自动关闭。若未自动完成，可把回调地址粘到下面提交。', 'ok');
       startAutoPoll($('authLabel').value);
     } else {
       $('authMode').textContent = '手动粘贴';
@@ -3609,7 +3606,7 @@ async function authorizeOmni() {
 }
 
 function startAutoPoll(label) {
-  const before = acctCount();
+  const before = ogAcctCount();
   let tries = 0;
   autoPollTimer = setInterval(async () => {
     tries++;
@@ -3620,9 +3617,8 @@ function startAutoPoll(label) {
       if (list.length > before || list.some(a => a.label === label)) {
         stopAutoPoll();
         ogMsg('authMsg', '授权成功：' + label, 'ok');
-        $('authPanel').style.display = 'none';
-        loadProvAccounts();
-        loadOverview(true);
+        await loadOverview(true);
+        setTimeout(closeAdd, 900);
       }
     } catch (e) { /* 继续轮询 */ }
   }, 3000);
@@ -3630,7 +3626,7 @@ function startAutoPoll(label) {
 
 function openOmniAuth() {
   const u = $('authUrl').value;
-  if (!u) { ogMsg('authMsg', '还没有授权链接，请重新生成', 'err'); return; }
+  if (!u) { ogMsg('authMsg', '还没有授权链接，请先点「生成授权链接并打开登录页」', 'err'); return; }
   window.open(u, '_blank', 'noopener');
 }
 
@@ -3640,8 +3636,6 @@ async function copyOmniAuth() {
   try { await navigator.clipboard.writeText(u); ogMsg('authMsg', '授权链接已复制', 'ok'); }
   catch (e) { ogMsg('authMsg', '复制失败，请手动选中链接复制', 'err'); }
 }
-
-function cancelOmniAuth() { stopAutoPoll(); $('authPanel').style.display = 'none'; ogMsg('authMsg', ''); }
 
 async function submitOmniCallback() {
   const cb = $('callback').value.trim();
@@ -3655,25 +3649,13 @@ async function submitOmniCallback() {
     const acc = (data && data.account) || {};
     stopAutoPoll();
     ogMsg('authMsg', '授权成功：' + (acc.name || acc.label || '账号已添加'), 'ok');
-    $('authPanel').style.display = 'none';
     $('callback').value = '';
-    loadProvAccounts();
-    loadOverview(true);
+    await loadOverview(true);
+    setTimeout(closeAdd, 900);
   } catch (e) {
     ogMsg('authMsg', '回调失败：' + e.message, 'err');
   }
 }
-
-function setOmniToken() {
-  $('authPanel').style.display = 'none';
-  $('tokenPanel').style.display = 'block';
-  $('tokLabel').value = nextLabel();
-  $('tokAccess').value = '';
-  $('tokRefresh').value = '';
-  ogMsg('tokenMsg', '');
-}
-
-function cancelOmniToken() { $('tokenPanel').style.display = 'none'; ogMsg('tokenMsg', ''); }
 
 async function saveOmniToken() {
   const label = $('tokLabel').value.trim();
@@ -3686,58 +3668,50 @@ async function saveOmniToken() {
       body: JSON.stringify({ provider: provName(), label, access_token: access, refresh_token: $('tokRefresh').value.trim() }),
     });
     ogMsg('tokenMsg', 'Token 已保存', 'ok');
-    $('tokenPanel').style.display = 'none';
-    loadProvAccounts();
-    loadOverview(true);
+    await loadOverview(true);
+    setTimeout(closeAdd, 900);
   } catch (e) {
     ogMsg('tokenMsg', '保存失败：' + e.message, 'err');
   }
 }
 
-async function doOmniCheckin(label) {
+// saveOgCreds 保存 runable 类账号（邮箱/密码，或直接给 Cookie）到 omnigate.json。
+// runable 的凭证必须是静态配置：运行时 DynAccount 不含 email/password 字段，
+// 网关按需用邮箱/密码登录换取会话。
+async function saveOgCreds() {
+  const label = $('ogAcctLabel').value.trim();
+  const email = $('ogAcctEmail').value.trim();
+  const password = $('ogAcctPassword').value;
+  const cookie = $('ogAcctCookie').value.trim();
+  if (!label) { ogMsg('ogCredsMsg', '请填写账号名', 'err'); return; }
+  if (!cookie && (!email || !password)) { ogMsg('ogCredsMsg', '请填写邮箱 + 密码，或直接粘贴 Cookie', 'err'); return; }
   try {
-    const data = await apiAbs('/omni/admin/raccoon/checkin', {
-      method: 'POST',
-      body: JSON.stringify({ provider: provName(), label }),
-    });
-    const results = (data && data.results) || [];
-    ogMsg('acctMsg', results.map(r => r.label + ': ' + (r.error ? ('失败 ' + r.error) : ((r.success ? '成功 ' : '未成功 ') + (r.msg || '')))).join('\n'), 'ok');
-    loadProvAccounts();
+    const cfg = await fetchOmniCfg();
+    const prov = (cfg.providers || []).find(p => p.name === addSource);
+    if (!prov) throw new Error('找不到供应商 ' + addSource);
+    const acct = { label, email, password };
+    if (cookie) acct.cookie = cookie;
+    prov.accounts = prov.accounts || [];
+    const idx = prov.accounts.findIndex(a => (a.label || '') === label);
+    if (idx >= 0) prov.accounts[idx] = acct; else prov.accounts.push(acct);
+    await api('omni/config', { method: 'POST', body: JSON.stringify(normalizeOmniForSave(cfg)) });
+    ogMsg('ogCredsMsg', '已保存并热生效：' + label, 'ok');
+    await loadOverview(true);
+    setTimeout(closeAdd, 900);
   } catch (e) {
-    ogMsg('acctMsg', '签到失败：' + e.message, 'err');
+    ogMsg('ogCredsMsg', '保存失败：' + e.message, 'err');
   }
 }
 
-async function removeOmniAcct(label) {
-  if (!confirm('确定移除账号「' + label + '」？')) return;
-  try {
-    await apiAbs('/omni/admin/raccoon/remove', { method: 'POST', body: JSON.stringify({ provider: provName(), label }) });
-    ogMsg('acctMsg', '已移除 ' + label, 'ok');
-    loadProvAccounts();
-    loadOverview(true);
-  } catch (e) {
-    ogMsg('acctMsg', '移除失败：' + e.message, 'err');
-  }
-}
-
-async function importOmniAccountsFile(file) {
-  if (!file) return;
-  const fd = new FormData();
-  fd.append('file', file);
-  try {
-    const r = await fetch('/panel/api/accounts/import', { method: 'POST', body: fd });
-    const d = await r.json();
-    if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
-    const wb = d.workbuddy || {}, om = d.omnigate || {};
-    let text = '导入完成：WorkBuddy 成功 ' + (wb.imported || 0) + ' 个' + (wb.skipped ? '（跳过 ' + wb.skipped + '）' : '');
-    text += '；OmniGate 成功 ' + (om.imported || 0) + ' 个' + (om.skipped ? '（跳过 ' + om.skipped + '）' : '');
-    if (d.omnigate_error) text += '（OmniGate：' + d.omnigate_error + '）';
-    ogMsg('acctMsg', text, 'ok');
-    loadProvAccounts();
-    loadOverview(true);
-  } catch (e) {
-    ogMsg('acctMsg', '导入失败：' + e.message, 'err');
-  }
+// removeOmniAccountFromConfig 删除 runable 类账号（静态配置，改 omnigate.json 后热生效）。
+async function removeOmniAccountFromConfig(provider, label) {
+  const cfg = await fetchOmniCfg();
+  const prov = (cfg.providers || []).find(p => p.name === provider);
+  if (!prov) throw new Error('找不到供应商 ' + provider);
+  const before = (prov.accounts || []).length;
+  prov.accounts = (prov.accounts || []).filter(a => (a.label || '') !== label);
+  if (prov.accounts.length === before) throw new Error('未找到账号「' + label + '」（可能由配置默认命名）');
+  await api('omni/config', { method: 'POST', body: JSON.stringify(normalizeOmniForSave(cfg)) });
 }
 
 /* ── 上游模型目录 ── */
@@ -3906,30 +3880,16 @@ async function saveOutbound() {
   on('btnReloadCfg', loadOmniConfig);
   const pe = $('provEditor');
   if (pe) { pe.addEventListener('input', onProvInput); pe.addEventListener('change', onProvInput); pe.addEventListener('click', onProvClick); }
-  // 账号授权
-  on('btnAuth', authorizeOmni);
+  // 账号授权（OmniGate）：raccoon 网页授权 / 粘贴 Token；runable 账号密码
+  on('btnStartOgAuth', authorizeOmni);
   on('btnOpenAuth', openOmniAuth);
   on('btnCopyAuth', copyOmniAuth);
-  on('btnAuthCancel', cancelOmniAuth);
   on('btnSubmitCb', submitOmniCallback);
-  on('btnSetToken', setOmniToken);
   on('btnTokenSave', saveOmniToken);
-  on('btnTokenCancel', cancelOmniToken);
-  on('btnLoadAccts', loadProvAccounts);
+  on('btnOgCredsSave', saveOgCreds);
+  on('btnOgGoProv', () => { closeAdd(); go('providers'); history.replaceState(null, '', '#providers'); });
+  on('addSource', switchAddSource, 'change');
   on('btnLoadModels', loadUpstreamModels);
-  on('btnAcctExport', () => { const b = $('btnExportAccounts'); if (b) b.click(); });
-  on('btnAcctImport', () => { const f = $('acctImportFile'); if (f) f.click(); });
-  const aif = $('acctImportFile');
-  if (aif) aif.addEventListener('change', () => { importOmniAccountsFile(aif.files[0]); aif.value = ''; });
-  on('raccoonProvider', loadProvAccounts, 'change');
-  const accts = $('accts');
-  if (accts) accts.addEventListener('click', ev => {
-    const btn = ev.target.closest('button[data-action]');
-    if (!btn) return;
-    const label = btn.getAttribute('data-label');
-    if (btn.getAttribute('data-action') === 'checkin') doOmniCheckin(label);
-    else if (btn.getAttribute('data-action') === 'remove') removeOmniAcct(label);
-  });
   // 出站代理
   on('btnObAdd', () => obShowForm());
   on('btnObCancel', obCancelForm);

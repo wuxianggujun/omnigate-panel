@@ -663,70 +663,6 @@
 
       <div class="box">
         <header>
-          <h3>上游账号授权 <span class="hint" id="acctCnt"></span></h3>
-        </header>
-        <div class="pad">
-          <div class="og-hint" style="margin-top:0">为 raccoon（办公小浣熊）供应商添加账号：走浏览器授权自动捕获，或直接粘贴 access_token。Runable / OpenAI 供应商的账号在上面的「供应商」卡片里配置。</div>
-          <div class="og-row" style="margin-top:8px">
-            <label style="display:inline-flex;align-items:center;gap:6px;font-size:12.5px;color:var(--ink-3)">上游<select id="raccoonProvider" style="width:auto;min-width:150px"></select></label>
-            <button class="primary" id="btnAuth">＋ 添加账号（网页授权）</button>
-            <button id="btnSetToken">直接粘贴 Token</button>
-            <button id="btnLoadAccts">刷新</button>
-            <button id="btnAcctExport" title="导出全部账号（WorkBuddy + OmniGate，含凭证，请妥善保管）">导出账号</button>
-            <button id="btnAcctImport" title="导入账号包（.json，覆盖两个池）">导入账号</button>
-            <input type="file" id="acctImportFile" accept=".json" hidden>
-          </div>
-
-          <div id="authPanel" class="og-sub" style="display:none">
-            <div class="og-row" style="justify-content:space-between">
-              <span><strong>网页授权添加账号</strong> <span class="tag mute" id="authMode"></span></span>
-              <button class="danger" id="btnAuthCancel">取消</button>
-            </div>
-            <div class="og-row" style="margin-top:8px">
-              <label style="flex:1;min-width:220px;display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--ink-3)">账号名（可改）<input id="authLabel"></label>
-              <button id="btnOpenAuth">① 打开登录页</button>
-            </div>
-            <div class="og-hint">登录后浏览器会跳到 <code>office-raccoon://auth/callback?code=...&amp;state=...</code>（不会真的打开桌面应用）；把整段地址，或只把 <code>code</code> 粘到下面提交即可。可重复添加多个账号。</div>
-            <div class="og-row" style="margin-top:6px">
-              <input id="callback" style="flex:1;min-width:280px" placeholder="office-raccoon://auth/callback?code=...&state=...">
-              <button class="primary" id="btnSubmitCb">② 提交回调</button>
-            </div>
-            <div class="og-row" style="margin-top:6px">
-              <input id="authUrl" readonly style="flex:1;min-width:280px" placeholder="授权链接（生成后自动打开）">
-              <button id="btnCopyAuth">复制链接</button>
-            </div>
-            <div class="og-msg" id="authMsg"></div>
-          </div>
-
-          <div id="tokenPanel" class="og-sub" style="display:none">
-            <div class="og-row" style="justify-content:space-between">
-              <strong>直接粘贴 Token</strong>
-              <button class="danger" id="btnTokenCancel">取消</button>
-            </div>
-            <div class="og-fields">
-              <label>账号名<input id="tokLabel" placeholder="账号名"></label>
-              <label class="og-full">access_token（JWT）<input id="tokAccess" placeholder="粘贴 access_token"></label>
-              <label class="og-full">refresh_token（可空）<input id="tokRefresh" placeholder="粘贴 refresh_token"></label>
-            </div>
-            <div class="og-row" style="margin-top:8px">
-              <button class="primary" id="btnTokenSave">保存账号</button>
-              <span class="og-msg" id="tokenMsg"></span>
-            </div>
-          </div>
-
-          <div class="hr"></div>
-          <div class="tbl-wrap">
-            <table class="acc">
-              <thead><tr><th>账号</th><th>余额</th><th>状态</th><th>操作</th></tr></thead>
-              <tbody id="accts"><tr><td colspan="4" class="empty">暂无账号，点「＋ 添加账号（网页授权）」开始</td></tr></tbody>
-            </table>
-          </div>
-          <div class="og-msg" id="acctMsg"></div>
-        </div>
-      </div>
-
-      <div class="box">
-        <header>
           <h3>上游模型目录 <span class="hint" id="modelCnt"></span></h3>
           <span class="grow"></span>
           <button class="xs" id="btnLoadModels">刷新模型</button>
@@ -839,19 +775,20 @@
   </div>
 </div>
 
-<!-- 添加账号 -->
+<!-- 添加账号（统一入口：WorkBuddy 浏览器登录/导入；OmniGate 供应商按类型给出对应流程） -->
 <div class="veil" id="addVeil">
   <div class="dlg">
     <header>
       <h3>添加账号</h3>
-      <div class="tabs" id="addTabs">
-        <button class="tab on" data-tab="login">浏览器登录</button>
-        <button class="tab" data-tab="import">导入 cockpit</button>
-        <button class="tab" data-tab="bundle">导入账号包</button>
-      </div>
+      <div class="tabs" id="addTabs"></div>
     </header>
     <div class="body">
-      <!-- 浏览器登录 -->
+      <label class="fld" style="margin-bottom:14px"><span class="lb">来源</span>
+        <select id="addSource"></select>
+        <span class="hint">WorkBuddy 走浏览器登录；OmniGate 供应商按类型给出对应流程（raccoon=网页授权 / runable=账号密码 / openai 无需账号）。</span>
+      </label>
+
+      <!-- WorkBuddy：浏览器登录 -->
       <div id="addTabLogin" class="tab-panel">
         <div id="addPick">
           <div class="realm-row">
@@ -870,19 +807,79 @@
         <div id="addDone" class="state ok" hidden></div>
         <div id="addErr" class="state err" hidden></div>
       </div>
-      <!-- 导入 cockpit -->
+
+      <!-- WorkBuddy：导入 cockpit -->
       <div id="addTabImport" class="tab-panel" hidden>
         <div class="hint" style="margin-bottom:8px">选择 cockpit tools 导出的 JSON 文件，批量导入账号。文件需为账号数组格式。</div>
         <input type="file" id="importFile" accept=".json" style="margin-bottom:8px">
         <div id="importDone" class="state ok" hidden></div>
         <div id="importErr" class="state err" hidden></div>
       </div>
-      <!-- 导入账号包（本服务原生格式，一次覆盖两个池） -->
+
+      <!-- WorkBuddy：导入账号包（本服务原生格式，一次覆盖两个池） -->
       <div id="addTabBundle" class="tab-panel" hidden>
         <div class="hint" style="margin-bottom:8px">选择顶部「导出账号」生成的账号包（.json），一次导入 WorkBuddy 与 OmniGate 两个账号池；也可直接选 WorkBuddy 原生 auth JSON 数组。合并导入：同 UID / 同 label 覆盖，其余新增。</div>
         <input type="file" id="bundleFile" accept=".json" style="margin-bottom:8px">
         <div id="bundleDone" class="state ok" hidden></div>
         <div id="bundleErr" class="state err" hidden></div>
+      </div>
+
+      <!-- OmniGate · raccoon：网页授权 -->
+      <div id="addTabOgAuth" class="tab-panel" hidden>
+        <div class="og-fields">
+          <label>账号名（可改）<input id="authLabel" placeholder="账号名"></label>
+        </div>
+        <div class="og-row" style="margin-top:10px">
+          <button class="primary" id="btnStartOgAuth">生成授权链接并打开登录页</button>
+          <span class="tag mute" id="authMode"></span>
+        </div>
+        <div class="og-hint">登录后浏览器会跳到 <code>office-raccoon://auth/callback?code=...&amp;state=...</code>（不会真的打开桌面应用）；把整段地址，或只把 <code>code</code> 粘到下面提交即可。可重复添加多个账号。</div>
+        <div class="og-row" style="margin-top:6px">
+          <input id="callback" style="flex:1;min-width:280px" placeholder="office-raccoon://auth/callback?code=...&state=...">
+          <button class="primary" id="btnSubmitCb">提交回调</button>
+        </div>
+        <div class="og-row" style="margin-top:6px">
+          <input id="authUrl" readonly style="flex:1;min-width:280px" placeholder="授权链接（生成后自动打开）">
+          <button id="btnCopyAuth">复制链接</button>
+          <button id="btnOpenAuth">重新打开</button>
+        </div>
+        <div class="og-msg" id="authMsg"></div>
+      </div>
+
+      <!-- OmniGate · raccoon：粘贴 Token -->
+      <div id="addTabOgToken" class="tab-panel" hidden>
+        <div class="og-fields">
+          <label>账号名<input id="tokLabel" placeholder="账号名"></label>
+          <label class="og-full">access_token（JWT）<input id="tokAccess" placeholder="粘贴 access_token"></label>
+          <label class="og-full">refresh_token（可空）<input id="tokRefresh" placeholder="粘贴 refresh_token"></label>
+        </div>
+        <div class="og-row" style="margin-top:8px">
+          <button class="primary" id="btnTokenSave">保存账号</button>
+          <span class="og-msg" id="tokenMsg"></span>
+        </div>
+      </div>
+
+      <!-- OmniGate · runable：账号密码 -->
+      <div id="addTabOgCreds" class="tab-panel" hidden>
+        <div class="og-fields">
+          <label>账号名（唯一）<input id="ogAcctLabel" placeholder="如 runable-1"></label>
+          <label>邮箱<input id="ogAcctEmail" type="email" placeholder="登录邮箱"></label>
+          <label>密码<input id="ogAcctPassword" type="password" placeholder="登录密码"></label>
+          <label class="og-full">Cookie（可空，留空=用邮箱/密码登录）<input id="ogAcctCookie" placeholder="session_token=..."></label>
+        </div>
+        <div class="og-hint">保存后写入 <code>omnigate.json</code> 并热生效；网关按需用邮箱/密码登录换取会话，无需手动维护 Cookie。</div>
+        <div class="og-row" style="margin-top:8px">
+          <button class="primary" id="btnOgCredsSave">保存账号</button>
+          <span class="og-msg" id="ogCredsMsg"></span>
+        </div>
+      </div>
+
+      <!-- OmniGate · openai 等：无需账号 -->
+      <div id="addTabOgNone" class="tab-panel" hidden>
+        <div class="og-hint" style="margin-top:0">该供应商类型（openai）不使用「账号」——直接在上游供应商页配置 <code>base_url</code> / <code>api_key</code> / <code>models</code> 即可。</div>
+        <div class="og-row" style="margin-top:10px">
+          <button id="btnOgGoProv">去「上游供应商」配置</button>
+        </div>
       </div>
     </div>
     <footer>

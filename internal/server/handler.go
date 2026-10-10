@@ -58,9 +58,14 @@ type Config struct {
 
 	// GlobalEnabled global realm 路由开关（config global.enabled，缺省 true）。
 	// handler 侧第三道闸（与 main 注入 auth 开关、upstream.GlobalEnabled 呼应）：
-	// false（显式逃生门）时即便 auth realm=global 也不提供 global: 模型名
+	// false（显式逃生门）时即便 auth realm=global 也不提供 global 模型名
 	// （modelList 不列 global 名单）。
 	GlobalEnabled bool
+
+	// RealmRouter 请求模型名 → 有序候选域列表（config realm_routing）。nil = 老行为
+	// （裸名走 cn、显式前缀强制）。配置后裸名也参与域选择，支持「DeepSeek 优先国际版」
+	// 这类偏好与跨域回退（见 realm_router.go）。
+	RealmRouter *RealmRouter
 
 	// Usage 逐请求用量记录器（可选；nil = 不记录）。
 	// 在 recordAttempt 这一唯一汇聚点调用，因此流式/非流式、成功/失败都会计入，
@@ -354,14 +359,22 @@ func applyModelInfoFields(entry map[string]any, mi upstream.ModelInfo) map[strin
 	return entry
 }
 
-// modelList 模型列表：CN 模型输出统一加 "cn:" 前缀（gateway 路由协议，与 resolveModel
-// 对称）；global.enabled=true 时追加 global: 前缀的国际版名单。
+// modelList 模型列表：只输出**裸模型名**（CN ∪ global 去重，不含 cn:/global: 前缀）。
+// 域选择交给 realm_routing + 选号跨域回退，客户端无需感知；显式前缀仍可作为入站强制
+// 覆盖（resolveModel / RealmRouter.splitRealmPrefix）。global.enabled=false 时不列 global。
 // 纯动态：动态拉取失败/无号 → 该域空列表，无静态兜底。
 func (h *Handler) modelList() []map[string]any {
 	out := make([]map[string]any, 0)
+	// 客户端只见裸模型名（不含 cn:/global: 前缀）：域由 realm_routing + 选号跨域回退
+	// 决定，调用方无需（也不应）感知；显式前缀仍可作为入站强制覆盖。
+	seen := map[string]bool{}
 	for _, mi := range h.fetchDynamicModels() {
+		if seen[mi.ID] {
+			continue
+		}
+		seen[mi.ID] = true
 		entry := map[string]any{
-			"id":       "cn:" + mi.ID,
+			"id":       mi.ID,
 			"object":   "model",
 			"created":  1753600000,
 			"owned_by": "workbuddy",
@@ -403,8 +416,12 @@ func (h *Handler) modelList() []map[string]any {
 		}
 		globalEfforts, globalDefaults := h.cfg.Upstream.GlobalEffortSnapshot()
 		for _, id := range globalIDs {
+			if seen[id] {
+				continue // 两域都有：CN 条目已列，去重（避免客户端看到重复 id）
+			}
+			seen[id] = true
 			entry := map[string]any{
-				"id":       "global:" + id,
+				"id":       id,
 				"object":   "model",
 				"created":  1753600000,
 				"owned_by": "workbuddy",
@@ -506,6 +523,73 @@ func cachedModelsSnapshot() []upstream.ModelInfo {
 	return dynamicModelsCache.ids
 }
 
+// realmsFor 解析请求模型名 → (bareModel, 有序候选域列表)。未配置 RealmRouter 时退化为
+// 老行为（裸名 → cn；显式前缀 → 该域）。
+func (h *Handler) realmsFor(model string) (string, []string) {
+	if h.cfg.RealmRouter == nil {
+		realm, bare := resolveModel(model)
+		return bare, []string{realm}
+	}
+	return h.cfg.RealmRouter.Ordered(model, h.realmProvides)
+}
+
+// realmProvides 供 RealmRouter 剔除「已知不提供该模型」的域（MaxRotate 只有 3，把请求
+// 浪费在错的域上会直接打光重试次数）。只读缓存快照，不触发任何上游调用；冷/空 →
+// known=false（不参与剔除，回退到配置顺序）。
+func (h *Handler) realmProvides(realm, bare string) (known, ok bool) {
+	switch realm {
+	case RealmCN:
+		snap := cachedModelsSnapshot()
+		if len(snap) == 0 {
+			return false, false
+		}
+		for _, mi := range snap {
+			if mi.ID == bare {
+				return true, true
+			}
+		}
+		return true, false
+	case RealmGlobal:
+		if h.cfg.Upstream == nil || !h.cfg.GlobalEnabled {
+			return false, false
+		}
+		names := h.cfg.Upstream.GlobalModelSnapshot()
+		if len(names) == 0 {
+			return false, false
+		}
+		for _, id := range names {
+			if id == bare {
+				return true, true
+			}
+		}
+		return true, false
+	}
+	return false, false
+}
+
+// WarmModels 主动预热模型目录缓存（CN 动态 + global），供 realm 路由的「哪域提供该模型」
+// 探测使用。缓存自带 TTL（CN 10min / global 1h）与失败负缓存，这里只是保证冷启动后目录
+// 尽快可用；失败静默（内部走负缓存，不阻塞）。
+func (h *Handler) WarmModels() {
+	h.fetchDynamicModels()
+	if h.cfg.GlobalEnabled {
+		h.fetchGlobalModels()
+	}
+}
+
+// realmIn 报告 realm 是否在候选列表里（空列表视为不过滤 → true）。
+func realmIn(realms []string, realm string) bool {
+	if len(realms) == 0 {
+		return true
+	}
+	for _, r := range realms {
+		if r == realm {
+			return true
+		}
+	}
+	return false
+}
+
 func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 客户端 IP 提取（按请求传递到 ChatStream，不透传时 upstream 侧忽略）；
 	// 消除早年共享字段方案的并发交叉污染（issue：ClientIP 竞态）。
@@ -532,14 +616,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 在提示词/模型名改写之前取（那些改写不动 tools / messages[].tool_calls 子树）。
 	declaredTools := upstream.ToolNameAllowlist(body)
 
-	// realm 前缀解析（D6）：model 名可能带 "[realm:]" 前缀。剥出 realm + bareModel，
+	// 模型名 → (bareModel, 有序候选域列表)。显式 "[realm:]" 前缀仍强制单域；裸名按
+	// realm_routing 的优先级 + 目录探测给出有序域（首个最优先），选号时跨域回退。
 	// bareModel 用于选号/粘性/出站 body 重写（前缀是网关侧路由协议，上游只认裸名）。
-	// 裸名 → ("cn", 原串)，CN 现状零回归。
-	realm, bareModel := resolveModel(peek.Model)
-	modelRate := ""
-	if h.cfg.Upstream != nil {
-		modelRate = h.cfg.Upstream.ModelRate(realm, bareModel)
-	}
+	bareModel, realms := h.realmsFor(peek.Model)
 
 	// 请求级统计：出口即打一行表格日志（任何路径都会走到）。
 	st := newChatStat(time.Now(), body, peek.Stream)
@@ -630,6 +710,16 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		if delta.Model == "" {
 			delta.Model = peek.Model
 		}
+		// 按实际选中账号的域取倍率与用量域：跨域回退时请求级 realms 可能有多个，
+		// 实际域以选中账号为准（上游端点也是按账号域切的）。
+		acctRealm := RealmCN
+		if a, ok := h.cfg.Pool.Status(uid); ok && a.Realm != "" {
+			acctRealm = a.Realm
+		}
+		acctRate := ""
+		if h.cfg.Upstream != nil {
+			acctRate = h.cfg.Upstream.ModelRate(acctRealm, delta.Model)
+		}
 		latency := time.Since(started)
 		latencyMs := latency.Milliseconds()
 		if latencyMs < 1 {
@@ -653,11 +743,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		// 没拿到任何 token 统计（传输错误 / >=400 / 解析失败），计为失败尝试。
 		// 失败也计入请求数——否则重试放大在「用量」视图里看不见。
 		if h.cfg.Usage != nil {
-			realm := "cn"
-			if a, ok := h.cfg.Pool.Status(uid); ok && a.Realm != "" {
-				realm = a.Realm
-			}
-			h.cfg.Usage.Add(time.Now(), realm, uid, delta.Model, usage.Delta{
+			h.cfg.Usage.Add(time.Now(), acctRealm, uid, delta.Model, usage.Delta{
 				PromptTokens:     delta.PromptTokens,
 				HasPromptTokens:  delta.HasPromptTokens,
 				CompletionTokens: delta.CompletionTokens,
@@ -669,7 +755,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				HasCacheTokens:   st.hasCache,
 				CacheHitTokens:   st.cacheHit,
 				CacheMissTokens:  st.cacheMiss,
-				ModelRate:        modelRate,
+				ModelRate:        acctRate,
 				LatencyMs:        delta.LatencyMs,
 				HasLatency:       delta.HasLatencyMs,
 				TokensPerSecond:  delta.TokensPerSecond,
@@ -735,17 +821,17 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		var acct *auth.Auth
 		if stickyUID != "" {
 			acct = h.cfg.Pool.PickByUIDForModel(stickyUID, bareModel)
-			if acct == nil || (realm != "" && acct.Realm() != realm) {
-				// 粘性号在当前模型不可用（冷却/占满/该模型被 6004 限额）或 realm 不符 → 解绑，
+			if acct == nil || !realmIn(realms, acct.Realm()) {
+				// 粘性号在当前模型不可用（冷却/占满/该模型被 6004 限额）或不在候选域 → 解绑，
 				// 本次回落普通轮换。
 				unbindSticky()
 				acct = nil
 			}
 		}
 		if acct == nil {
-			// 模型感知 + realm 感知选号：模型非空时启用 6004 模型级冷却豁免
-			// （healthyForModel），realm 谓词过滤跨域账号。
-			acct = h.cfg.Pool.PickExcludingForRealm(tried, bareModel, realm)
+			// 模型感知 + 有序域选号：模型非空时启用 6004 模型级冷却豁免
+			// （healthyForModel）；按 realms 顺序取第一个可用域，首选域无号则跨域回退。
+			acct = h.cfg.Pool.PickExcludingForRealms(tried, bareModel, realms)
 		}
 		if acct == nil {
 			st.status = http.StatusServiceUnavailable

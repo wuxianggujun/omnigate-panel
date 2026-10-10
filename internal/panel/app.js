@@ -353,7 +353,7 @@ function go(v) {
   document.querySelectorAll('.view').forEach(s => s.hidden = s.id !== 'view-' + v);
   document.querySelectorAll('.nav a').forEach(a => a.classList.toggle('on', a.dataset.view === v));
   $('ttl').textContent = TITLES[v];
-  if (v === 'models' && !$('mdBody').children.length) loadModels();
+  if (v === 'models') { if (!$('mdBody').children.length) loadModels(); loadRealmRouting(); }
   if (v === 'providers') loadOmniConfig();
   if (v === 'outbound') loadOutbound();
   if (v === 'config') loadConfig();
@@ -800,7 +800,7 @@ function mdMatch(m, f) {
       if (!text.includes(kw)) return false;
     }
   }
-  if (f.realm && !String(m.id || '').startsWith(f.realm + ':')) return false;
+  if (f.realm && m.realm !== f.realm) return false;
   if (f.cap === 'tool' && !m.supports_tool_call) return false;
   if (f.cap === 'vision' && !m.supports_images) return false;
   if (f.cap === 'reasoning' && !m.supports_reasoning) return false;
@@ -843,7 +843,9 @@ function mdRowHtml(m, pr) {
   if (m.supports_reasoning && !m.can_disable_thinking) caps.push('<span class="tag warn">思考常开</span>');
   const capHtml = caps.length ? '<div class="id" style="margin-top:2px">' + caps.join(' ') + '</div>' : '';
   const tip = m.description ? ' title="' + esc(m.description) + '"' : '';
-  return '<tr><td class="mark" aria-hidden="true"><i></i></td><td class="who"' + tip + '><div class="nm">' + esc(m.id) + '</div><div class="id">' + esc(m.name || '') + '</div>' + capHtml + '</td>' +
+  const realmTag = m.realm === 'global' ? '<span class="realm-tag">国际版</span>'
+    : (m.realm === 'cn' ? '<span class="realm-tag">国内版</span>' : '');
+  return '<tr><td class="mark" aria-hidden="true"><i></i></td><td class="who"' + tip + '><div class="nm">' + esc(m.id) + ' ' + realmTag + '</div><div class="id">' + esc(m.name || '') + '</div>' + capHtml + '</td>' +
     '<td class="num">' + rateCell(m) + '</td>' +
     '<td>' + (m.default_effort ? '<span class="tag ok">' + esc(m.default_effort) + '</span>' : '<span style="color:var(--ink-3)">—</span>') + '</td>' +
     '<td class="efs" style="white-space:normal">' + effs + '</td>' +
@@ -886,6 +888,45 @@ for (const [id, key] of [['mdRealm', 'realm'], ['mdCap', 'cap'], ['mdEffort', 'e
 }
 $('mdReset').onclick = resetModelFilter;
 $('btnModels').onclick = loadModels;
+
+/* ── 域优先级（realm_routing）───────────────────────────────────────
+   客户端只看到裸模型名；这里配置同名模型优先走哪个域 + 模型级覆盖规则。保存后后端
+   热更新选号路由（Reconfigure 原子替换，无需重启）。 */
+async function loadRealmRouting() {
+  try {
+    const d = await api('realm_routing');
+    const rr = d.realm_routing || {};
+    const order = (rr.order || []).join(',');
+    $('rrOrder').value = order === 'global,cn' ? 'global,cn' : 'cn,global';
+    const prefer = rr.prefer || {};
+    $('rrPrefer').value = Object.keys(prefer).map(k => k + '=' + prefer[k]).join('\n');
+    $('rrNote').textContent = '';
+  } catch (e) {
+    $('rrNote').textContent = '读取失败：' + e.message;
+  }
+}
+
+async function saveRealmRouting() {
+  const order = $('rrOrder').value.split(',').map(s => s.trim()).filter(Boolean);
+  const prefer = {};
+  for (const line of $('rrPrefer').value.split('\n')) {
+    const t = line.trim();
+    if (!t) continue;
+    const i = t.indexOf('=');
+    if (i <= 0) { toast('规则格式应为 模型=域：' + t, 'err'); return; }
+    const k = t.slice(0, i).trim();
+    const v = t.slice(i + 1).trim();
+    if (k && v) prefer[k] = v;
+  }
+  try {
+    await api('realm_routing', { method: 'POST', body: JSON.stringify({ order, prefer }) });
+    await loadRealmRouting();
+    toast('域优先级已保存并热生效', 'ok');
+  } catch (e) {
+    toast(e.message, 'err');
+  }
+}
+$('btnRrSave').onclick = saveRealmRouting;
 
 /* ── 日志（频道：全部/任务/对话/系统） ─────────────────────────────── */
 let logCh = 'all';

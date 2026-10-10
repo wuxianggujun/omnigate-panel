@@ -133,6 +133,18 @@ type Config struct {
 		BillingBase string `json:"billing_base"`
 	} `json:"global"`
 
+	// RealmRouting 域路由：把「裸模型名」也纳入 cn/global 域选择（历史协议裸名恒走 cn）。
+	// 客户端只看到裸模型名（/v1/models 不再带 cn:/global: 前缀）；域由这里的优先级 +
+	// 模型优先域规则 + 选号跨域回退共同决定。显式 "cn:"/"global:" 前缀仍是硬指定。
+	RealmRouting struct {
+		// Order 缺省优先级（第一个最优先）。缺省 ["cn","global"] = 历史「裸名走 cn」。
+		// 例：想以国际版为主 → ["global","cn"]。非法项忽略，空 → 回落缺省。
+		Order []string `json:"order"`
+		// Prefer 模型 → 优先域覆盖（把命中的域提到候选最前）。模型名支持结尾 "*" 通配，
+		// 更具体（更长前缀）的规则优先。例：{"deepseek-*":"global","glm-*":"cn"}。
+		Prefer map[string]string `json:"prefer"`
+	} `json:"realm_routing"`
+
 	Upstream struct {
 		// TimeoutSeconds 短 RPC（refresh/checkin/balance/FetchModels）总时长上限，默认 120。
 		TimeoutSeconds int `json:"timeout_seconds"`
@@ -283,6 +295,9 @@ func Default() *Config {
 	// Global.Enabled 缺省 true（纯 CN 行为不变：CN 账号恒判 cn，global base 不被使用）；
 	// ChatBase/BillingBase 缺省空（回落内置默认）。
 	c.Global.Enabled = true
+	// RealmRouting 缺省优先级 ["cn","global"]：裸名走 cn（= 历史行为零回归），
+	// 首选域无号时跨域回退到 global。Prefer 缺省空（全部按 Order）。
+	c.RealmRouting.Order = []string{"cn", "global"}
 	c.Features.SanitizeBlacklistFingerprints = true
 	c.Prompt.Mode = "passthrough" // 缺省 passthrough：透传客户端原始 system（对齐上游；custom 由用户显式选择）
 	c.Pool.MaxInFlight = 3
@@ -463,6 +478,40 @@ func applyEnv(c *Config) {
 	}
 }
 
+// normalizeRealmRouting 校验 realm_routing：order 仅 cn/global、去重、空回落缺省；
+// prefer 的键非空、值仅 cn/global。非法项 fail fast（静默忽略会让用户误以为配置生效）。
+func (c *Config) normalizeRealmRouting() error {
+	seen := map[string]bool{}
+	out := make([]string, 0, 2)
+	for _, r := range c.RealmRouting.Order {
+		r = strings.TrimSpace(r)
+		if r == "" {
+			continue
+		}
+		if r != "cn" && r != "global" {
+			return fmt.Errorf("realm_routing.order: 非法域 %q（仅支持 cn/global）", r)
+		}
+		if seen[r] {
+			continue
+		}
+		seen[r] = true
+		out = append(out, r)
+	}
+	if len(out) == 0 {
+		out = []string{"cn", "global"}
+	}
+	c.RealmRouting.Order = out
+	for pat, realm := range c.RealmRouting.Prefer {
+		if strings.TrimSpace(pat) == "" {
+			return fmt.Errorf("realm_routing.prefer: 存在空模型名")
+		}
+		if realm != "cn" && realm != "global" {
+			return fmt.Errorf("realm_routing.prefer[%q]: 非法域 %q（仅支持 cn/global）", pat, realm)
+		}
+	}
+	return nil
+}
+
 func (c *Config) normalize() error {
 	var err error
 	if c.Panel.PackageDetailLimit <= 0 {
@@ -473,6 +522,11 @@ func (c *Config) normalize() error {
 	}
 	// 出站代理：校验命名/协议/路由引用（非法 fail fast，避免静默直连）。
 	if err := c.Outbound.Normalize(); err != nil {
+		return err
+	}
+	// 域路由：校验域字面量、去重、空回落缺省（非法 fail fast，静默忽略会让用户
+	// 以为优先级生效了）。
+	if err := c.normalizeRealmRouting(); err != nil {
 		return err
 	}
 	if c.Logging.RequestRetentionDays <= 0 {

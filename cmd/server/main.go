@@ -106,6 +106,15 @@ func main() {
 	p.SetWeights(cfg.Pool.IdleWeightPerHour, cfg.Pool.IdleWeightMax)
 	p.SetPreferExpiring(cfg.Pool.PreferExpiring)
 
+	// 域路由（config.json 的 realm_routing 段）：裸模型名的 cn/global 优先级 + 模型
+	// 优先域规则。面板保存后热更新（同一 *RealmRouter 实例，Reconfigure 原子替换）。
+	// global.enabled=false（逃生门）时从候选里彻底移除 global。
+	realmOrder := cfg.RealmRouting.Order
+	if !cfg.Global.Enabled {
+		realmOrder = []string{"cn"}
+	}
+	realmRouter := server.NewRealmRouter(realmOrder, cfg.RealmRouting.Prefer)
+
 	// 会话粘性路由（可配关闭）。
 	var sessRouter *session.Router
 	redisMode := "noop"
@@ -118,9 +127,9 @@ func main() {
 			GCInterval: cfg.SessionGCInterval,
 			Store:      store,
 			Available:  p.AvailableUIDs,
-			// realm 感知闭包：带前缀模型名按 realm 过滤可用账号（跨 realm 不泄漏）；
-			// 裸名走 cn（现状零回归）。闭包内部 resolveModel 剥前缀，再按 realm 过滤。
-			AvailableForModel: realmAwareAvailableForModel(p),
+			// 域感知闭包：模型名按 RealmRouter 解析成有序候选域，再按域过滤可用账号
+			// （跨 realm 不泄漏）；裸名按 realm_routing 优先级，显式前缀仍硬指定。
+			AvailableForModel: realmAwareAvailableForModel(p, realmRouter),
 		})
 		sessRouter.LoadFromStore() // 启动时从 Redis 恢复粘性（读操作仅此处）
 		sessRouter.StartGC()
@@ -323,6 +332,34 @@ func main() {
 			}
 			return nil, nil
 		},
+		// 域路由配置（config.json 的 realm_routing 段）读写：面板「模型与档位」页
+		// 「域优先级」卡片用。保存后热更新同一 *RealmRouter（Reconfigure 原子替换，
+		// 请求路径立即生效，无需重启）。
+		LoadRealmRouting: func() (any, error) {
+			c, err := Load(*cfgPath)
+			if err != nil {
+				return nil, err
+			}
+			return c.RealmRouting, nil
+		},
+		SaveRealmRouting: func(raw []byte) ([]string, error) {
+			wrapped := make([]byte, 0, len(raw)+24)
+			wrapped = append(wrapped, `{"realm_routing":`...)
+			wrapped = append(wrapped, raw...)
+			wrapped = append(wrapped, '}')
+			if _, err := saveConfig(wrapped, *cfgPath, live, p, up, sch); err != nil {
+				return nil, err
+			}
+			// 热生效：重读配置、重建规则（global 逃生门时移除 global）。
+			if c, err := Load(*cfgPath); err == nil {
+				order := c.RealmRouting.Order
+				if !c.Global.Enabled {
+					order = []string{"cn"}
+				}
+				realmRouter.Reconfigure(order, c.RealmRouting.Prefer)
+			}
+			return nil, nil
+		},
 	}
 	if omni.Enabled() {
 		pcfg.OmniConfigPath = cfg.OmnigateConfig
@@ -373,8 +410,11 @@ func main() {
 		// 来源记录开关经 livecfg 热生效；此处同时填静态字段，供 Live 为 nil 的
 		// 裸用/测试路径拿到同一缺省值。
 		RecordClientInfo: cfg.Logging.RequestClientInfo,
-		// handler 侧第三道闸（global realm）：false（显式逃生门）时不列 global: 模型名。
+		// handler 侧第三道闸（global realm）：false（显式逃生门）时不列 global 模型名。
 		GlobalEnabled: cfg.Global.Enabled,
+		// 域路由：裸模型名 → 有序候选域列表（realm_routing）。同一实例与面板共享，
+		// 面板保存后热更新。
+		RealmRouter: realmRouter,
 	})
 
 	// 内置 OmniGate 引擎挂到本服务的 /omni/ 前缀下（同源，面板前端直接调用）。
@@ -393,6 +433,10 @@ func main() {
 	// 模型归零；倍率表当时尚未建立）。
 	// 异步执行：不阻塞监听启动；失败仅记日志（下一轮懒触发或本轮重试仍可补上）。
 	go warmModelRates(ctx, up, p)
+	// 异步预热模型目录（CN + global）：供域路由判断「该域是否提供该模型」——目录冷时
+	// 只能按 realm_routing 顺序走、靠选号回退兜底，global-only 模型会被 cn 域白撞。
+	// 周期性刷新（目录本身带 TTL：CN 10min / global 1h）。
+	go warmModelCatalog(ctx, h)
 
 	srv := &http.Server{
 		Addr:              cfg.Listen,
@@ -460,6 +504,32 @@ func warmModelRates(ctx context.Context, up *upstream.Client, p *pool.Pool) {
 					log.Printf("[upstream] warm model rates: global ok (%d models)", len(infos))
 				}
 			}
+		}
+	}
+}
+
+// warmModelCatalog 启动预热 + 周期刷新模型目录缓存（CN 动态 + global），供域路由的
+// 「该域是否提供该模型」探测使用。目录冷时域路由只能按 realm_routing 顺序走、靠选号
+// 回退兜底——global-only 模型在 cn 域会白撞（MaxRotate 只有 3）。这里保证目录尽快可用。
+//
+// 周期 10min 对齐 CN 目录 TTL；global 侧内部 1h 缓存，重复调用代价可忽略。失败静默
+// （h.WarmModels 内部走负缓存节流，不阻塞）。
+func warmModelCatalog(ctx context.Context, h *server.Handler) {
+	refresh := func() {
+		if ctx.Err() != nil {
+			return
+		}
+		h.WarmModels()
+	}
+	refresh() // 启动即预热
+	ticker := time.NewTicker(10 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			refresh()
 		}
 	}
 }
@@ -624,16 +694,20 @@ func restartRequiredFields(c *Config) []string {
 	return out
 }
 
+// atomicConfigSections 整段替换（不深合并）的顶层配置段。这些段由一个面板卡片一次性
+// 提交，内部含可增删的集合（命名代理、域优先规则），深合并会让删除项残留在旧配置里。
+var atomicConfigSections = map[string]bool{
+	"outbound":      true, // 命名代理列表 + 「目标 → 代理」路由是一组，删项必须真正生效
+	"realm_routing": true, // 域优先级 + 模型优先域规则同上（删规则必须真正生效）
+}
+
 // mergeConfigMaps 把 incoming 深合并进 cur（原地），返回 cur。
 // 对嵌套对象逐键覆盖而不是整体替换：面板表单只提交它管理的键，
-// 未提交的兄弟键（含用户手写的未知键）保持原样。
+// 未提交的兄弟键（含用户手写的未知键）保持原样。atomicConfigSections 里的段例外，
+// 整段替换。
 func mergeConfigMaps(cur, incoming map[string]any) map[string]any {
 	for k, v := range incoming {
-		// outbound 是「整段替换」语义：命名代理列表 + 「目标 → 代理」路由是一个整体，
-		// 由「出站代理」卡片一次性提交。若对它做深合并，被删除的代理/路由会残留在旧
-		// 配置里（例如删了代理但路由还引用它 → 校验失败 400）。配置页不提交 outbound，
-		// 所以这里直接覆盖是安全的。
-		if k == "outbound" {
+		if atomicConfigSections[k] {
 			cur[k] = v
 			continue
 		}

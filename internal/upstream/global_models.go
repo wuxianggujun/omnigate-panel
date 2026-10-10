@@ -98,6 +98,18 @@ func (c *Client) FetchGlobalModelInfos(a *auth.Auth) []ModelInfo {
 	return infos
 }
 
+// GlobalModelSnapshot 只读 global 模型名缓存（TTL 内）；冷/空 → nil。
+// 不触发任何上游调用——供 realm 路由在请求路径上判断「global 域是否提供该模型」，
+// 避免把 global-only 模型误路由到 cn 域、打光 MaxRotate 重试次数。
+func (c *Client) GlobalModelSnapshot() []string {
+	c.globalModels.Lock()
+	defer c.globalModels.Unlock()
+	if len(c.globalModels.names) == 0 || time.Since(c.globalModels.fetched) >= globalModelsTTL {
+		return nil
+	}
+	return c.globalModels.names
+}
+
 // fetchGlobalModelsOnce 单次探测决策（缓存命中/负缓存/触发探测），返回 (names, infos)。
 // 纯动态：成功 = 并集结果去重；一切失败 = nil（不回落静态）。
 // infos 仅对象形态成功探测时非 nil。

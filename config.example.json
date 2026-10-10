@@ -8,6 +8,10 @@
     "proxies": [],
     "routes": {}
   },
+  "realm_routing": {
+    "order": ["cn", "global"],
+    "prefer": {}
+  },
   "server": {
     "read_timeout": "300s"
   },

@@ -81,6 +81,13 @@ type Config struct {
 	LoadOutbound func() (any, error)
 	SaveOutbound func(raw []byte) (restartRequired []string, err error)
 
+	// LoadRealmRouting / SaveRealmRouting 域路由配置（config.json 的 realm_routing
+	// 段）读写器（「模型与档位」页「域优先级」卡片用）。SaveRealmRouting 完成
+	//「合并 → 校验 → 落盘 → 热更新同一 *RealmRouter」；全部热生效，需重启列表恒空。
+	// 任一为 nil 时对应接口返回 501。
+	LoadRealmRouting func() (any, error)
+	SaveRealmRouting func(raw []byte) (restartRequired []string, err error)
+
 	// ExportOmniAccounts / ImportOmniAccounts OmniGate 供应商账号（state.json 的
 	// dyn_accounts 段）的导入导出（账号迁移用）。Export 返回
 	// {provider: [DynAccount...]} 的原始 JSON；Import 合并导入并热重建网关
@@ -189,6 +196,9 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("POST /panel/api/omni/config", p.withAuth(p.saveOmniConfig))
 	p.mux.HandleFunc("GET /panel/api/omni/outbound", p.withAuth(p.getOutbound))
 	p.mux.HandleFunc("POST /panel/api/omni/outbound", p.withAuth(p.saveOutbound))
+	// 域路由（config.json 的 realm_routing 段）：模型与档位页「域优先级」卡片。
+	p.mux.HandleFunc("GET /panel/api/realm_routing", p.withAuth(p.getRealmRouting))
+	p.mux.HandleFunc("POST /panel/api/realm_routing", p.withAuth(p.saveRealmRouting))
 	// 统一账号池：OmniGate 账号（归一化）+ 单账号运维 + 全量签到。
 	p.mux.HandleFunc("GET /panel/api/omni/accounts", p.withAuth(p.omniAccounts))
 	p.mux.HandleFunc("POST /panel/api/omni/account/checkin", p.withAuth(p.omniAccountCheckin))
@@ -410,12 +420,14 @@ func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "models": out})
 }
 
-// panelModelEntry 构造单个模型条目（两域共用）：id 带 realm 前缀（调用值即显示值），
+// panelModelEntry 构造单个模型条目（两域共用）：id 是**裸模型名**（调用值，与 /v1/models
+// 一致，不含 cn:/global: 前缀），域由独立字段 realm 表达（面板显示域徽标/筛选）。
 // context_length / max_output_tokens 走四级查找链，effort 档位按 realm 域取
 // EffortListing（远端权威 ∪ 静态兜底表）——与 /v1/models 同一口径，两侧不再漂移。
 func panelModelEntry(realm string, mi upstream.ModelInfo, remoteEfforts []string, remoteDefault string, httpc *http.Client) map[string]any {
 	entry := map[string]any{
-		"id":                   realm + ":" + mi.ID,
+		"id":                   mi.ID,
+		"realm":                realm,
 		"name":                 mi.Name,
 		"default_effort":       mi.DefaultEffort,
 		"supported_efforts":    mi.Efforts,

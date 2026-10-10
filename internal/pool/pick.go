@@ -39,12 +39,46 @@ func (p *Pool) PickExcludingForRealm(tried map[string]bool, reqModel, realm stri
 	return p.pick(tried, reqModel, realm)
 }
 
+// PickExcludingForRealms 有序域选号：按 realms 顺序先取第一个「有健康号」的域；所有域
+// 都没有健康号时，再按顺序取冷却兜底号（跨域回退）。realms 为空 → 退化为不过滤。
+//
+// 分两阶段的原因：单域 pick 在无健康候选时会「捞」本域冷却号（pickEarliestExpiryLocked），
+// 若直接逐域调用它，首选域的冷却号会挡住次选域的健康号——达不到「首选域没号就跨域回退」
+// 的语义。故先只找健康号，全都没有才退到冷却兜底。
+func (p *Pool) PickExcludingForRealms(tried map[string]bool, reqModel string, realms []string) *auth.Auth {
+	if len(realms) == 0 {
+		return p.PickExcludingForModel(tried, reqModel)
+	}
+	if len(realms) == 1 {
+		return p.PickExcludingForRealm(tried, reqModel, realms[0])
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, realm := range realms {
+		if a := p.pickLocked(tried, reqModel, realm, false); a != nil {
+			return a
+		}
+	}
+	for _, realm := range realms {
+		if a := p.pickLocked(tried, reqModel, realm, true); a != nil {
+			return a
+		}
+	}
+	return nil
+}
+
 // pick 在 healthy 候选集中按权重加权随机选出账号，并记录 lastUsed（防并发撞号）。
 // reqModel 非空时把健康口径换成 healthyForModel（6004 模型豁免生效）。
 // realm 非空时候选过滤叠加 Realm()==realm 谓词（分池选号域）。
 func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	return p.pickLocked(tried, reqModel, realm, true)
+}
+
+// pickLocked 是 pick 的锁内实现（调用方必须已持 p.mu 写锁）。allowCooldownFallback=false
+// 时无健康候选直接返回 nil（不捞冷却号）——供 PickExcludingForRealms 分两阶段调用。
+func (p *Pool) pickLocked(tried map[string]bool, reqModel, realm string, allowCooldownFallback bool) *auth.Auth {
 	now := time.Now()
 	realmOK := func(e *entry) bool { return realm == "" || e.a.Realm() == realm }
 	healthyOf := func(e *entry) bool { return realmOK(e) && e.healthy(now) }
@@ -75,6 +109,11 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 		cands = append(cands, e)
 	}
 	if len(cands) == 0 {
+		// 无健康候选：默认捞本域冷却兜底号（pickEarliestExpiryLocked）。有序域选号
+		// （allowCooldownFallback=false）时不捞，让调用方先去次选域找健康号。
+		if !allowCooldownFallback {
+			return nil
+		}
 		// 全冷却兜底：无 healthy 候选时，从冷却账号里选 until 最早到期的一个
 		// （熔断/冷却共用 expiry 口径，取较早截止者）。禁用的账号永不参与兜底。
 		return p.pickEarliestExpiryLocked(tried, now, realm, reqModel)

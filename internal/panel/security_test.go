@@ -140,6 +140,12 @@ func TestUnifiedThemeAndMergedOmni(t *testing.T) {
 			t.Errorf("/panel/ must embed merged OmniGate view markup %q", must)
 		}
 	}
+	// 域优先级卡片（realm_routing）并入模型与档位视图。
+	for _, must := range []string{`id="rrOrder"`, `id="rrPrefer"`, `id="btnRrSave"`} {
+		if !strings.Contains(body, must) {
+			t.Errorf("/panel/ must embed realm-routing card markup %q", must)
+		}
+	}
 
 	// 旧的 OmniGate 独立子页 URL → 302 到主面板账号池。
 	rec = httptest.NewRecorder()

@@ -75,6 +75,23 @@ func (p *Pool) WeightedAvailableUIDsForModelRealm(model, realm string) []string 
 	return out
 }
 
+// WeightedAvailableUIDsForModelRealms 按 realms 顺序合并各域的加权可用账号（供会话
+// 粘性分配用）。各域互斥（一个账号只属一个域），故直接拼接即可，域内虚拟实例重复保留。
+// realms 为空 → 退化为不过滤（现状）。
+func (p *Pool) WeightedAvailableUIDsForModelRealms(model string, realms []string) []string {
+	if len(realms) == 0 {
+		return p.WeightedAvailableUIDsForModelRealm(model, "")
+	}
+	if len(realms) == 1 {
+		return p.WeightedAvailableUIDsForModelRealm(model, realms[0])
+	}
+	var out []string
+	for _, realm := range realms {
+		out = append(out, p.WeightedAvailableUIDsForModelRealm(model, realm)...)
+	}
+	return out
+}
+
 // AvailableUIDsForModelRealm 同 AvailableUIDsForModel，但仅返回 Realm()==realm 的账号
 // （6004 模型豁免照常生效）。realm=="" 退化为 AvailableUIDsForModel。
 func (p *Pool) AvailableUIDsForModelRealm(model, realm string) []string {

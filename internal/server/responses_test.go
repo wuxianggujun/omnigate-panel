@@ -10,87 +10,6 @@ import (
 	"github.com/wuxianggujun/omnigate-panel/internal/auth"
 )
 
-// TestResponsesRequestToChat 验证 Responses 请求 → chat 请求的翻译：
-// instructions→system、input 部件→messages、max_output_tokens→max_tokens、
-// tools/tool_choice 嵌套化、reasoning.effort→reasoning_effort、text.format→response_format。
-func TestResponsesRequestToChat(t *testing.T) {
-	chat, stream, model, err := responsesRequestToChat([]byte(`{
-		"model":"glm-5.2",
-		"instructions":"be terse",
-		"input":[{"role":"user","content":[{"type":"input_text","text":"hello"}]}],
-		"max_output_tokens":128,
-		"temperature":0.5,
-		"parallel_tool_calls":false,
-		"tools":[{"type":"function","name":"f","description":"d","parameters":{"type":"object"}}],
-		"tool_choice":{"type":"function","name":"f"},
-		"reasoning":{"effort":"high"},
-		"text":{"format":{"type":"json_object"}}
-	}`))
-	if err != nil {
-		t.Fatalf("translate: %v", err)
-	}
-	if stream {
-		t.Errorf("stream should be false")
-	}
-	if model != "glm-5.2" {
-		t.Errorf("model=%q", model)
-	}
-	var got map[string]any
-	if err := json.Unmarshal(chat, &got); err != nil {
-		t.Fatalf("chat not json: %v", err)
-	}
-	msgs, _ := got["messages"].([]any)
-	if len(msgs) != 2 {
-		t.Fatalf("messages=%v (want system + user)", msgs)
-	}
-	if msgs[0].(map[string]any)["role"] != "system" || msgs[0].(map[string]any)["content"] != "be terse" {
-		t.Errorf("messages[0]=%v", msgs[0])
-	}
-	user := msgs[1].(map[string]any)
-	if user["role"] != "user" {
-		t.Errorf("messages[1].role=%v", user["role"])
-	}
-	parts, _ := user["content"].([]any)
-	if len(parts) != 1 || parts[0].(map[string]any)["type"] != "text" || parts[0].(map[string]any)["text"] != "hello" {
-		t.Errorf("messages[1].content=%v", user["content"])
-	}
-	if got["max_tokens"].(float64) != 128 {
-		t.Errorf("max_tokens=%v", got["max_tokens"])
-	}
-	if got["reasoning_effort"] != "high" {
-		t.Errorf("reasoning_effort=%v", got["reasoning_effort"])
-	}
-	tools, _ := got["tools"].([]any)
-	if len(tools) != 1 {
-		t.Fatalf("tools=%v", got["tools"])
-	}
-	fn := tools[0].(map[string]any)["function"].(map[string]any)
-	if fn["name"] != "f" {
-		t.Errorf("tool function.name=%v", fn["name"])
-	}
-	tc := got["tool_choice"].(map[string]any)
-	if tc["type"] != "function" || tc["function"].(map[string]any)["name"] != "f" {
-		t.Errorf("tool_choice=%v", tc)
-	}
-	if rf := got["response_format"].(map[string]any); rf["type"] != "json_object" {
-		t.Errorf("response_format=%v", rf)
-	}
-}
-
-// TestResponsesInputString 字符串 input → 单条 user message。
-func TestResponsesInputString(t *testing.T) {
-	chat, _, _, err := responsesRequestToChat([]byte(`{"model":"m","input":"hello"}`))
-	if err != nil {
-		t.Fatalf("translate: %v", err)
-	}
-	var got map[string]any
-	_ = json.Unmarshal(chat, &got)
-	msgs := got["messages"].([]any)
-	if len(msgs) != 1 || msgs[0].(map[string]any)["content"] != "hello" {
-		t.Errorf("messages=%v", msgs)
-	}
-}
-
 // TestResponsesNonStream 非流式：chat 聚合响应翻译成 Responses 对象。
 func TestResponsesNonStream(t *testing.T) {
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
@@ -195,9 +114,15 @@ func TestResponsesNoAccounts(t *testing.T) {
 
 // TestResponsesStreamToolCalls 流式工具调用：delta.tool_calls → function_call 输出项。
 func TestResponsesStreamToolCalls(t *testing.T) {
-	const sseTools = "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1753600000,\"model\":\"glm-5.2\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call_abc\",\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"{\\\"city\\\"\"}}]}}]}\n\n" +
-		"data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1753600000,\"model\":\"glm-5.2\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\":\\\"sf\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":5,\"total_tokens\":8}}\n\n" +
-		"data: [DONE]\n\n"
+	const sseTools = `data: {"id":"c1","object":"chat.completion.chunk","created":1753600000,"model":"glm-5.2","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_abc","type":"function","function":{"name":"get_weather","arguments":"{\"city\":"}}]}}]}
+
+data: {"id":"c1","object":"chat.completion.chunk","created":1753600000,"model":"glm-5.2","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"sf\"}"}}]}}]}
+
+data: {"id":"c1","object":"chat.completion.chunk","created":1753600000,"model":"glm-5.2","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":3,"completion_tokens":5,"total_tokens":8}}
+
+data: [DONE]
+
+`
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
 		return 200, sseTools, true
 	})

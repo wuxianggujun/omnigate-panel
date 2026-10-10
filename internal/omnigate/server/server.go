@@ -69,6 +69,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.handleChat(w, r)
+	case r.Method == http.MethodPost && (path == "/v1/responses" || path == "/responses"):
+		if !s.authorized(w, r) {
+			return
+		}
+		s.handleResponses(w, r)
 	case r.Method == http.MethodGet && path == "/healthz":
 		s.handleHealth(w, r)
 	case r.Method == http.MethodGet && path == "/":

@@ -858,9 +858,10 @@ func (c *Client) chatBase(a *auth.Auth) string {
 func (c *Client) prepareBody(body []byte, realm, uid, conversationID string) ([]byte, string) {
 	efforts, defs := c.effortsSnapshot(realm), c.defaultEffortsSnapshot(realm)
 	if realmKey(realm) == "global" {
-		// global 域降级源 = 远端探测桶（权威）∪ 产品静态兜底表（全局 21 名内档位如
-		// deepseek-v4.1-flash ['high']）。当前探测桶为空时也按静态表降级，不全程透传
-		//（issue #84：往 WorkBuddy 上游发 low/max 非法，须降级到 high）。
+		// global 域降级源 = 远端探测桶（权威）∪ 产品静态兜底表（全局 21 名内档位，如
+		// deepseek-v4.1-flash）。当前探测桶为空时也按静态表降级，不全程透传——上游对
+		// 未声明 supportedEfforts 的模型只认固定档，越界档位没有意义（2026-10 实测：
+		// 传 xhigh/max 上游返回 200 但不加思考量，high 以上封顶）。
 		efforts, defs = globalEffortMap(efforts, defs)
 	}
 	prepared := PrepareBodyOptWithEffortsAndDefault(body, c.SanitizeFingerprints.Load(), efforts, defs)

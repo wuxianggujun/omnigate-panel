@@ -9,6 +9,8 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -41,6 +43,12 @@ type Gateway struct {
 
 	modelMu    sync.Mutex
 	modelCache map[string]modelEntry
+
+	// modelCachePath 是模型目录的落盘路径（空 = 不持久化）。见 WithModelCachePath。
+	// 有了它，容器重启 / 改配置重建网关后，仍能立刻给出带计费价的目录。
+	modelCachePath string
+	// modelSaveMu 串行化落盘（tmp 文件同名，并发写会互相踩）。
+	modelSaveMu sync.Mutex
 
 	convMu sync.Mutex
 	convs  map[string]*conv
@@ -114,6 +122,13 @@ func WithProxyResolver(fn func(providerName string) *url.URL) Option {
 // support proxying implement SetProxySelector.
 func WithPoolResolver(fn func(providerName string) outbound.Selector) Option {
 	return func(g *Gateway) { g.poolFor = fn }
+}
+
+// WithModelCachePath 让网关把「最近一次成功的模型目录」持久化到 path：重启 / 改配置
+// 重建网关后，仍能立刻提供带计费价（credits / pricing / billing）的目录；上游临时
+// 不可用时也用它兜底。空路径 = 不持久化。
+func WithModelCachePath(path string) Option {
+	return func(g *Gateway) { g.modelCachePath = path }
 }
 
 // 编译期断言：每个可代理的 Provider 都必须在 Provider 本身上实现 SetProxySelector
@@ -213,6 +228,9 @@ func New(cfg *config.Config, st *state.State, log *logx.Logger, opts ...Option) 
 		}
 		g.accounts[p.Name] = accts
 	}
+	// 载入上次落盘的模型目录（过期但可用）：首次访问会尝试刷新，刷新失败则用它
+	// 兜底，避免重启后短暂「无价」。
+	g.loadModelCache()
 	return g, nil
 }
 
@@ -281,7 +299,80 @@ func (g *Gateway) models(ctx context.Context, name string) ([]openai.Model, erro
 	g.modelMu.Lock()
 	g.modelCache[name] = modelEntry{models: models, at: time.Now()}
 	g.modelMu.Unlock()
+	g.saveModelCache()
 	return models, nil
+}
+
+// modelCacheFile 是模型目录落盘的格式：provider 名 -> 最近一次成功结果。
+type modelCacheFile map[string][]openai.Model
+
+// loadModelCache 从磁盘载入上次成功的模型目录。载入的条目「过期但可用」：首次访问
+// 会尝试刷新（at 为零值 → 不满足 TTL），刷新失败时由 cachedModels 兜底。
+func (g *Gateway) loadModelCache() {
+	if g.modelCachePath == "" {
+		return
+	}
+	raw, err := os.ReadFile(g.modelCachePath)
+	if err != nil {
+		return // 首次启动没有缓存文件，属正常
+	}
+	var saved modelCacheFile
+	if err := json.Unmarshal(raw, &saved); err != nil {
+		g.log.Warn("模型目录缓存解析失败（已忽略）：%v", err)
+		return
+	}
+	n := 0
+	g.modelMu.Lock()
+	for name, models := range saved {
+		if len(models) == 0 {
+			continue
+		}
+		g.modelCache[name] = modelEntry{models: models}
+		n++
+	}
+	g.modelMu.Unlock()
+	if n > 0 {
+		g.log.Info("已载入 %d 个 provider 的模型目录缓存：%s", n, g.modelCachePath)
+	}
+}
+
+// saveModelCache 把当前模型目录落盘（尽力而为，失败只记日志）。原子写：先写临时文件
+// 再改名，避免进程中途挂掉留下半个文件。
+func (g *Gateway) saveModelCache() {
+	if g.modelCachePath == "" {
+		return
+	}
+	g.modelSaveMu.Lock()
+	defer g.modelSaveMu.Unlock()
+	g.modelMu.Lock()
+	snapshot := make(modelCacheFile, len(g.modelCache))
+	for name, e := range g.modelCache {
+		if len(e.models) > 0 {
+			snapshot[name] = e.models
+		}
+	}
+	g.modelMu.Unlock()
+	if len(snapshot) == 0 {
+		return
+	}
+	raw, err := json.MarshalIndent(snapshot, "", "  ")
+	if err != nil {
+		return
+	}
+	if dir := filepath.Dir(g.modelCachePath); dir != "" {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			g.log.Warn("创建模型目录缓存目录失败：%v", err)
+			return
+		}
+	}
+	tmp := g.modelCachePath + ".tmp"
+	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+		g.log.Warn("写入模型目录缓存失败：%v", err)
+		return
+	}
+	if err := os.Rename(tmp, g.modelCachePath); err != nil {
+		g.log.Warn("替换模型目录缓存失败：%v", err)
+	}
 }
 
 // cachedModels 返回某 provider 最近一次成功缓存的模型（不判过期）。

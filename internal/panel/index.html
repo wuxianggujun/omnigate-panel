@@ -260,6 +260,16 @@
           <span class="note" id="omNote"></span>
           <button class="xs" id="btnOmModels">刷新</button>
         </header>
+        <div class="fbar" id="omFilter">
+          <input id="omQ" type="search" placeholder="搜索模型 / 来源" aria-label="搜索 OmniGate 模型">
+          <select id="omSort" aria-label="排序">
+            <option value="price">按积分价</option>
+            <option value="name">按模型名</option>
+            <option value="source">按来源</option>
+          </select>
+          <span class="grow"></span>
+          <span class="note" id="omCount"></span>
+        </div>
         <div class="tbl-wrap">
           <table class="acc md">
             <thead><tr><th class="mark" aria-hidden="true"></th><th>模型</th><th>来源</th><th>积分消耗价</th><th>上下文长度</th><th>最大输出</th></tr></thead>
@@ -649,7 +659,7 @@
             <thead><tr>
               <th>时间</th><th>结果</th><th>模型</th><th>域/供应商</th><th>思考</th><th>账号</th>
               <th>来源 IP</th><th>User-Agent</th>
-              <th class="num">耗时</th><th class="num">Token</th><th class="num">积分</th><th>请求 ID</th>
+              <th class="num">耗时</th><th class="num">Token</th><th class="num" title="WorkBuddy：本次实际消耗积分；OmniGate：模型积分价（上游不回报单次消耗）">积分</th><th>请求 ID</th>
             </tr></thead>
             <tbody id="reqBody"></tbody>
           </table>

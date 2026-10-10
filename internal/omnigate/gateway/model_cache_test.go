@@ -3,6 +3,8 @@ package gateway
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -83,5 +85,34 @@ func TestModelsFallsBackToDegradedWithoutCache(t *testing.T) {
 	g.modelMu.Unlock()
 	if cached {
 		t.Fatal("degraded result must not be cached")
+	}
+}
+
+// 模型目录跨重启持久化：一次成功后落盘；重建网关（上游已不可用）时仍能立刻给出
+// 带积分价的目录，而不是退回「无价」。
+func TestModelCachePersistsAcrossRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "model-cache.json")
+
+	// 第一次：拉取成功 → 落盘。
+	g1 := testGateway(&flakyLister{})
+	g1.accounts["raccoon"] = []*provider.Account{{Label: "a", Cookie: "tok"}}
+	g1.modelCachePath = path
+	if _, err := g1.models(context.Background(), "raccoon"); err != nil {
+		t.Fatalf("first fetch: %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("cache file not written: %v", err)
+	}
+
+	// 重启：新网关 + 上游不可用（fail=true 且没有账号）。
+	g2 := testGateway(&flakyLister{fail: true})
+	g2.modelCachePath = path
+	g2.loadModelCache()
+	got, err := g2.models(context.Background(), "raccoon")
+	if err != nil {
+		t.Fatalf("after restart: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "sn-glm-5-3" || got[0].Credits == nil || *got[0].Credits != 0.75 {
+		t.Fatalf("got = %+v, want persisted priced model", got)
 	}
 }

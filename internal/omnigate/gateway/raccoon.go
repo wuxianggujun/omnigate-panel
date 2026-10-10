@@ -287,6 +287,8 @@ type RaccoonCheckinOutcome struct {
 	Success bool   `json:"success"`
 	Message string `json:"msg"`
 	Error   string `json:"error,omitempty"`
+	// AlreadyClaimed 见 raccoon.CheckinResult：今天已领过，不是失败。
+	AlreadyClaimed bool `json:"already_claimed,omitempty"`
 }
 
 // RaccoonCheckin runs the desktop login-reward grant for the provider's
@@ -315,7 +317,7 @@ func (g *Gateway) RaccoonCheckin(ctx context.Context, providerName, label string
 			out = append(out, RaccoonCheckinOutcome{Label: acc.Label, Error: err.Error()})
 			continue
 		}
-		out = append(out, RaccoonCheckinOutcome{Label: acc.Label, Success: res.Success, Message: res.Message})
+		out = append(out, RaccoonCheckinOutcome{Label: acc.Label, Success: res.Success, Message: res.Message, AlreadyClaimed: res.AlreadyClaimed})
 	}
 	if label != "" && !matched {
 		return nil, fmt.Errorf("账号「%s」不存在", label)

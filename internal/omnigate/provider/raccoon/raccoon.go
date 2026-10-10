@@ -682,6 +682,9 @@ type CheckinResult struct {
 	DesktopGranted bool    `json:"desktopGranted"`
 	DesktopError   string  `json:"desktopError,omitempty"`
 	GrantsError    string  `json:"grantsError,omitempty"`
+	// AlreadyClaimed 为 true 表示「今天没有新的积分入账，但也没有出错」——通常是
+	// 今天已经领过了。它不是失败，面板应给中性提示（而不是红字「失败」）。
+	AlreadyClaimed bool `json:"alreadyClaimed"`
 }
 
 // Checkin claims the desktop login points grant, then reconciles today's bills.
@@ -763,6 +766,9 @@ func (c *Client) Checkin(ctx context.Context, token string) (*CheckinResult, err
 	}
 	res.Success = todayPoints > 0
 	res.Message = strings.Join(notes, "；")
+	// 「今天没有新入账、且没出错」= 今天已领过（不是失败）。桌面奖励已发放时不
+	// 算已领，因为那说明本次确实拿到了东西。
+	res.AlreadyClaimed = !res.Success && res.GrantsError == "" && res.DesktopError == "" && !res.DesktopGranted
 	return res, nil
 }
 

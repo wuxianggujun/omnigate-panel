@@ -127,7 +127,12 @@ func (m *omniManager) build(cfg *omniconfig.Config) (*omniRuntime, error) {
 	if len(cfg.APIKeys) == 0 && m.apiKey != "" {
 		cfg.APIKeys = []string{m.apiKey}
 	}
-	gw, err := omnigateway.New(cfg, m.st, m.logger, omnigateway.WithProxyResolver(m.proxyFor), omnigateway.WithPoolResolver(m.poolFor))
+	gw, err := omnigateway.New(cfg, m.st, m.logger,
+		omnigateway.WithProxyResolver(m.proxyFor),
+		omnigateway.WithPoolResolver(m.poolFor),
+		// 模型目录跨重启持久化：重启 / 改配置后仍能立刻给出带计费价的目录。
+		omnigateway.WithModelCachePath(filepath.Join(cfg.DataDir, "model-cache.json")),
+	)
 	if err != nil {
 		return nil, err
 	}

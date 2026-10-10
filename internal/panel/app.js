@@ -768,7 +768,15 @@ $('accBody').addEventListener('click', async ev => {
       if (a === 'ogcheckin') {
         const r = await api('omni/account/checkin', { method: 'POST', body: JSON.stringify({ provider: prov, label }) });
         const results = (r && r.results) || [];
-        toast(results.map(x => x.label + '：' + (x.error ? ('失败 ' + x.error) : ((x.success ? '成功 ' : '未成功 ') + (x.msg || '')))).join('；') || '签到完成', 'ok');
+        // 三种结果分开说：真失败（红）、今日已领（中性，不是失败）、成功/其它。
+        const parts = results.map(x => {
+          const head = x.label + '：';
+          if (x.error) return head + '失败 ' + x.error;
+          if (x.success) return head + '成功 ' + (x.msg || '');
+          if (x.already_claimed) return head + '今日已领取（无需重复签到）';
+          return head + (x.msg || '未成功');
+        });
+        toast(parts.join('；') || '签到完成', results.some(x => x.error) ? 'err' : 'ok');
         await refreshOmniBalances(true);
       } else if (a === 'ogbalance') {
         await refreshOmniBalances(true);
@@ -1197,6 +1205,9 @@ function renderRequestMetrics(m, entries) {
 
   reqEntries = entries || [];
   fillReqProviders();
+  // 「积分」列对 OmniGate 行要显示模型积分价：首次渲染时把模型目录拉进来，到货后
+  // 重渲染一次（只触发一次，映射有缓存）。
+  if (!omPriceMap) ensureOmPriceMap().then(() => renderRequestTable());
   renderRequestTable();
 }
 
@@ -1257,9 +1268,16 @@ function reqTokenCell(e) {
 }
 
 function reqCreditCell(e) {
-  if (!e || !e.credit_known) return '<span class="muted">—</span>';
-  const v = Number(e.credit);
-  return Number.isFinite(v) ? trimFixed(v.toFixed(2)) : '<span class="muted">—</span>';
+  if (e && e.credit_known) {
+    const v = Number(e.credit);
+    return Number.isFinite(v) ? trimFixed(v.toFixed(2)) : '<span class="muted">—</span>';
+  }
+  // OmniGate 行：上游不回报本次实际消耗积分，退而显示该模型的积分价（价，不是耗）。
+  const p = e && omPriceMap && e.model ? omPriceMap[e.model] : null;
+  if (p) {
+    return '<span class="clip" title="模型积分价（上游不回报本次实际消耗）：' + esc(p.full) + '">' + esc(p.short) + '</span>';
+  }
+  return '<span class="muted">—</span>';
 }
 
 /* reqRealmCell 实际调度域：裸名请求经 realm_routing 选号后，这里显示**服务账号**的域
@@ -4012,6 +4030,41 @@ function omniPriceText(m) {
   return bits.join(' · ');
 }
 
+/* omniPriceShort 是 omniPriceText 的紧凑版：只给核心价（×N / N/1M / 免费），用于
+   表格单元格（请求记录页的「积分」列），完整说明放 tooltip。 */
+function omniPriceShort(m) {
+  if (!m) return '';
+  if (m.credits != null) {
+    if (m.credit_unit === 'multiplier') return m.credits === 0 ? '免费' : '×' + m.credits;
+    if (m.credit_unit === 'credits_per_million_tokens') return m.credits + '/1M';
+    return String(m.credits);
+  }
+  if (m.is_free) return '免费';
+  return '';
+}
+
+/* OmniGate 模型积分价映射（model id -> {short, full}）：请求记录页的「积分」列用它兜底。
+   上游（raccoon / runable）不回报单次请求的实际消耗积分，所以这里显示的是「该模型的
+   积分价」（价，不是耗）。懒加载一次并缓存，避免每次渲染都发请求。 */
+let omPriceMap = null;
+let omPricePending = null;
+
+function ensureOmPriceMap() {
+  if (omPriceMap) return Promise.resolve(omPriceMap);
+  if (!omPricePending) {
+    omPricePending = apiAbs('/omni/v1/models').then(d => {
+      const map = {};
+      for (const m of (d && d.data) || []) {
+        const short = omniPriceShort(m);
+        if (m && m.id && short) map[m.id] = { short: short, full: omniPriceText(m) || short };
+      }
+      omPriceMap = map;
+      return map;
+    }).catch(() => { omPriceMap = {}; return omPriceMap; });
+  }
+  return omPricePending;
+}
+
 async function loadUpstreamModels() {
   const box = $('models');
   if (!box) return;
@@ -4049,14 +4102,49 @@ async function loadOmniModels() {
   }
 }
 
+/* OmniGate 模型表筛选状态（搜索 + 排序），纯前端，不发请求。 */
+let omFilter = { q: '', sort: 'price' };
+
+/* omPriceRank 排序键：有积分价的按数值升序（免费/0 在前），无价的沉底。 */
+function omPriceRank(m) {
+  return (m && m.credits != null) ? Number(m.credits) : Number.POSITIVE_INFINITY;
+}
+
+function omFilterMatch(m, f) {
+  if (!f.q) return true;
+  const text = [m && m.id, m && m.owned_by, omniPriceText(m)].filter(Boolean).join(' ').toLowerCase();
+  for (const kw of f.q.toLowerCase().split(/\s+/).filter(Boolean)) {
+    if (!text.includes(kw)) return false;
+  }
+  return true;
+}
+
 function renderOmniModels() {
   const tb = $('omBody');
   if (!tb) return;
   if (!omAll.length) {
+    if ($('omCount')) $('omCount').textContent = '';
     tb.innerHTML = '<tr><td colspan="6"><div class="empty">上游未返回模型</div></td></tr>';
     return;
   }
-  tb.innerHTML = omAll.map(m => {
+  const list = omAll.filter(m => omFilterMatch(m, omFilter)).slice().sort((a, b) => {
+    if (omFilter.sort === 'name') return String(a.id).localeCompare(String(b.id));
+    if (omFilter.sort === 'source') {
+      return String(a.owned_by || '').localeCompare(String(b.owned_by || '')) || String(a.id).localeCompare(String(b.id));
+    }
+    const ra = omPriceRank(a), rb = omPriceRank(b);
+    if (ra !== rb) return ra < rb ? -1 : 1; // Infinity 相等时不能相减（NaN）
+    return String(a.id).localeCompare(String(b.id));
+  });
+  if ($('omCount')) {
+    const filtered = omFilter.q || list.length !== omAll.length;
+    $('omCount').textContent = filtered ? list.length + ' / ' + omAll.length + ' 个' : '';
+  }
+  if (!list.length) {
+    tb.innerHTML = '<tr><td colspan="6"><div class="empty">没有匹配的模型</div></td></tr>';
+    return;
+  }
+  tb.innerHTML = list.map(m => {
     const price = omniPriceText(m) || '—';
     return '<tr><td class="mark" aria-hidden="true"><i></i></td>' +
       '<td class="who"><div class="nm">' + esc(m.id) + '</div></td>' +
@@ -4277,6 +4365,11 @@ async function saveOutbound() {
   on('addSource', switchAddSource, 'change');
   on('btnLoadModels', loadUpstreamModels);
   on('btnOmModels', loadOmniModels);
+  // OmniGate 模型表：搜索 + 排序（纯前端）
+  const omq = $('omQ');
+  if (omq) omq.addEventListener('input', () => { omFilter.q = omq.value; renderOmniModels(); });
+  const oms = $('omSort');
+  if (oms) oms.addEventListener('change', () => { omFilter.sort = oms.value; renderOmniModels(); });
   // 出站代理
   on('btnObAdd', () => obShowForm());
   on('btnObCancel', obCancelForm);

@@ -698,12 +698,14 @@ async function loadOverview(quiet) {
     (omniList || []).forEach(p => (p.accounts || []).forEach(a => ogAccts.push(a)));
     const ogTotal = ogAccts.length;
     const ogAvail = ogAccts.filter(ogUsable).length;
-    const ogCooling = ogAccts.filter(ogCooling).length;
+    // 注意：局部变量不能叫 ogCooling——它会遮蔽同名函数 ogCooling(a)，导致
+    // `filter(ogCooling)` 命中 TDZ 抛 ReferenceError，整个账号池渲染不出来。
+    const ogCoolingCount = ogAccts.filter(ogCooling).length;
     const wbTotal = d.total || 0, wbHealthy = d.healthy || 0;
     const allTotal = wbTotal + ogTotal, allAvail = wbHealthy + ogAvail;
     setStat('sTotal', allTotal, 'WorkBuddy ' + wbTotal + ' + OmniGate ' + ogTotal);
     setStat('sHealthy', allAvail, 'WorkBuddy ' + wbHealthy + ' + OmniGate ' + ogAvail);
-    setStat('sCooling', (d.cooling || 0) + ogCooling, 'WorkBuddy ' + (d.cooling || 0) + ' + OmniGate ' + ogCooling);
+    setStat('sCooling', (d.cooling || 0) + ogCoolingCount, 'WorkBuddy ' + (d.cooling || 0) + ' + OmniGate ' + ogCoolingCount);
     setStat('sDisabled', d.disabled, '仅 WorkBuddy（OmniGate 账号无「禁用」）');
     // 暂停选号单列（issue #125）：它只关选号、照常签到保活，与禁用是两种状态。
     if ($('sPaused')) { $('sPaused').textContent = d.paused == null ? '-' : d.paused; markStat($('sPaused'), '仅 WorkBuddy'); }

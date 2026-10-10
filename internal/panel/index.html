@@ -161,7 +161,7 @@
     <section class="view" id="view-models" hidden>
       <div class="box">
         <header>
-          <h3>域优先级 <span class="hint">客户端只看到裸模型名；这里决定同名模型优先走国内版还是国际版，首选域没号时自动跨域回退。</span></h3>
+          <h3>域优先级 <span class="hint">客户端只看到裸模型名；为单个模型指定优先走国内版还是国际版（未指定的跟随下方默认），首选域没号时自动跨域回退。</span></h3>
           <span class="grow"></span>
           <span class="note" id="rrNote"></span>
           <button class="xs" id="btnRrSave">保存</button>
@@ -174,11 +174,22 @@
               <option value="global,cn">国际版优先（global → cn）</option>
             </select>
             <span class="grow"></span>
+            <input id="rrSearch" type="search" class="rr-search" placeholder="搜索模型名" aria-label="搜索模型">
+            <span class="note" id="rrCount"></span>
           </div>
-          <div class="fields">
-            <label for="rrPrefer">模型优先域（每行一条：<code>模型=域</code>；域为 cn/global；模型名支持结尾 <code>*</code> 通配，更具体的规则优先）</label>
-            <textarea id="rrPrefer" rows="4" spellcheck="false" placeholder="deepseek-*=global&#10;glm-*=cn"></textarea>
+          <div class="tbl-wrap rr-wrap">
+            <table class="acc rr">
+              <thead><tr><th>模型</th><th class="rr-pref">优先域</th></tr></thead>
+              <tbody id="rrBody"></tbody>
+            </table>
           </div>
+          <details class="rr-adv">
+            <summary>高级：通配规则（可选）</summary>
+            <div class="fields">
+              <label for="rrPrefer">每行一条 <code>模型前缀=域</code>（域为 cn/global，支持结尾 <code>*</code> 通配，更具体的前缀优先）。逐模型设置优先于通配规则。</label>
+              <textarea id="rrPrefer" rows="3" spellcheck="false" placeholder="deepseek-*=global&#10;glm-*=cn"></textarea>
+            </div>
+          </details>
         </div>
       </div>
       <div class="box">

@@ -96,6 +96,20 @@ func TestAppScriptServed(t *testing.T) {
 	}
 }
 
+// 页面与静态资源必须带 Cache-Control（no-store + no-cache）：否则浏览器会启发式
+// 复用旧 app.js——服务端已更新却仍跑旧前端（模型筛选失效、看不到域徽标）。
+func TestStaticAssetsNoCache(t *testing.T) {
+	p := newTestPanel()
+	for _, path := range []string{"/panel/", "/panel/app.js", "/panel/theme.css"} {
+		rec := httptest.NewRecorder()
+		p.ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
+		cc := rec.Header().Get("Cache-Control")
+		if !strings.Contains(cc, "no-store") || !strings.Contains(cc, "no-cache") {
+			t.Errorf("%s Cache-Control=%q want no-store + no-cache", path, cc)
+		}
+	}
+}
+
 // 统一主题 + OmniGate 并入主面板：主面板是唯一页面，必须外链同一份 theme.css
 // （设计令牌 + 组件）且不含内联 <style>/<script>（严格 CSP）。旧的 OmniGate 独立
 // 子页已并入主面板，其 URL 302 到主面板账号池。
@@ -140,8 +154,8 @@ func TestUnifiedThemeAndMergedOmni(t *testing.T) {
 			t.Errorf("/panel/ must embed merged OmniGate view markup %q", must)
 		}
 	}
-	// 域优先级卡片（realm_routing）并入模型与档位视图。
-	for _, must := range []string{`id="rrOrder"`, `id="rrPrefer"`, `id="btnRrSave"`} {
+	// 域优先级卡片（realm_routing）并入模型与档位视图：默认优先级 + 逐模型优先域表。
+	for _, must := range []string{`id="rrOrder"`, `id="rrPrefer"`, `id="btnRrSave"`, `id="rrBody"`, `id="rrSearch"`} {
 		if !strings.Contains(body, must) {
 			t.Errorf("/panel/ must embed realm-routing card markup %q", must)
 		}

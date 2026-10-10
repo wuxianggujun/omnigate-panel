@@ -757,6 +757,7 @@ async function loadModels() {
       tb.innerHTML = '<tr><td colspan="7"><div class="empty">上游未返回模型</div></td></tr>';
       $('mdCount').textContent = '';
       $('mdNote').textContent = '上游未返回模型';
+      renderRealmPicker();
       return;
     }
     // 探测键带域前缀（cn:glm-5.2），模型表显示裸名，按「精确命中或 :后缀」关联。
@@ -765,10 +766,12 @@ async function loadModels() {
     const hit = mdAll.filter(m => mdProbeOf(m.id)).length;
     $('mdNote').textContent = mdAll.length + ' 个模型 · 已刷新降级缓存' + (hit ? ' · ' + hit + ' 个有实测上限' : '');
     renderModels();
+    renderRealmPicker();
   } catch (e) {
     mdAll = [];
     tb.innerHTML = '<tr><td colspan="7"><div class="empty">' + esc(e.message) + '</div></td></tr>';
     $('mdCount').textContent = '';
+    renderRealmPicker();
   }
 }
 
@@ -892,31 +895,101 @@ $('btnModels').onclick = loadModels;
 /* ── 域优先级（realm_routing）───────────────────────────────────────
    客户端只看到裸模型名；这里配置同名模型优先走哪个域 + 模型级覆盖规则。保存后后端
    热更新选号路由（Reconfigure 原子替换，无需重启）。 */
+let rrOrder = ['cn', 'global'];  // 默认优先级
+let rrExact = {};                // 逐模型精确规则：模型名 → cn/global
+let rrWild = {};                 // 通配规则：前缀[*] → cn/global
+let rrQuery = '';
+
+function realmLabel(r) { return r === 'global' ? '国际版' : '国内版'; }
+
+// rrEffective 某模型当前生效的通配规则域（更具体的前缀优先）；无则 ''。
+function rrEffective(name) {
+  let best = '', bestLen = -1;
+  for (const k of Object.keys(rrWild)) {
+    const p = k.endsWith('*') ? k.slice(0, -1) : k;
+    if (name.startsWith(p) && p.length > bestLen) { best = rrWild[k]; bestLen = p.length; }
+  }
+  return best;
+}
+
+// renderRealmPicker 用已加载的模型目录（mdAll，裸名去重）渲染「逐模型优先域」表。
+// 无需手写模型名：直接在下拉里选国内版/国际版；未选的跟随默认优先级。
+function renderRealmPicker() {
+  const tb = $('rrBody');
+  if (!tb) return;
+  const avail = {}; // 模型名 → 存在的域集合（提示只在一域存在的模型）
+  for (const m of (mdAll || [])) {
+    if (!m || !m.id) continue;
+    (avail[m.id] = avail[m.id] || new Set()).add(m.realm);
+  }
+  const names = Object.keys(avail).sort();
+  const q = rrQuery.toLowerCase();
+  const shown = q ? names.filter(n => n.toLowerCase().includes(q)) : names;
+  if (!shown.length) {
+    tb.innerHTML = '<tr><td colspan="2"><div class="empty">' +
+      (names.length ? '无匹配模型' : '模型列表为空，点上方「重新获取」加载') + '</div></td></tr>';
+  } else {
+    tb.innerHTML = shown.map(n => {
+      const cur = rrExact[n] || '';
+      const wild = cur ? '' : rrEffective(n);
+      const tags = Array.from(avail[n] || [])
+        .map(r => '<span class="realm-tag">' + realmLabel(r) + '</span>').join(' ');
+      const hint = wild ? ' <span class="note">（通配→' + realmLabel(wild) + '）</span>' : '';
+      return '<tr><td><div class="nm">' + esc(n) + ' ' + tags + hint + '</div></td><td>' +
+        '<select data-model="' + esc(n) + '" class="rr-sel" aria-label="' + esc(n) + ' 优先域">' +
+          '<option value=""' + (cur === '' ? ' selected' : '') + '>跟随默认</option>' +
+          '<option value="cn"' + (cur === 'cn' ? ' selected' : '') + '>优先国内版</option>' +
+          '<option value="global"' + (cur === 'global' ? ' selected' : '') + '>优先国际版</option>' +
+        '</select></td></tr>';
+    }).join('');
+  }
+  const c = $('rrCount');
+  if (c) c.textContent = names.length ? ('共 ' + names.length + ' 个模型') : '';
+}
+
 async function loadRealmRouting() {
   try {
     const d = await api('realm_routing');
     const rr = d.realm_routing || {};
-    const order = (rr.order || []).join(',');
-    $('rrOrder').value = order === 'global,cn' ? 'global,cn' : 'cn,global';
+    rrOrder = (rr.order && rr.order.length) ? rr.order.slice() : ['cn', 'global'];
     const prefer = rr.prefer || {};
-    $('rrPrefer').value = Object.keys(prefer).map(k => k + '=' + prefer[k]).join('\n');
-    $('rrNote').textContent = '';
+    rrExact = {}; rrWild = {};
+    for (const k of Object.keys(prefer)) {
+      if (k.includes('*')) rrWild[k] = prefer[k];
+      else rrExact[k] = prefer[k];
+    }
+    const orderEl = $('rrOrder');
+    if (orderEl) orderEl.value = (rrOrder.join(',') === 'global,cn') ? 'global,cn' : 'cn,global';
+    const prefEl = $('rrPrefer');
+    if (prefEl) prefEl.value = Object.keys(rrWild).map(k => k + '=' + rrWild[k]).join('\n');
+    renderRealmPicker();
+    const note = $('rrNote');
+    if (note) note.textContent = '';
   } catch (e) {
-    $('rrNote').textContent = '读取失败：' + e.message;
+    const note = $('rrNote');
+    if (note) note.textContent = '读取失败：' + e.message;
   }
 }
 
 async function saveRealmRouting() {
-  const order = $('rrOrder').value.split(',').map(s => s.trim()).filter(Boolean);
+  const orderEl = $('rrOrder');
+  const order = orderEl ? orderEl.value.split(',').map(s => s.trim()).filter(Boolean) : rrOrder;
   const prefer = {};
-  for (const line of $('rrPrefer').value.split('\n')) {
-    const t = line.trim();
-    if (!t) continue;
-    const i = t.indexOf('=');
-    if (i <= 0) { toast('规则格式应为 模型=域：' + t, 'err'); return; }
-    const k = t.slice(0, i).trim();
-    const v = t.slice(i + 1).trim();
-    if (k && v) prefer[k] = v;
+  // 逐模型精确规则
+  for (const k of Object.keys(rrExact)) prefer[k] = rrExact[k];
+  // 高级通配规则（覆盖同键）
+  const prefEl = $('rrPrefer');
+  if (prefEl) {
+    for (const line of prefEl.value.split('\n')) {
+      const t = line.trim();
+      if (!t) continue;
+      const i = t.indexOf('=');
+      if (i <= 0) { toast('通配规则格式应为 模型前缀=域：' + t, 'err'); return; }
+      const k = t.slice(0, i).trim();
+      const v = t.slice(i + 1).trim();
+      if (!k || (v !== 'cn' && v !== 'global')) { toast('通配规则的域只能是 cn 或 global：' + t, 'err'); return; }
+      prefer[k] = v;
+    }
   }
   try {
     await api('realm_routing', { method: 'POST', body: JSON.stringify({ order, prefer }) });
@@ -926,7 +999,23 @@ async function saveRealmRouting() {
     toast(e.message, 'err');
   }
 }
-$('btnRrSave').onclick = saveRealmRouting;
+
+const rrBodyEl = $('rrBody');
+if (rrBodyEl) {
+  rrBodyEl.addEventListener('change', ev => {
+    const sel = ev.target.closest('select.rr-sel');
+    if (!sel || !sel.dataset.model) return;
+    if (sel.value) rrExact[sel.dataset.model] = sel.value;
+    else delete rrExact[sel.dataset.model];
+    renderRealmPicker(); // 重渲染以刷新「通配→」提示
+  });
+}
+const rrSearchEl = $('rrSearch');
+if (rrSearchEl) {
+  rrSearchEl.addEventListener('input', () => { rrQuery = rrSearchEl.value.trim(); renderRealmPicker(); });
+}
+const btnRr = $('btnRrSave');
+if (btnRr) btnRr.onclick = saveRealmRouting;
 
 /* ── 日志（频道：全部/任务/对话/系统） ─────────────────────────────── */
 let logCh = 'all';

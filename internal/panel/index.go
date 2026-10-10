@@ -53,9 +53,21 @@ func setSecurityHeaders(w http.ResponseWriter) {
 	w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
 }
 
+// setNoCache 页面与静态资源必须每次回源校验。
+//
+// 为什么需要：index.html / app.js / theme.css 都随二进制同体部署，但没有任何
+// 校验头（ETag/Last-Modified），浏览器会按启发式规则长期复用旧副本——表现为
+// 服务端已更新、用户却一直跑旧 app.js（旧版按 cn:/global: 前缀过滤、无域徽标，
+// 于是「模型与档位」页筛选失效、看不到国内版/国际版）。no-cache 强制每次
+// 回源校验，无校验头时等价于每次重新拉取，彻底消除这类陈旧缓存。
+func setNoCache(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+}
+
 // index 输出面板页面（静态无秘密；数据接口 /panel/api/* 才走鉴权）。
 func (p *Panel) index(w http.ResponseWriter, r *http.Request) {
 	setSecurityHeaders(w)
+	setNoCache(w)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(indexHTML)
@@ -64,6 +76,7 @@ func (p *Panel) index(w http.ResponseWriter, r *http.Request) {
 // appScript 输出前端逻辑（同源脚本，供 CSP script-src 'self' 加载）。
 func (p *Panel) appScript(w http.ResponseWriter, r *http.Request) {
 	setSecurityHeaders(w)
+	setNoCache(w)
 	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(appJS)
@@ -72,6 +85,7 @@ func (p *Panel) appScript(w http.ResponseWriter, r *http.Request) {
 // themeStyle 输出统一设计系统样式表（同源样式表，CSP style-src 'self' 放行）。
 func (p *Panel) themeStyle(w http.ResponseWriter, r *http.Request) {
 	setSecurityHeaders(w)
+	setNoCache(w)
 	w.Header().Set("Content-Type", "text/css; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(themeCSS)

@@ -715,7 +715,7 @@
           <h3>出站代理 <span class="hint" id="obCnt"></span></h3>
         </header>
         <div class="pad">
-          <div class="og-hint" style="margin-top:0">给面板上游（WorkBuddy）或某个供应商指定出站代理，未指定则直连。支持 <code>http</code>/<code>https</code>/<code>socks5</code>。单个代理直接填地址；<strong>代理池</strong>填列表 / 池 API，网关定期拉取探活、按请求轮询、失败自动切换。保存后<strong>热生效</strong>（无需重启），写入 <code>config.json</code> 的 <code>outbound</code> 段。</div>
+          <div class="og-hint" style="margin-top:0">给面板上游（WorkBuddy）或某个供应商指定出站代理，未指定则直连。支持 <code>http</code>/<code>https</code>/<code>socks5</code>。单个代理直接填地址；<strong>代理池</strong>填列表 / 池 API，网关定期拉取探活、按请求轮询、失败自动切换。代理池可勾选<strong>严格模式</strong>：池里没有可用代理时<strong>直接失败、不回退直连</strong>——适合「该目标必须走代理才通」的场景（回退直连只会掩盖故障）。保存后<strong>热生效</strong>（无需重启），写入 <code>config.json</code> 的 <code>outbound</code> 段。</div>
           <div class="og-row" style="margin:10px 0 6px">
             <button id="btnObAdd">＋ 添加代理</button>
             <button class="primary" id="btnObSave">保存并热生效</button>
@@ -734,7 +734,7 @@
               <label>用户名（可空）<input id="obUser" autocomplete="off"></label>
               <label>密码（可空）<input id="obPass" type="password" autocomplete="off"></label>
             </div>
-            <div class="og-hint" style="margin:8px 0 4px">或做成<strong>代理池</strong>（下面任一字段非空即按池处理，此时上面的「地址」忽略）：网关会定期拉取/探活、按请求轮询，连接失败自动切换下一个。</div>
+            <div class="og-hint" style="margin:8px 0 4px">或做成<strong>代理池</strong>（下面任一字段非空即按池处理，此时上面的「地址」忽略）：网关会定期拉取/探活、按请求轮询，连接失败自动切换下一个。<br>· 池<strong>空</strong>时默认回退直连；勾选下面的<strong>严格模式</strong>则改为直接失败（不回退），适合必须走代理才通的目标。<br>· 池里放你的 <strong>clash/mihomo</strong> 地址（如 <code>http://newapi:17890</code>）即可复用服务器上的分流规则。</div>
             <div class="og-fields">
               <label>池协议<select id="obPoolScheme"><option value="http">http</option><option value="https">https</option><option value="socks5">socks5</option><option value="socks5h">socks5h</option></select></label>
               <label>拉取间隔（秒，可空）<input id="obRefresh" type="number" min="30" placeholder="300"></label>

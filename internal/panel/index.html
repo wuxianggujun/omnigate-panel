@@ -739,6 +739,10 @@
               <label>池协议<select id="obPoolScheme"><option value="http">http</option><option value="https">https</option><option value="socks5">socks5</option><option value="socks5h">socks5h</option></select></label>
               <label>拉取间隔（秒，可空）<input id="obRefresh" type="number" min="30" placeholder="300"></label>
               <label class="og-full">探活地址（可空）<input id="obProbe" placeholder="默认 https://www.gstatic.com/generate_204"></label>
+              <label class="og-full" style="flex-direction:row;align-items:center;gap:8px">
+                <input type="checkbox" id="obStrict" style="width:auto">
+                <span>严格模式：池无可用代理时<strong>不回退直连</strong>（直接失败）</span>
+              </label>
               <label class="og-full">代理列表（每行一个，可空）<textarea id="obPool" rows="3" placeholder="1.2.3.4:8080&#10;5.6.7.8:1080"></textarea></label>
               <label class="og-full">池 API 地址（可空）<input id="obPoolUrl" placeholder="https://proxy.scdn.io/api/get_proxy.php?protocol=http&count=20"></label>
             </div>

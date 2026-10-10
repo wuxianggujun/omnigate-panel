@@ -4008,7 +4008,7 @@ function renderOutbound() {
         const bits = [];
         if (Array.isArray(p.pool) && p.pool.length) bits.push(p.pool.length + ' 个');
         if (p.pool_url) bits.push('API');
-        addr = '<span class="tag">代理池</span> ' + esc(bits.join(' + '));
+        addr = '<span class="tag">代理池</span> ' + esc(bits.join(' + ')) + (p.strict ? ' <span class="tag">严格</span>' : '');
       } else {
         addr = '<span class="num">' + esc(p.url || '') + '</span>';
       }
@@ -4048,6 +4048,7 @@ function obShowForm(i) {
   $('obPoolScheme').value = p.pool_scheme || 'http';
   $('obRefresh').value = p.refresh_sec || '';
   $('obProbe').value = p.probe_url || '';
+  $('obStrict').checked = !!p.strict;
   ogMsg('obFormMsg', '');
   $('obForm').style.display = 'block';
 }
@@ -4075,6 +4076,7 @@ function obFormSave() {
     if (rs > 0) entry.refresh_sec = rs;
     const probe = $('obProbe').value.trim();
     if (probe) entry.probe_url = probe;
+    if ($('obStrict').checked) entry.strict = true;
   } else {
     entry.url = url;
   }
@@ -4145,6 +4147,7 @@ async function saveOutbound() {
       if (p.pool_scheme) e.pool_scheme = p.pool_scheme;
       if (p.refresh_sec) e.refresh_sec = p.refresh_sec;
       if (p.probe_url) e.probe_url = p.probe_url;
+      if (p.strict) e.strict = true;
     } else {
       e.url = p.url || '';
     }

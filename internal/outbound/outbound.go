@@ -40,6 +40,7 @@ type Proxy struct {
 	PoolScheme string   `json:"pool_scheme,omitempty"` // 池内 host:port 的协议，默认 http
 	RefreshSec int      `json:"refresh_sec,omitempty"` // 池刷新间隔秒，默认 300
 	ProbeURL   string   `json:"probe_url,omitempty"`   // 探活目标，默认 gstatic/generate_204
+	Strict     bool     `json:"strict,omitempty"`      // true = 池无可用代理时不回退直连（直接失败）
 
 	Username string `json:"username,omitempty"`
 	Password string `json:"password,omitempty"`

@@ -102,14 +102,14 @@ func TestPoolRotationAndReport(t *testing.T) {
 	p := newPool(Proxy{Name: "t", PoolScheme: "http"}, nil)
 	p.live = []*url.URL{a, b}
 
-	if got := p.Next(); got.String() != a.String() {
-		t.Fatalf("首次应返回 a，得到 %v", got)
+	if got, err := p.Next(); err != nil || got.String() != a.String() {
+		t.Fatalf("首次应返回 a，得到 %v err=%v", got, err)
 	}
-	if got := p.Next(); got.String() != b.String() {
-		t.Fatalf("第二次应返回 b，得到 %v", got)
+	if got, err := p.Next(); err != nil || got.String() != b.String() {
+		t.Fatalf("第二次应返回 b，得到 %v err=%v", got, err)
 	}
-	if got := p.Next(); got.String() != a.String() {
-		t.Fatalf("应轮询回 a，得到 %v", got)
+	if got, err := p.Next(); err != nil || got.String() != a.String() {
+		t.Fatalf("应轮询回 a，得到 %v err=%v", got, err)
 	}
 	if p.MaxAttempts() != 2 {
 		t.Fatalf("MaxAttempts 应为 2，得到 %d", p.MaxAttempts())
@@ -117,8 +117,8 @@ func TestPoolRotationAndReport(t *testing.T) {
 
 	// 汇报失败应把该代理踢出可用集。
 	p.Report(a, io.ErrUnexpectedEOF)
-	if got := p.Next(); got.String() != b.String() {
-		t.Fatalf("a 被剔除后应只返回 b，得到 %v", got)
+	if got, err := p.Next(); err != nil || got.String() != b.String() {
+		t.Fatalf("a 被剔除后应只返回 b，得到 %v err=%v", got, err)
 	}
 	if p.MaxAttempts() != 1 {
 		t.Fatalf("剔除后 MaxAttempts 应为 1，得到 %d", p.MaxAttempts())
@@ -130,6 +130,29 @@ func TestPoolRotationAndReport(t *testing.T) {
 	}
 	if st := p.Status(); st.Live != 1 || st.LastError == "" {
 		t.Fatalf("Status 错误: %+v", st)
+	}
+}
+
+// TestPoolStrict 验证严格模式：池空时不回退直连，而是返回错误。
+func TestPoolStrict(t *testing.T) {
+	// 非严格：池空 → (nil, nil) = 直连
+	lax := newPool(Proxy{Name: "lax", PoolScheme: "http"}, nil)
+	if u, err := lax.Next(); u != nil || err != nil {
+		t.Fatalf("非严格模式池空应返回 (nil,nil)，得到 %v err=%v", u, err)
+	}
+	// 严格：池空 → 错误
+	strict := newPool(Proxy{Name: "strict", PoolScheme: "http", Strict: true}, nil)
+	u, err := strict.Next()
+	if u != nil || err == nil {
+		t.Fatalf("严格模式池空应返回错误，得到 %v err=%v", u, err)
+	}
+	if st := strict.Status(); !st.Strict {
+		t.Fatalf("Status.Strict 应为 true")
+	}
+	// 严格模式有存活代理时正常返回
+	strict.live = []*url.URL{mustURL(t, "http://10.0.0.1:1")}
+	if u, err := strict.Next(); err != nil || u == nil {
+		t.Fatalf("严格模式有存活代理应正常返回，得到 %v err=%v", u, err)
 	}
 }
 
@@ -199,6 +222,19 @@ func TestRuntimeReload(t *testing.T) {
 	}
 }
 
+// TestFailoverStrictEmpty 验证严格模式下池空时请求直接失败（不回退直连）。
+func TestFailoverStrictEmpty(t *testing.T) {
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("origin"))
+	}))
+	defer origin.Close()
+	p := newPool(Proxy{Name: "s", PoolScheme: "http", Strict: true}, nil)
+	client := &http.Client{Transport: WrapTransport(&http.Transport{}, p), Timeout: 10 * time.Second}
+	if _, err := client.Get(origin.URL); err == nil {
+		t.Fatal("严格模式池空应请求失败")
+	}
+}
+
 // TestPoolRefreshFromAPI 用一个假 API 验证拉取 + 探活闭环。
 func TestPoolRefreshFromAPI(t *testing.T) {
 	good := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -227,7 +263,7 @@ func TestPoolRefreshFromAPI(t *testing.T) {
 	if st.Live != 1 {
 		t.Fatalf("存活数应为 1，得到 %d (lastErr=%s)", st.Live, st.LastError)
 	}
-	if got := p.Next(); got == nil || got.Host != goodHost {
-		t.Fatalf("Next 应返回存活代理，得到 %v", got)
+	if got, err := p.Next(); err != nil || got == nil || got.Host != goodHost {
+		t.Fatalf("Next 应返回存活代理，得到 %v err=%v", got, err)
 	}
 }

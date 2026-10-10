@@ -31,11 +31,11 @@ const poolProbeConcurrency = 24
 // poolTransportCacheMax 每个池最多缓存的「单代理 Transport」数量，超出即重建。
 const poolTransportCacheMax = 128
 
-// Selector 为一次出站请求挑代理：Next 返回本次尝试要用的代理（nil=直连），
-// Report 汇报本次尝试结果（失败即把该代理踢出可用集），MaxAttempts 是单请求
-// 最多尝试几次。*Pool 实现了该接口。
+// Selector 为一次出站请求挑代理：Next 返回本次尝试要用的代理（nil=直连；严格模式
+// 下池空时返回错误），Report 汇报本次尝试结果（失败即把该代理踢出可用集），
+// MaxAttempts 是单请求最多尝试几次。*Pool 实现了该接口。
 type Selector interface {
-	Next() *url.URL
+	Next() (*url.URL, error)
 	Report(u *url.URL, err error)
 	MaxAttempts() int
 }
@@ -43,6 +43,7 @@ type Selector interface {
 // PoolStatus 是代理池的可观测快照（供 /omni/healthz、面板展示）。
 type PoolStatus struct {
 	Name       string `json:"name"`
+	Strict     bool   `json:"strict,omitempty"`
 	Live       int    `json:"live"`
 	Candidates int    `json:"candidates"`
 	Updated    string `json:"updated,omitempty"`
@@ -58,6 +59,7 @@ type Pool struct {
 	scheme   string
 	refresh  time.Duration
 	probeURL string
+	strict   bool
 	user     string
 	pass     string
 	logf     func(string, ...any)
@@ -94,6 +96,7 @@ func newPool(p Proxy, logf func(string, ...any)) *Pool {
 		scheme:   scheme,
 		refresh:  time.Duration(secs) * time.Second,
 		probeURL: probe,
+		strict:   p.Strict,
 		user:     p.Username,
 		pass:     p.Password,
 		logf:     logf,
@@ -247,16 +250,24 @@ func (p *Pool) probeOne(ctx context.Context, u *url.URL) bool {
 	return resp.StatusCode < 500
 }
 
-// Next 轮询返回下一个可用代理；池为空时返回 nil（= 直连）。
-func (p *Pool) Next() *url.URL {
+// Next 轮询返回下一个可用代理。池为空时：非严格模式返回 (nil, nil) = 直连；
+// 严格模式返回错误（不回退直连）。
+func (p *Pool) Next() (*url.URL, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if len(p.live) == 0 {
-		return nil
+		if p.strict {
+			msg := p.lastErr
+			if msg == "" {
+				msg = "无可用代理"
+			}
+			return nil, fmt.Errorf("outbound: 代理池「%s」%s（严格模式不回退直连）", p.name, msg)
+		}
+		return nil, nil
 	}
 	u := p.live[int(p.rr)%len(p.live)]
 	p.rr++
-	return u
+	return u, nil
 }
 
 // Report 汇报一次尝试结果：失败即把该代理踢出可用集。
@@ -295,7 +306,7 @@ func (p *Pool) MaxAttempts() int {
 func (p *Pool) Status() PoolStatus {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	st := PoolStatus{Name: p.name, Live: len(p.live), Candidates: p.cand, LastError: p.lastErr}
+	st := PoolStatus{Name: p.name, Strict: p.strict, Live: len(p.live), Candidates: p.cand, LastError: p.lastErr}
 	if !p.updated.IsZero() {
 		st.Updated = p.updated.Format(time.RFC3339)
 	}
@@ -407,7 +418,13 @@ func (t *failoverTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	attempts := t.sel.MaxAttempts()
 	var lastErr error
 	for i := 0; i < attempts; i++ {
-		u := t.sel.Next()
+		u, nerr := t.sel.Next()
+		if nerr != nil {
+			if lastErr == nil {
+				lastErr = nerr
+			}
+			break
+		}
 		tr := t.transportFor(u)
 		r := req
 		if i > 0 {
@@ -555,7 +572,7 @@ func (r *Runtime) ProxyFunc(target string) func(*http.Request) (*url.URL, error)
 		return http.ProxyURL(u)
 	}
 	if pl := r.Pool(target); pl != nil {
-		return func(*http.Request) (*url.URL, error) { return pl.Next(), nil }
+		return func(*http.Request) (*url.URL, error) { return pl.Next() }
 	}
 	return nil
 }

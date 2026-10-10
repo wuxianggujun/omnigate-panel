@@ -23,6 +23,7 @@ import (
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/state"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/toolcall"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/util"
+	"github.com/wuxianggujun/omnigate-panel/internal/reqlog"
 )
 
 // Gateway is the routing core.
@@ -76,6 +77,9 @@ type chatResult struct {
 	toolCalls []openai.ToolCall
 	errText   string
 	usage     *provider.Usage
+	// sawData 表示本次流至少产生过一个「有效帧」（正文 / 思考 / 工具调用）。
+	// 全 false = 上游 200 但空流，按失败观测（与非流式空响应同语义）。
+	sawData bool
 }
 
 // Option configures the Gateway at construction time.
@@ -311,40 +315,62 @@ func (g *Gateway) HandleChat(ctx context.Context, req *openai.ChatRequest, w htt
 				flusher.Flush()
 			}
 		}
-		_ = openai.EmitRole(w, id, displayModel, created)
+		// ew 记录首个写失败（客户端断连）：HTTP 头已发 200，写失败改不了状态码，
+		// 但请求记录要能区分「人已走」与「上游失败」。
+		ew := &errWriter{w: w}
+		_ = openai.EmitRole(ew, id, displayModel, created)
 		flush()
 
 		onText := func(s string) {
-			_ = openai.EmitContent(w, id, displayModel, created, s)
+			_ = openai.EmitContent(ew, id, displayModel, created, s)
 			flush()
 		}
 		onReasoning := func(s string) {
 			if g.cfg.Reasoning {
-				_ = openai.EmitReasoning(w, id, displayModel, created, s)
+				_ = openai.EmitReasoning(ew, id, displayModel, created, s)
 				flush()
 			}
 		}
 		res, err := g.runChat(ctx, provName, prov, upstreamModel, req, incognito, hasTools, onText, onReasoning)
 		if err != nil {
+			// 上游 error 帧 / 读失败：HTTP 头已发 200，用 503 观测（与 WorkBuddy
+			// 侧流式 error 帧同语义），否则运维在请求记录里看到的是假成功。
 			g.log.Error("对话失败 %s: %v", displayModel, err)
-			fmt.Fprintf(w, "data: %s\n\n", openai.ErrorJSON("upstream_error", err.Error()))
-			_ = openai.EmitFinish(w, id, displayModel, created, "stop")
-			_ = openai.Done(w)
+			markStreamFailure(ctx, reqlog.OutcomeStreamError, http.StatusServiceUnavailable)
+			fmt.Fprintf(ew, "data: %s\n\n", openai.ErrorJSON("upstream_error", err.Error()))
+			_ = openai.EmitFinish(ew, id, displayModel, created, "stop")
+			_ = openai.Done(ew)
+			flush()
+			return
+		}
+		if !res.sawData {
+			// 上游 200 但空流（0 有效帧）：不是成功。写 error 帧兜底，并用 502 观测
+			// （与非流式空响应同语义，与 WorkBuddy 侧 empty stream 一致）。
+			g.log.Error("对话失败 %s: 上游空流（200+0 帧）", displayModel)
+			markStreamFailure(ctx, reqlog.OutcomeStreamError, http.StatusBadGateway)
+			fmt.Fprintf(ew, "data: %s\n\n", openai.ErrorJSON("upstream_error", "empty upstream stream"))
+			_ = openai.EmitFinish(ew, id, displayModel, created, "stop")
+			_ = openai.Done(ew)
 			flush()
 			return
 		}
 		if len(res.toolCalls) > 0 {
-			_ = openai.EmitToolCalls(w, id, displayModel, created, res.toolCalls)
+			_ = openai.EmitToolCalls(ew, id, displayModel, created, res.toolCalls)
 		}
 		if m := ReqMetaFrom(ctx); m != nil {
 			m.Usage = res.usage
 		}
-		_ = openai.EmitFinish(w, id, displayModel, created, res.finish)
+		_ = openai.EmitFinish(ew, id, displayModel, created, res.finish)
 		if res.usage != nil {
-			_ = openai.EmitUsage(w, id, displayModel, created, usageMap(res.usage))
+			_ = openai.EmitUsage(ew, id, displayModel, created, usageMap(res.usage))
 		}
-		_ = openai.Done(w)
+		_ = openai.Done(ew)
 		flush()
+		if ew.err != nil || ctx.Err() != nil {
+			// 客户端断连：上游帧无恙，只是没人接了——归为 interrupted（非上游故障，
+			// 保留实际状态码 200，与 WorkBuddy 侧同口径）。
+			markStreamFailure(ctx, reqlog.OutcomeInterrupted, 0)
+		}
 		g.log.Info("✓ 完成 %s · 流式 · %s", displayModel, res.finish)
 		return
 	}
@@ -353,6 +379,12 @@ func (g *Gateway) HandleChat(ctx context.Context, req *openai.ChatRequest, w htt
 	if err != nil {
 		g.log.Error("对话失败 %s: %v", displayModel, err)
 		writeJSON(w, 502, openai.ErrorJSON("upstream_error", err.Error()))
+		return
+	}
+	if !res.sawData {
+		// 上游 200 但空响应（0 有效帧）：不是成功（与流式空流同语义）。
+		g.log.Error("对话失败 %s: 上游空响应", displayModel)
+		writeJSON(w, 502, openai.ErrorJSON("upstream_error", "empty upstream response"))
 		return
 	}
 	if m := ReqMetaFrom(ctx); m != nil {
@@ -374,6 +406,39 @@ func (g *Gateway) HandleChat(ctx context.Context, req *openai.ChatRequest, w htt
 // runable's bespoke protocol has no equivalent.
 func supportsEffort(provType string) bool {
 	return provType == "raccoon" || provType == "openai"
+}
+
+// markStreamFailure 回填流式请求的失败观测。HTTP 头（200）在首字节前已发出、无法
+// 再改状态码，但请求记录必须能区分假成功：outcome 覆盖成 stream_error/interrupted，
+// status>0 时用 5xx 作为观测状态码（与 WorkBuddy 侧一致），status==0 时保留实际状态码
+// （客户端断连不改状态码）。
+func markStreamFailure(ctx context.Context, outcome string, status int) {
+	m := ReqMetaFrom(ctx)
+	if m == nil {
+		return
+	}
+	m.Outcome = outcome
+	if status != 0 {
+		m.Status = status
+	}
+}
+
+// errWriter 记录首个写失败。SSE 逐帧写入时客户端可能中途断连，写失败本身不改变
+// HTTP 状态码（头已发），但请求记录要据此归为 interrupted。
+type errWriter struct {
+	w   io.Writer
+	err error
+}
+
+func (e *errWriter) Write(p []byte) (int, error) {
+	if e.err != nil {
+		return 0, e.err
+	}
+	n, err := e.w.Write(p)
+	if err != nil {
+		e.err = err
+	}
+	return n, err
 }
 
 // usageMap renders provider usage as an OpenAI-format usage object (nil → zero).
@@ -409,18 +474,23 @@ func (g *Gateway) runChat(ctx context.Context, provName string, prov provider.Pr
 		defer stream.Close()
 		parser := toolcall.NewParser(
 			func(s string) {
+				res.sawData = true
 				res.text += s
 				if onText != nil {
 					onText(s)
 				}
 			},
-			func(c openai.ToolCall) { res.toolCalls = append(res.toolCalls, c) },
+			func(c openai.ToolCall) {
+				res.sawData = true
+				res.toolCalls = append(res.toolCalls, c)
+			},
 		)
 		err = g.drain(ctx, stream, func(e provider.Event) {
 			switch e.Type {
 			case provider.EventText:
 				parser.Feed(e.Text)
 			case provider.EventReasoning:
+				res.sawData = true
 				res.reasoning += e.Text
 				if onReasoning != nil {
 					onReasoning(e.Text)
@@ -481,16 +551,19 @@ func (g *Gateway) runChat(ctx context.Context, provName string, prov provider.Pr
 	err = g.drain(ctx, stream, func(e provider.Event) {
 		switch e.Type {
 		case provider.EventText:
+			res.sawData = true
 			res.text += e.Text
 			if onText != nil {
 				onText(e.Text)
 			}
 		case provider.EventReasoning:
+			res.sawData = true
 			res.reasoning += e.Text
 			if onReasoning != nil {
 				onReasoning(e.Text)
 			}
 		case provider.EventToolCalls:
+			res.sawData = true
 			res.toolCalls = append(res.toolCalls, e.ToolCalls...)
 		case provider.EventFinish:
 			res.finish = e.Finish

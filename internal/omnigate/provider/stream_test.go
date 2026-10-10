@@ -110,3 +110,48 @@ func TestOpenAIStreamNoUsage(t *testing.T) {
 		t.Fatal("unexpected usage event")
 	}
 }
+
+// TestOpenAIStreamErrorFrame 上游以顶层 {"error":{...}} 报错（无 choices）：必须转成
+// EventError，而不是被 len(choices)==0 静默吞掉——否则一次失败的流会被记成 200 success。
+func TestOpenAIStreamErrorFrame(t *testing.T) {
+	s := NewOpenAIStream(sseScript(
+		`{"id":"c1","choices":[{"index":0,"delta":{"content":"部分"}}]}`,
+		`{"error":{"message":"当前模型请求过于频繁，请稍后再试","type":"rate_limit_error","code":"6004"}}`,
+		`[DONE]`,
+	))
+	var text, errText string
+	for {
+		e, err := s.Recv()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("Recv: %v", err)
+		}
+		switch e.Type {
+		case EventText:
+			text += e.Text
+		case EventError:
+			errText = e.Text
+		}
+	}
+	if text != "部分" {
+		t.Fatalf("text = %q", text)
+	}
+	if errText != "当前模型请求过于频繁，请稍后再试" {
+		t.Fatalf("errText = %q", errText)
+	}
+}
+
+// TestOpenAIStreamErrorFrameNoMessage error 帧没有 message 时回退到原始帧文本，
+// 保证错误不会被空字符串吞掉。
+func TestOpenAIStreamErrorFrameNoMessage(t *testing.T) {
+	s := NewOpenAIStream(sseScript(`{"error":{"type":"server_error"}}`, `[DONE]`))
+	e, err := s.Recv()
+	if err != nil {
+		t.Fatalf("Recv: %v", err)
+	}
+	if e.Type != EventError || e.Text == "" {
+		t.Fatalf("event = %+v, want non-empty error", e)
+	}
+}

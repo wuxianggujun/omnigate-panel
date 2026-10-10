@@ -22,6 +22,13 @@ type ReqMeta struct {
 	// Effort 是实际透传给上游的思考档位（reasoning_effort）。空 = 未请求或
 	// 上游不支持。
 	Effort string
+	// Outcome 覆盖流式请求的结果口径：上游 error 帧 / 空流 → stream_error，
+	// 客户端断连 → interrupted。空 = 按 HTTP 状态码推断（与 WorkBuddy 侧 event()
+	// 同口径）。流式失败时 HTTP 头已发 200，靠它才能把假成功纠回来。
+	Outcome string
+	// Status 覆盖请求记录里的观测状态码（流式失败时用 5xx）。0 = 用实际写出的
+	// 状态码。
+	Status int
 }
 
 type reqMetaKey struct{}

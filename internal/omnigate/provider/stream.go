@@ -54,6 +54,17 @@ type openAIChunk struct {
 		FinishReason *string `json:"finish_reason"`
 	} `json:"choices"`
 	Usage *openAIUsage `json:"usage"`
+	// Error is the top-level error frame OpenAI-compatible upstreams send on a
+	// failed stream (rate limit / content filter / moderation). Such a frame has
+	// no choices, so without this field it would be silently skipped.
+	Error *openAIError `json:"error"`
+}
+
+// openAIError is an upstream error frame body: {"error":{"message":...}}.
+type openAIError struct {
+	Message string `json:"message"`
+	Type    string `json:"type"`
+	Code    any    `json:"code"`
 }
 
 // openAIUsage is the OpenAI-format usage block. Upstreams (raccoon included)
@@ -110,6 +121,17 @@ func (s *OpenAIStream) Recv() (Event, error) {
 		var ch openAIChunk
 		if err := json.Unmarshal([]byte(data), &ch); err != nil {
 			continue
+		}
+		// 上游以 error 帧报错（限流 / 内容拦截 / 审核）：OpenAI 兼容服务把它发成
+		// 顶层 {"error":{...}}，没有 choices——此前被下面 len(choices)==0 的
+		// continue 静默吞掉，一次失败的流在请求记录里被记成 200 success。这里显式
+		// 转成 EventError，交给 gateway 收敛为失败（与 WorkBuddy 侧同语义）。
+		if ch.Error != nil {
+			msg := strings.TrimSpace(ch.Error.Message)
+			if msg == "" {
+				msg = strings.TrimSpace(data)
+			}
+			return Event{Type: EventError, Text: msg}, nil
 		}
 		if ch.Usage != nil {
 			s.usage = ch.Usage.toUsage()

@@ -133,7 +133,15 @@ func (s *Server) serveLogged(w http.ResponseWriter, r *http.Request, fn func(htt
 	if status == 0 {
 		status = http.StatusOK
 	}
-	ok := status >= 200 && status < 300
+	// gateway 可在流式失败时覆盖观测状态码（HTTP 头已发 200 改不了，用 5xx 观测）
+	// 与 outcome（stream_error / interrupted），见 gateway.markStreamFailure。
+	if meta.Status != 0 {
+		status = meta.Status
+	}
+	outcome := outcomeOf(status)
+	if meta.Outcome != "" {
+		outcome = meta.Outcome
+	}
 	ev := reqlog.Event{
 		Time:       start,
 		RequestID:  id,
@@ -142,8 +150,8 @@ func (s *Server) serveLogged(w http.ResponseWriter, r *http.Request, fn func(htt
 		Model:      meta.Model,
 		Account:    meta.Account,
 		Status:     status,
-		OK:         ok,
-		Outcome:    outcomeOf(status),
+		OK:         status >= 200 && status < 300 && outcome == reqlog.OutcomeSuccess,
+		Outcome:    outcome,
 		DurationMs: time.Since(start).Milliseconds(),
 		TTFBMs:     lw.ttfbMs(),
 	}

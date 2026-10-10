@@ -558,9 +558,21 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
   .acc.req { min-width: 1080px; }
   .acc.req th, .acc.req td { padding: 8px 10px; }
   .acc.req tbody tr { cursor: default; }
-  /* 请求记录最多可读 1000 条，不限高会把页面拉得很长。
-     限高 + 表头吸顶：滚动区域内始终能看到列名。 */
-  .req-wrap { max-height: 460px; overflow: auto; }
+  /* 请求日志整页铺满：视图撑满视口剩余高度，表格占满剩余空间并内部滚动。
+     取代原来的 460px 限高——限高会让表格只占屏幕上半张卡片，下半屏全是空白。 */
+  #view-logs {
+    flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0;
+    max-width: none; padding-bottom: 22px;
+  }
+  #view-logs[hidden] { display: none; }
+  #view-logs .box {
+    flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0; margin-bottom: 0;
+  }
+  #view-logs .box > header, #view-logs .fbar { flex: none; }
+  #view-logs .req-wrap { flex: 1 1 auto; min-height: 0; max-height: none; }
+  /* 请求记录最多可读 1000 条，靠外层 flex 撑满高度 + 表头吸顶：
+     滚动区域内始终能看到列名。 */
+  .req-wrap { overflow: auto; }
   .req-wrap thead th { position: sticky; top: 0; background: var(--surface); z-index: 1; }
   .clip { display: block; max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .clip.ip { max-width: 150px; font-family: var(--mono); font-size: 12.5px; }

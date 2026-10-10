@@ -434,6 +434,35 @@ func TestChatLogsStreamRow(t *testing.T) {
 	}
 }
 
+// 请求日志必须打印本次出站实际生效的思考档位（think=）——这是「实际思考程度」的
+// stdout 侧出口；RequestLog 非空才会生成 requestID，扩展段才落盘。
+func TestChatLogsRowShowsThinkingEffort(t *testing.T) {
+	withChatLog(t)
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		return 200, sseOK, true
+	})
+	h := NewHandler(Config{
+		Pool:       testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999}),
+		Upstream:   up,
+		RequestLog: reqlog.New(reqlog.Config{}),
+	})
+	out := captureStdout(t, func() {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("POST", "/v1/chat/completions",
+			strings.NewReader(`{"model":"deepseek-v4-flash","reasoning_effort":"high","stream":true,"messages":[]}`))
+		h.ServeHTTP(rec, req)
+		if rec.Code != 200 {
+			t.Fatalf("code=%d", rec.Code)
+		}
+	})
+	if !strings.Contains(out, "think=high") {
+		t.Errorf("row missing think=high:\n%s", out)
+	}
+	if !strings.Contains(out, "rid=") {
+		t.Errorf("row missing rid= (requestID not wired):\n%s", out)
+	}
+}
+
 func TestChatLogsSyncRowTTFBDash(t *testing.T) {
 	withChatLog(t)
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {

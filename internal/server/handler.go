@@ -628,6 +628,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	st := newChatStat(time.Now(), body, peek.Stream)
 	if tr := requestTraceFrom(r); tr != nil {
 		tr.stat = st
+		// request_id 与归档事件同源（ServeHTTP 入口生成）：stdout 流水行的扩展段
+		// （rid/out/try/credit/think）以 requestID 非空为门，此前漏赋导致扩展段从不
+		// 打印；补上后 stdout 与归档（面板「请求记录」）用同一个 id，可互相定位。
+		st.requestID = tr.id
 		// 来源在 ServeHTTP 入口采集（此时才知道开关与请求头），此处转交给统计对象，
 		// 让 stdout 流水行与归档事件共用同一份来源值，两处不会漂移。
 		st.clientIP, st.userAgent = tr.clientIP, tr.userAgent

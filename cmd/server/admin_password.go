@@ -13,6 +13,7 @@ import (
 	"io/fs"
 	"os"
 	"strings"
+	"syscall"
 
 	"github.com/wuxianggujun/omnigate-panel/internal/panelauth"
 )
@@ -92,7 +93,31 @@ func SetAdminPassword(path, username string, role panelauth.Role, password strin
 		return fmt.Errorf("写临时配置: %w", err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
-		// Windows 下目标存在时 Rename 会失败：先删再重命名。
+		// 单文件 Docker bind mount 不能 rename 覆盖其挂载目标（Linux 返回 EBUSY /
+		// "device or resource busy"）：普通文件走上面的原子 rename，而这种部署形态
+		// 就地写回挂载文件。与 saveConfig 的回退保持一致。
+		if errors.Is(err, syscall.EBUSY) {
+			f, openErr := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0o600)
+			if openErr != nil {
+				_ = os.Remove(tmp)
+				return fmt.Errorf("写配置（bind mount 回退）: %w", openErr)
+			}
+			_, writeErr := f.Write(out)
+			if writeErr == nil {
+				writeErr = f.Sync()
+			}
+			closeErr := f.Close()
+			// 写失败时保留 tmp（挂载文件已被 O_TRUNC 破坏，tmp 里是完整新内容，可手工恢复）。
+			if writeErr != nil {
+				return fmt.Errorf("写配置（bind mount 回退，完整新内容保留在 %s）: %w", tmp, writeErr)
+			}
+			_ = os.Remove(tmp)
+			if closeErr != nil {
+				return fmt.Errorf("写配置（bind mount 回退）: %w", closeErr)
+			}
+			return nil
+		}
+		// 其余平台（典型如 Windows 目标被占用）Rename 覆盖会失败：删除后重命名。
 		if os.Remove(path) == nil {
 			if err2 := os.Rename(tmp, path); err2 == nil {
 				return nil

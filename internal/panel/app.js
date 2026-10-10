@@ -12,7 +12,7 @@ let refTimer = null;
 /* 视图级筛选状态（模块级声明放在文件顶部，避免顶层 go() 早于声明执行时踩 TDZ）。 */
 let mdFilter = { q: '', realm: '', cap: '', effort: '', promo: '', sort: 'default' };
 let mdAll = [], mdProbes = {}, mdProbeOf = () => undefined;
-let reqFilter = { q: '', outcome: '' };
+let reqFilter = { q: '', outcome: '', provider: '' };
 let reqEntries = [];
 let usDim = 'account', usCreditDim = 'account', usSort = 'total';
 let usageData = null;
@@ -1135,17 +1135,46 @@ function renderRequestMetrics(m, entries) {
     : '仅内存指标，JSONL 归档已关闭';
 
   reqEntries = entries || [];
+  fillReqProviders();
   renderRequestTable();
 }
 
-/* reqMatch 请求记录筛选：q 对 IP/UA/模型/账号/请求 ID 做空格分词的 AND 包含匹配，
-   outcome 精确匹配。两者都在已拉取的条目上做（最多 1000 条），不发新请求。 */
+/* fillReqProviders 用当前已拉取条目里出现过的供应商重建下拉项（含「全部供应商」）。
+   只在选项集合变化时重建，避免每次轮询都重设 <select>（会打断正在展开的下拉）。
+   当前选中的供应商若已不在结果里，回落到「全部」以免筛出空表。 */
+function fillReqProviders() {
+  const sel = $('reqProvider');
+  if (!sel) return;
+  const set = [];
+  for (const e of reqEntries) {
+    const p = e && e.provider;
+    if (p && set.indexOf(String(p)) < 0) set.push(String(p));
+  }
+  set.sort();
+  const sig = set.join('\n');
+  if (sel.dataset.sig !== sig) {
+    sel.dataset.sig = sig;
+    sel.innerHTML = '<option value="">全部供应商</option>' +
+      set.map(p => '<option value="' + esc(p) + '">' + esc(p) + '</option>').join('');
+  }
+  if (reqFilter.provider && set.indexOf(reqFilter.provider) < 0) {
+    reqFilter.provider = '';
+    sel.value = '';
+  } else {
+    sel.value = reqFilter.provider || '';
+  }
+}
+
+/* reqMatch 请求记录筛选：q 对 IP/UA/模型/账号/供应商/请求 ID 做空格分词的 AND
+   包含匹配，outcome 与 provider 精确匹配。都在已拉取的条目上做（最多 1000 条），
+   不发新请求。 */
 function reqMatch(e, f) {
   f = f || reqFilter;
   if (f.outcome && String(e && e.outcome || '') !== f.outcome) return false;
+  if (f.provider && String(e && e.provider || '') !== f.provider) return false;
   if (f.q) {
     const realm = e && (e.realm === 'global' ? 'global 国际版' : e.realm === 'cn' ? 'cn 国内版' : '');
-    const text = [e && e.client_ip, e && e.user_agent, e && e.model, realm, e && e.account, e && e.request_id]
+    const text = [e && e.client_ip, e && e.user_agent, e && e.model, realm, e && e.account, e && e.provider, e && e.request_id]
       .filter(Boolean).join(' ').toLowerCase();
     for (const kw of f.q.toLowerCase().split(/\s+/).filter(Boolean)) {
       if (!text.includes(kw)) return false;
@@ -1190,11 +1219,18 @@ function reqRealmCell(e) {
 
 /* reqThinkCell 实际思考程度：网关注入 + 降级后真正发给模型的 reasoning_effort 档位
    （如 high/medium/low；显式关闭为 off；空 = 未开思考/模型不支持/旧归档条目）。
-   上游返回思考 token 数时在 title 里补一行「实际想了多少」，与档位互补。 */
+   上游返回思考 token 数时在 title 里补一行「实际想了多少」，与档位互补。
+   两者都没有、但上游确实产出过思考内容时（runable 等自研协议只发 reasoning-delta
+   却不在流里回报 usage），退而显示「有思考」——至少回答「有没有想」。 */
 function reqThinkCell(e) {
   const eff = e && e.reasoning_effort ? String(e.reasoning_effort) : '';
   const rtok = Number(e && e.reasoning_tokens || 0);
-  if (!eff && !(rtok > 0)) return '<span class="muted">—</span>';
+  if (!eff && !(rtok > 0)) {
+    if (e && e.reasoning) {
+      return '<span class="clip" title="上游产生了思考内容（未回报 token 数）">有思考</span>';
+    }
+    return '<span class="muted">—</span>';
+  }
   const tip = [];
   if (eff) tip.push('思考档位 ' + eff);
   if (rtok > 0) tip.push('思考 ' + fmtTok(rtok) + ' tok');
@@ -1251,6 +1287,10 @@ if ($('reqQ')) $('reqQ').oninput = () => {
 };
 if ($('reqOutcome')) $('reqOutcome').onchange = () => {
   reqFilter.outcome = $('reqOutcome').value;
+  renderRequestTable();
+};
+if ($('reqProvider')) $('reqProvider').onchange = () => {
+  reqFilter.provider = $('reqProvider').value;
   renderRequestTable();
 };
 if ($('reqLimit')) $('reqLimit').onchange = loadRequestLogs;
@@ -1325,10 +1365,12 @@ function requestLogText(e) {
     if (Number.isFinite(value)) credit = String(Number(value.toFixed(2))) + ' credit';
   }
   // 实际思考程度：档位取网关注入 + 降级后真正发给模型的值（off = 显式关闭）；
-  // 上游返回思考 token 数时附上「实际想了多少」。两者皆无时不占位（旧归档条目）。
+  // 上游返回思考 token 数时附上「实际想了多少」。两者皆无时不占位（旧归档条目）；
+  // 但若上游确实产出过思考内容（runable 只发 reasoning-delta、不回报 usage），
+  // 退而记「有思考」——至少回答「有没有想」。
   const eff = e && e.reasoning_effort ? String(e.reasoning_effort) : '';
   const rtok = Number(e && e.reasoning_tokens || 0);
-  const think = (!eff && !(rtok > 0)) ? ''
+  const think = (!eff && !(rtok > 0)) ? (e && e.reasoning ? '有思考' : '')
     : '思考 ' + (eff || '—') + (rtok > 0 ? '·' + fmtTok(rtok) + 'tok' : '');
   return [
     when,

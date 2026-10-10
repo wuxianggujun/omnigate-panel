@@ -90,9 +90,13 @@ type Event struct {
 	// ReasoningTokens 上游返回的思考 token 数
 	// （completion_tokens_details.reasoning_tokens）；上游未回该维度时零值省略。
 	// 与 ReasoningEffort 互补：档位是「按什么程度跑」，这里是「实际想了多少」。
-	ReasoningTokens int64  `json:"reasoning_tokens,omitempty"`
-	ClientIP        string `json:"client_ip,omitempty"`
-	UserAgent       string `json:"user_agent,omitempty"`
+	ReasoningTokens int64 `json:"reasoning_tokens,omitempty"`
+	// Reasoning 上游本次是否产出过思考内容（收到过 reasoning 增量）。用于补齐
+	// ReasoningTokens 的空档：runable 等自研协议会发 reasoning-delta，却不在流里
+	// 回报 usage，于是「有没有想」可观测、「想了多少」不可观测。零值省略。
+	Reasoning bool   `json:"reasoning,omitempty"`
+	ClientIP  string `json:"client_ip,omitempty"`
+	UserAgent string `json:"user_agent,omitempty"`
 	// Provider 实际服务的上游供应商名（OmniGate 的 raccoon/runable/deepseek…；
 	// WorkBuddy 网关为空，其"上游"由 Realm 表达）。面板「域/供应商」列在无 realm
 	// 时用它显示请求落到了哪个供应商——让 OmniGate 请求也能和 WorkBuddy 同表可见。
@@ -106,6 +110,7 @@ type Filter struct {
 	Outcome   string
 	Account   string
 	Model     string
+	Provider  string
 	ClientIP  string
 	UserAgent string
 	From      time.Time
@@ -590,6 +595,9 @@ func (f Filter) match(e Event) bool {
 		return false
 	}
 	if !containsFold(e.Model, f.Model) {
+		return false
+	}
+	if !containsFold(e.Provider, f.Provider) {
 		return false
 	}
 	if !containsFold(e.ClientIP, f.ClientIP) {

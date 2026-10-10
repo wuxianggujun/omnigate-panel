@@ -364,6 +364,7 @@ func (g *Gateway) HandleChat(ctx context.Context, req *openai.ChatRequest, w htt
 		}
 		if m := ReqMetaFrom(ctx); m != nil {
 			m.Usage = res.usage
+			m.Reasoning = res.reasoning != ""
 		}
 		_ = openai.EmitFinish(ew, id, displayModel, created, res.finish)
 		if res.usage != nil {
@@ -394,6 +395,7 @@ func (g *Gateway) HandleChat(ctx context.Context, req *openai.ChatRequest, w htt
 	}
 	if m := ReqMetaFrom(ctx); m != nil {
 		m.Usage = res.usage
+		m.Reasoning = res.reasoning != ""
 	}
 	msg := openai.Message{Role: "assistant"}
 	if res.text != "" {

@@ -256,6 +256,7 @@ const cached = { ...good, request_id: 'req-2', cache_hit_tokens: 2257, cache_mis
 const withRealm = { ...good, request_id: 'req-4', realm: 'global' };
 const withEffort = { ...good, request_id: 'req-5', reasoning_effort: 'high', reasoning_tokens: 1234 };
 const withProvider = { ...good, request_id: 'req-6', provider: 'raccoon' };
+const withReasoning = { ...good, request_id: 'req-7', reasoning: true };
 process.stdout.write(JSON.stringify({
   good: ctx.requestLogText(good),
   noSource: ctx.requestLogText(noSource),
@@ -263,6 +264,7 @@ process.stdout.write(JSON.stringify({
   withRealm: ctx.requestLogText(withRealm),
   withEffort: ctx.requestLogText(withEffort),
   withProvider: ctx.requestLogText(withProvider),
+  withReasoning: ctx.requestLogText(withReasoning),
 }));`
 	f, err := os.CreateTemp(t.TempDir(), "request-log-format-*.cjs")
 	if err != nil {
@@ -282,13 +284,15 @@ process.stdout.write(JSON.stringify({
 	withRealm := "14:05:06 | 200 成功 | glm-5.3 | 国际版 | 账号(uid8) | 203.0.113.7 | python-requests/2.31.0 | 1.25s | 2.3k tok | 0.12 credit | req-4"
 	withEffort := "14:05:06 | 200 成功 | glm-5.3 | 思考 high·1.2ktok | 账号(uid8) | 203.0.113.7 | python-requests/2.31.0 | 1.25s | 2.3k tok | 0.12 credit | req-5"
 	withProvider := "14:05:06 | 200 成功 | glm-5.3 | raccoon | 账号(uid8) | 203.0.113.7 | python-requests/2.31.0 | 1.25s | 2.3k tok | 0.12 credit | req-6"
-	want := `{"good":` + strconv.Quote(text) + `,"noSource":` + strconv.Quote(noSource) + `,"cached":` + strconv.Quote(cached) + `,"withRealm":` + strconv.Quote(withRealm) + `,"withEffort":` + strconv.Quote(withEffort) + `,"withProvider":` + strconv.Quote(withProvider) + `}`
+	withReasoning := "14:05:06 | 200 成功 | glm-5.3 | 有思考 | 账号(uid8) | 203.0.113.7 | python-requests/2.31.0 | 1.25s | 2.3k tok | 0.12 credit | req-7"
+	want := `{"good":` + strconv.Quote(text) + `,"noSource":` + strconv.Quote(noSource) + `,"cached":` + strconv.Quote(cached) + `,"withRealm":` + strconv.Quote(withRealm) + `,"withEffort":` + strconv.Quote(withEffort) + `,"withProvider":` + strconv.Quote(withProvider) + `,"withReasoning":` + strconv.Quote(withReasoning) + `}`
 	if strings.TrimSpace(string(out)) != want {
 		t.Fatalf("request log formatting=%s want %s", out, want)
 	}
 }
 
-// 请求记录筛选：IP / UA / 模型 / 账号 / 请求 ID 的包含匹配（空格分词 AND）+ 结果精确匹配。
+// 请求记录筛选：IP / UA / 模型 / 账号 / 供应商 / 请求 ID 的包含匹配（空格分词 AND）
+// + 结果与供应商的精确匹配。
 func TestAppJSRequestMatch(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
@@ -303,8 +307,8 @@ if (start < 0 || end < 0) throw new Error('reqMatch not found');
 const ctx = {};
 vm.createContext(ctx);
 vm.runInContext(src.slice(start, end) + '\nthis.reqMatch=reqMatch;', ctx);
-const base = { outcome: 'success', client_ip: '203.0.113.7', user_agent: 'python-requests/2.31.0', model: 'cn:glm-5.3', realm: 'cn', account: '示例(uid8)', request_id: 'req-1' };
-const other = { outcome: 'http_error', client_ip: '198.51.100.4', user_agent: 'Mozilla/5.0 Chrome/120', model: 'global:hy3', realm: 'global', account: '甲(uid9)', request_id: 'req-2' };
+const base = { outcome: 'success', client_ip: '203.0.113.7', user_agent: 'python-requests/2.31.0', model: 'cn:glm-5.3', realm: 'cn', account: '示例(uid8)', provider: 'raccoon', request_id: 'req-1' };
+const other = { outcome: 'http_error', client_ip: '198.51.100.4', user_agent: 'Mozilla/5.0 Chrome/120', model: 'global:hy3', realm: 'global', account: '甲(uid9)', provider: 'runable', request_id: 'req-2' };
 const rows = [base, other];
 const pick = f => rows.filter(e => ctx.reqMatch(e, f)).map(e => e.request_id);
 process.stdout.write(JSON.stringify({
@@ -318,6 +322,9 @@ process.stdout.write(JSON.stringify({
   combined: pick({ q: '198.51', outcome: 'http_error' }),
   byRealmCn: pick({ q: '国内', outcome: '' }),
   byRealmGlobal: pick({ q: '国际', outcome: '' }),
+  byProvider: pick({ q: '', outcome: '', provider: 'raccoon' }),
+  providerMiss: pick({ q: '', outcome: '', provider: 'deepseek' }),
+  byProviderKw: pick({ q: 'runable', outcome: '' }),
 }));`
 	f, err := os.CreateTemp(t.TempDir(), "request-filter-*.cjs")
 	if err != nil {
@@ -332,7 +339,7 @@ process.stdout.write(JSON.stringify({
 		t.Fatalf("request filter node test failed: %v\n%s", err, out)
 	}
 	// q 对 outcome 不参与匹配（outcome 有独立下拉），multiKw 里的 success 命中不了任何字段。
-	const want = `{"all":["req-1","req-2"],"byIP":["req-1"],"byUA":["req-2"],"byModel":["req-1"],"multiKw":[],"multiMiss":[],"byOutcome":["req-2"],"combined":["req-2"],"byRealmCn":["req-1"],"byRealmGlobal":["req-2"]}`
+	const want = `{"all":["req-1","req-2"],"byIP":["req-1"],"byUA":["req-2"],"byModel":["req-1"],"multiKw":[],"multiMiss":[],"byOutcome":["req-2"],"combined":["req-2"],"byRealmCn":["req-1"],"byRealmGlobal":["req-2"],"byProvider":["req-1"],"providerMiss":[],"byProviderKw":["req-2"]}`
 	if strings.TrimSpace(string(out)) != want {
 		t.Fatalf("request filter=%s want %s", out, want)
 	}

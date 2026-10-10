@@ -151,6 +151,41 @@ func TestStreamOutcomeClientGone(t *testing.T) {
 	}
 }
 
+// 上游只产出思考内容（runable 的 reasoning-delta）也是有效帧：meta.Reasoning 置位，
+// 供请求记录「思考」列在没有 token 数时至少回答「有没有想」。
+func TestStreamSetsReasoningFlag(t *testing.T) {
+	g := testGateway(&scriptProvider{events: []provider.Event{
+		{Type: provider.EventReasoning, Text: "let me think"},
+		{Type: provider.EventText, Text: "answer"},
+		{Type: provider.EventFinish, Finish: "stop"},
+	}})
+	meta := &ReqMeta{}
+	w := httptest.NewRecorder()
+	g.HandleChat(WithReqMeta(context.Background(), meta), streamReq(), w)
+
+	if !meta.Reasoning {
+		t.Fatalf("meta.Reasoning = false, want true (upstream emitted reasoning)")
+	}
+	if meta.Outcome != "" || meta.Status != 0 {
+		t.Fatalf("outcome=%q status=%d, want empty (success)", meta.Outcome, meta.Status)
+	}
+}
+
+// 无思考内容时不置位（避免给普通请求伪造「有思考」）。
+func TestStreamNoReasoningFlag(t *testing.T) {
+	g := testGateway(&scriptProvider{events: []provider.Event{
+		{Type: provider.EventText, Text: "answer"},
+		{Type: provider.EventFinish, Finish: "stop"},
+	}})
+	meta := &ReqMeta{}
+	w := httptest.NewRecorder()
+	g.HandleChat(WithReqMeta(context.Background(), meta), streamReq(), w)
+
+	if meta.Reasoning {
+		t.Fatalf("meta.Reasoning = true, want false (no reasoning content)")
+	}
+}
+
 // errStream always fails its Recv, simulating an upstream read that dies.
 type errStream struct{ err error }
 

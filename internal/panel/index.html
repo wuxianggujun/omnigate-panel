@@ -608,13 +608,16 @@
           <span class="note" id="reqNote">—</span>
         </header>
         <div class="fbar" id="reqFilter">
-          <input id="reqQ" type="search" placeholder="搜索 IP / UA / 模型 / 账号 / 请求 ID" aria-label="搜索请求记录">
+          <input id="reqQ" type="search" placeholder="搜索 IP / UA / 模型 / 账号 / 供应商 / 请求 ID" aria-label="搜索请求记录">
           <select id="reqOutcome" aria-label="按结果筛选">
             <option value="">全部结果</option>
             <option value="success">成功</option>
             <option value="http_error">HTTP 错误</option>
             <option value="stream_error">流错误</option>
             <option value="interrupted">中断</option>
+          </select>
+          <select id="reqProvider" aria-label="按供应商筛选">
+            <option value="">全部供应商</option>
           </select>
           <span class="trange" id="reqRange"></span>
           <select id="reqLimit" aria-label="读取条数">

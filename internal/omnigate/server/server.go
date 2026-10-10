@@ -174,6 +174,8 @@ func (s *Server) serveLogged(w http.ResponseWriter, r *http.Request, fn func(htt
 	}
 	// 实际透传给上游的思考档位（reasoning_effort）。
 	ev.ReasoningEffort = meta.Effort
+	// 上游产出过思考内容但未回报 token 数时（runable），至少记录「有思考」。
+	ev.Reasoning = meta.Reasoning
 	s.reqlog.Record(ev)
 }
 

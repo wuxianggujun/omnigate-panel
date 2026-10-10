@@ -171,6 +171,48 @@ func TestArchiveFilterByClientInfo(t *testing.T) {
 	}
 }
 
+// 供应商过滤（OmniGate 请求记录：provider = raccoon/runable/…）：包含匹配、大小写不敏感；
+// provider 为空的 WorkBuddy 条目不会被非空条件误命中。
+func TestArchiveFilterByProvider(t *testing.T) {
+	dir := t.TempDir()
+	r := New(Config{Enabled: true, Dir: dir, MaxBytes: 1 << 20, RetentionDays: 7})
+	base := time.Now().Add(-time.Minute)
+	rows := []Event{
+		{RequestID: "a", Provider: "raccoon", Status: 200, OK: true, Outcome: OutcomeSuccess},
+		{RequestID: "b", Provider: "runable", Status: 200, OK: true, Outcome: OutcomeSuccess},
+		{RequestID: "c", Status: 200, OK: true, Outcome: OutcomeSuccess}, // WorkBuddy：无 provider
+	}
+	for i, e := range rows {
+		e.Time = base.Add(time.Duration(i) * time.Second)
+		r.Record(e)
+	}
+	r.Close()
+
+	got, err := r.ReadArchive(10, Filter{Provider: "raccoon"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].RequestID != "a" {
+		t.Fatalf("provider filter = %+v", got)
+	}
+	// 大小写不敏感（面板下拉传原始值）。
+	got, err = r.ReadArchive(10, Filter{Provider: "RUN"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].RequestID != "b" {
+		t.Fatalf("provider fold filter = %+v", got)
+	}
+	// 无 provider 的条目不被非空条件误命中。
+	got, err = r.ReadArchive(10, Filter{Provider: "deepseek"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("unmatched provider filter = %+v", got)
+	}
+}
+
 // 时间区间过滤（「今天」/「自定义」）：闭区间，任一侧为零值即该侧不设界。
 func TestArchiveFilterByTimeRange(t *testing.T) {
 	dir := t.TempDir()

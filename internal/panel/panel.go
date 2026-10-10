@@ -355,7 +355,7 @@ func (p *Panel) requestMetrics(w http.ResponseWriter, r *http.Request) {
 }
 
 // requestLogs 从 JSONL 归档读取最近请求；limit 默认 200、最大 1000。
-// 支持按 outcome/account/model/client_ip/user_agent 过滤（字符串字段为包含匹配）
+// 支持按 outcome/account/model/provider/client_ip/user_agent 过滤（字符串字段为包含匹配）
 // 与 from/to 时间区间（闭区间，unix 秒或 RFC3339）——面板「请求记录」的筛选框、
 // 来源查询与「今天 / 自定义区间」都走这里。
 func (p *Panel) requestLogs(w http.ResponseWriter, r *http.Request) {
@@ -377,6 +377,7 @@ func (p *Panel) requestLogs(w http.ResponseWriter, r *http.Request) {
 		Outcome:   q.Get("outcome"),
 		Account:   q.Get("account"),
 		Model:     q.Get("model"),
+		Provider:  q.Get("provider"),
 		ClientIP:  q.Get("client_ip"),
 		UserAgent: q.Get("user_agent"),
 		From:      parseTimeParam(q.Get("from")),

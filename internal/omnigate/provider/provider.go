@@ -49,6 +49,9 @@ type ChatInput struct {
 	// Messages is the structured form used by OpenAI-compatible providers.
 	Messages []openai.Message
 	Tools    []openai.Tool
+	// ReasoningEffort is the OpenAI thinking tier (minimal/low/medium/high)
+	// forwarded to reasoning-capable upstreams; empty = not requested.
+	ReasoningEffort string
 	// Incognito/Mode mirror the original gateway's upstream modes.
 	Incognito bool
 	Mode      string

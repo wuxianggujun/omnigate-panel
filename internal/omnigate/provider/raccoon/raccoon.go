@@ -878,6 +878,9 @@ func (p *Provider) StreamChat(ctx context.Context, acc *provider.Account, in pro
 	if len(in.Tools) > 0 {
 		body["tools"] = in.Tools
 	}
+	if in.ReasoningEffort != "" {
+		body["reasoning_effort"] = in.ReasoningEffort
+	}
 	raw, _ := json.Marshal(body)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.client.llmBase+"/chat/completions", bytes.NewReader(raw))
 	if err != nil {

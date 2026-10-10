@@ -93,6 +93,10 @@ type ChatRequest struct {
 	Messages []Message `json:"messages"`
 	Stream   bool      `json:"stream"`
 	Tools    []Tool    `json:"tools,omitempty"`
+	// ReasoningEffort is the OpenAI thinking tier (minimal/low/medium/high).
+	// Forwarded to reasoning-capable upstreams (raccoon honors it) and recorded
+	// in the request log's 思考 column.
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
 }
 
 // Model is one entry in GET /v1/models.

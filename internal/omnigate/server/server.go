@@ -164,6 +164,8 @@ func (s *Server) serveLogged(w http.ResponseWriter, r *http.Request, fn func(htt
 			}
 		}
 	}
+	// 实际透传给上游的思考档位（reasoning_effort）。
+	ev.ReasoningEffort = meta.Effort
 	s.reqlog.Record(ev)
 }
 

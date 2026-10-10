@@ -288,6 +288,11 @@ func (g *Gateway) HandleChat(ctx context.Context, req *openai.ChatRequest, w htt
 	if m := ReqMetaFrom(ctx); m != nil {
 		m.Provider = provName
 		m.Model = displayModel
+		// 思考档位：仅当上游会真正收到 reasoning_effort 时记录（raccoon/openai
+		// 型会透传；runable 自研协议不支持，记了会误导）。
+		if req.ReasoningEffort != "" && supportsEffort(prov.Type()) {
+			m.Effort = req.ReasoningEffort
+		}
 	}
 
 	id := openai.NewID()
@@ -364,6 +369,13 @@ func (g *Gateway) HandleChat(ctx context.Context, req *openai.ChatRequest, w htt
 	g.log.Info("✓ 完成 %s · %s", displayModel, res.finish)
 }
 
+// supportsEffort reports whether a provider forwards reasoning_effort upstream.
+// raccoon and OpenAI-compatible upstreams accept the OpenAI thinking tier;
+// runable's bespoke protocol has no equivalent.
+func supportsEffort(provType string) bool {
+	return provType == "raccoon" || provType == "openai"
+}
+
 // usageMap renders provider usage as an OpenAI-format usage object (nil → zero).
 func usageMap(u *provider.Usage) map[string]any {
 	if u == nil {
@@ -438,6 +450,7 @@ func (g *Gateway) runChat(ctx context.Context, provName string, prov provider.Pr
 	in.Model = model
 	in.Incognito = incognito
 	in.Mode = g.cfg.Mode
+	in.ReasoningEffort = req.ReasoningEffort
 	if hasTools {
 		in.Messages = req.Messages
 		in.Tools = req.Tools

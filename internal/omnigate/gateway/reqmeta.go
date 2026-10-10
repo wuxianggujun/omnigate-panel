@@ -19,6 +19,9 @@ type ReqMeta struct {
 	// Usage 是上游回报的 OpenAI 格式 token 用量（raccoon 等会在末尾 chunk 带
 	// usage；不回报时为 nil），供请求记录填充 Token/思考列。
 	Usage *provider.Usage
+	// Effort 是实际透传给上游的思考档位（reasoning_effort）。空 = 未请求或
+	// 上游不支持。
+	Effort string
 }
 
 type reqMetaKey struct{}

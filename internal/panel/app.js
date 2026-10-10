@@ -3977,20 +3977,37 @@ async function removeOmniAccountFromConfig(provider, label) {
    上游没给价格时返回空串（不编造）。 */
 function omniPriceText(m) {
   const bits = [];
+  const b = m.billing || {};
+  const mult = m.credit_unit === 'multiplier';
   if (m.credits != null) {
-    if (m.credit_unit === 'multiplier') bits.push('×' + m.credits + ' 倍率');
-    else if (m.credit_unit === 'credits_per_million_tokens') bits.push(m.credits + ' 积分 / 1M token');
-    else bits.push(String(m.credits));
+    if (mult) {
+      // 生效倍率为 0 = 当前免费（多为限免）。
+      if (m.credits === 0) bits.push('免费');
+      else bits.push('×' + m.credits + ' 倍率');
+    } else if (m.credit_unit === 'credits_per_million_tokens') {
+      bits.push(m.credits + ' 积分 / 1M token');
+    } else {
+      bits.push(String(m.credits));
+    }
+  } else if (m.is_free) {
+    bits.push('免费');
   }
-  if (m.is_free) bits.push('免费');
+  // 生效价与牌价不同 = 正在打折 / 限免。
+  if (mult && m.credits != null && b.multiplier != null && b.multiplier !== m.credits) {
+    bits.push('牌价 ×' + b.multiplier);
+  }
+  // 折扣 / 限免说明（如「限免至10月31日」）。
+  if (Array.isArray(b.discounts)) {
+    for (const d of b.discounts) {
+      if (d && d.active && d.name) bits.push(String(d.name));
+    }
+  }
+  // runable 的 isFree 表示「免费档可用」（由每日免费额度抵扣），与积分价并存。
+  if (m.is_free && !mult && m.credits != null) bits.push('免费档');
   if (m.pricing) {
     const per1m = v => (v == null ? '' : '$' + (v * 1e6).toFixed(2));
     const inp = per1m(m.pricing.input), out = per1m(m.pricing.output);
     if (inp && out) bits.push('in ' + inp + ' / out ' + out + ' / 1M');
-  }
-  if (m.billing && m.billing.multiplier != null && m.billing.effective_multiplier != null &&
-      m.billing.multiplier !== m.billing.effective_multiplier) {
-    bits.push('牌价 ×' + m.billing.multiplier);
   }
   return bits.join(' · ');
 }

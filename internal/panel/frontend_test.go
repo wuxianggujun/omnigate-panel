@@ -254,11 +254,13 @@ const good = { time, status: 200, outcome: 'success', model: 'glm-5.3', account:
 const noSource = { ...good, request_id: 'req-3', client_ip: '', user_agent: '' };
 const cached = { ...good, request_id: 'req-2', cache_hit_tokens: 2257, cache_miss_tokens: 43 };
 const withRealm = { ...good, request_id: 'req-4', realm: 'global' };
+const withEffort = { ...good, request_id: 'req-5', reasoning_effort: 'high', reasoning_tokens: 1234 };
 process.stdout.write(JSON.stringify({
   good: ctx.requestLogText(good),
   noSource: ctx.requestLogText(noSource),
   cached: ctx.requestLogText(cached),
   withRealm: ctx.requestLogText(withRealm),
+  withEffort: ctx.requestLogText(withEffort),
 }));`
 	f, err := os.CreateTemp(t.TempDir(), "request-log-format-*.cjs")
 	if err != nil {
@@ -276,7 +278,8 @@ process.stdout.write(JSON.stringify({
 	noSource := "14:05:06 | 200 成功 | glm-5.3 | 账号(uid8) | — | — | 1.25s | 2.3k tok | 0.12 credit | req-3"
 	cached := "14:05:06 | 200 成功 | glm-5.3 | 账号(uid8) | 203.0.113.7 | python-requests/2.31.0 | 1.25s | 2.3k tok | 0.12 credit | 命中 98.1% | req-2"
 	withRealm := "14:05:06 | 200 成功 | glm-5.3 | 国际版 | 账号(uid8) | 203.0.113.7 | python-requests/2.31.0 | 1.25s | 2.3k tok | 0.12 credit | req-4"
-	want := `{"good":` + strconv.Quote(text) + `,"noSource":` + strconv.Quote(noSource) + `,"cached":` + strconv.Quote(cached) + `,"withRealm":` + strconv.Quote(withRealm) + `}`
+	withEffort := "14:05:06 | 200 成功 | glm-5.3 | 思考 high·1.2ktok | 账号(uid8) | 203.0.113.7 | python-requests/2.31.0 | 1.25s | 2.3k tok | 0.12 credit | req-5"
+	want := `{"good":` + strconv.Quote(text) + `,"noSource":` + strconv.Quote(noSource) + `,"cached":` + strconv.Quote(cached) + `,"withRealm":` + strconv.Quote(withRealm) + `,"withEffort":` + strconv.Quote(withEffort) + `}`
 	if strings.TrimSpace(string(out)) != want {
 		t.Fatalf("request log formatting=%s want %s", out, want)
 	}

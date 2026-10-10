@@ -188,6 +188,11 @@ type ChatMeta struct {
 	ConversationID        string // X-Conversation-ID：body 提取的入站值，空则不发（透传优先，不伪造）
 	ConversationRequestID string // X-Conversation-Request-ID / X-Root-Request-ID：聚合主键，必发
 	TraceID               string // X-Trace-ID：入站透传值，空则回落 conversationRequestID
+	// EffortOut 为**仅日志用**的出参：非 nil 时由 ChatStreamContext 回填本次出站
+	// 请求体实际生效的思考档位（inject/降级后的 reasoning_effort；显式关闭为 "off"；
+	// 无档位为空串）。它从不作为 HTTP 头发出，只为让请求日志能回答「这次到底按什么
+	// 思考程度跑的」——值取自真正出站的那份 body，与上游收到的一致，不二次推算。
+	EffortOut *string
 }
 
 // ChatHeaders 在 common 之上加 chat 专属的账号头。

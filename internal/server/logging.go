@@ -67,6 +67,13 @@ type chatStat struct {
 	cacheMiss int64
 	hasCache  bool
 
+	// reasoningEffort 本次出站实际生效的思考档位（网关注入+降级后的 reasoning_effort；
+	// 显式关闭为 "off"；空 = 未开思考/模型不支持）。由 ChatMeta.EffortOut 回填。
+	// reasoningTokens 上游返回的思考 token 数（completion_tokens_details.reasoning_tokens）；
+	// 上游未回该维度时保持 0。二者互补回答「这次到底按什么思考程度跑、实际想了多少」。
+	reasoningEffort string
+	reasoningTokens int64
+
 	// 调用来源（客户端 IP / User-Agent）。空 = 未采集（logging.request_client_info
 	// 关闭，或非 chat 路径），展示层一律以 "-" 兜底。
 	clientIP  string
@@ -91,7 +98,8 @@ func (s *chatStat) done() {
 	}
 	s.logged = true
 	logChatRowEx(s.ttfb, time.Since(s.start), s.model, s.realm, s.mode, s.uid, s.nick, s.status, s.toks,
-		s.requestID, s.outcome, s.attempts, s.credit, s.hasCredit, s.clientIP, s.userAgent)
+		s.requestID, s.outcome, s.attempts, s.credit, s.hasCredit, s.clientIP, s.userAgent,
+		s.reasoningEffort, s.reasoningTokens)
 }
 
 // chatStatsReader 在流式透传时抓取 SSE 末帧的 usage.completion_tokens 精确值，
@@ -118,7 +126,11 @@ type chatStatsReader struct {
 	cacheHit     int
 	cacheMiss    int
 	hasCacheMiss bool
-	pend         []byte // 已读未返回的行缓存
+	// reasoningTokens 上游末帧 usage.completion_tokens_details.reasoning_tokens
+	// （本次实际思考 token 数）；上游未回该维度时 hasReasoning=false。
+	hasReasoning   bool
+	reasoningToken int
+	pend           []byte // 已读未返回的行缓存
 }
 
 // newChatStatsReaderSince 以 since 为 TTFB 计时起点（通常是请求进入 handler 的时刻）。
@@ -137,6 +149,12 @@ func (s *chatStatsReader) Credit() (float64, bool) { return s.credit, s.hasCredi
 
 // TotalTokens 返回末帧 usage.total_tokens 与是否缺失。
 func (s *chatStatsReader) TotalTokens() (int, bool) { return s.totalTokens, s.hasTotalTokens }
+
+// ReasoningTokens 返回末帧 usage.completion_tokens_details.reasoning_tokens
+// （本次实际思考 token 数）与是否缺失。
+func (s *chatStatsReader) ReasoningTokens() (int, bool) {
+	return s.reasoningToken, s.hasReasoning
+}
 
 // Usage 返回流式响应中已收到的 token usage 字段。
 func (s *chatStatsReader) Usage() pool.TokenUsageDelta {
@@ -173,6 +191,10 @@ func (s *chatStatsReader) parseSSELine(line string) {
 			Credit               *float64 `json:"credit"`
 			PromptCacheHitTokens *int     `json:"prompt_cache_hit_tokens"`
 			PromptCacheMissTok   *int     `json:"prompt_cache_miss_tokens"`
+			// 思考 token 数（上游 deepseek 系等返回）。
+			CompletionTokensDetails *struct {
+				ReasoningTokens *int `json:"reasoning_tokens"`
+			} `json:"completion_tokens_details"`
 		} `json:"usage"`
 	}
 	if json.Unmarshal([]byte(payload), &chunk) != nil || chunk.Usage == nil {
@@ -207,6 +229,10 @@ func (s *chatStatsReader) parseSSELine(line string) {
 	if chunk.Usage.PromptCacheMissTok != nil {
 		s.hasCacheMiss = true
 		s.cacheMiss = *chunk.Usage.PromptCacheMissTok
+	}
+	if d := chunk.Usage.CompletionTokensDetails; d != nil && d.ReasoningTokens != nil {
+		s.hasReasoning = true
+		s.reasoningToken = *d.ReasoningTokens
 	}
 }
 
@@ -320,6 +346,30 @@ func usageDeltaFromResponse(resp map[string]any) pool.TokenUsageDelta {
 	return delta
 }
 
+// reasoningTokensFromUsage 从非流式聚合响应的 usage 取
+// completion_tokens_details.reasoning_tokens（本次实际思考 token 数）；缺失返回 (0,false)。
+func reasoningTokensFromUsage(usage map[string]any) (int64, bool) {
+	det, ok := usage["completion_tokens_details"].(map[string]any)
+	if !ok {
+		return 0, false
+	}
+	switch n := det["reasoning_tokens"].(type) {
+	case float64:
+		return int64(n), true
+	case float32:
+		return int64(n), true
+	case int:
+		return int64(n), true
+	case int64:
+		return n, true
+	case json.Number:
+		v, err := n.Int64()
+		return v, err == nil
+	default:
+		return 0, false
+	}
+}
+
 // completionTokens 从 Aggregate 返回的响应中提取 usage.completion_tokens；缺失返回 -1。
 func completionTokens(resp map[string]any) int {
 	u, ok := resp["usage"].(map[string]any)
@@ -425,6 +475,8 @@ func (t *requestTrace) event(status int) reqlog.Event {
 		e.HasCredit = s.hasCredit
 		e.CacheHitTokens = s.cacheHit
 		e.CacheMissTokens = s.cacheMiss
+		e.ReasoningEffort = s.reasoningEffort
+		e.ReasoningTokens = s.reasoningTokens
 	}
 	e.ClientIP = t.clientIP
 	e.UserAgent = t.userAgent
@@ -493,14 +545,16 @@ const (
 //     uid8 时人眼无法判断是哪个号，要辨认必须再查 auths/，排障多一跳；
 //   - toks<0 表示 usage 缺失，显示 "-"。
 func logChatRow(ttfb, total time.Duration, model, realm, mode, uid, nick string, status int, toks int) {
-	logChatRowEx(ttfb, total, model, realm, mode, uid, nick, status, toks, "", "", 0, 0, false, "", "")
+	logChatRowEx(ttfb, total, model, realm, mode, uid, nick, status, toks, "", "", 0, 0, false, "", "", "", 0)
 }
 
-// logChatRowEx 是带请求 ID、结果、重试、积分与调用来源字段的扩展流水行。旧调用保持
-// 原格式；requestID 非空时才追加扩展字段；来源两参均为空时不追加来源段。
+// logChatRowEx 是带请求 ID、结果、重试、积分、调用来源与思考程度字段的扩展流水行。旧调用
+// 保持原格式；requestID 非空时才追加扩展字段；来源两参均为空时不追加来源段。
+// effort 为本次出站实际生效的思考档位（空显示 "-"）；reasoningTokens>0 时在扩展段追加
+// rtok（本次实际思考 token 数）。
 func logChatRowEx(ttfb, total time.Duration, model, realm, mode, uid, nick string, status int, toks int,
 	requestID, outcome string, attempts int, credit float64, hasCredit bool,
-	clientIP, userAgent string) {
+	clientIP, userAgent, effort string, reasoningTokens int64) {
 	if !chatLogEnabled {
 		return
 	}
@@ -540,7 +594,12 @@ func logChatRowEx(ttfb, total time.Duration, model, realm, mode, uid, nick strin
 		if hasCredit {
 			creditField = fmt.Sprintf("%.4f", credit)
 		}
-		extra = fmt.Sprintf(" rid=%s | out=%s | try=%d | credit=%s |", requestID, outcome, attempts, creditField)
+		extra = fmt.Sprintf(" rid=%s | out=%s | try=%d | credit=%s | think=%s |",
+			requestID, outcome, attempts, creditField, dashIfEmpty(effort))
+		// 本次实际思考 token 数（上游返回该维度时才有）：与 think 档位互补。
+		if reasoningTokens > 0 {
+			extra += fmt.Sprintf(" rtok=%d |", reasoningTokens)
+		}
 	}
 	// 调用来源：IP 用可解析的裸值（便于 grep），UA 用 ShortUA 压缩后的客户端标签
 	// 并加引号（标签内可能含空格，如 `OpenAI/Python 1.30.0` 只会取到 OpenAI/Python）。

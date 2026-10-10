@@ -222,6 +222,38 @@ func normalizeReasoningEffort(obj map[string]any, efforts map[string][]string) {
 	}
 }
 
+// EffectiveEffortOf 从**改写完成后**的出站请求体读取本次实际生效的思考档位。
+//
+// 读 reasoning_effort（snake 优先，camel 兜底）；无档位但 thinking.type=disabled
+// 时返回 "off"（显式关闭，区别于"未开思考/模型不支持"）；两者皆无返回空串。
+// 与 normalizeReasoningEffort 同源读取，供请求日志回答「这次到底按什么思考程度
+// 跑的」——只读不写，不重跑 inject/降级逻辑。
+func EffectiveEffortOf(body []byte) string {
+	if len(body) == 0 {
+		return ""
+	}
+	var obj struct {
+		ReasoningEffort      string `json:"reasoning_effort"`
+		ReasoningEffortCamel string `json:"reasoningEffort"`
+		Thinking             struct {
+			Type string `json:"type"`
+		} `json:"thinking"`
+	}
+	if err := json.Unmarshal(body, &obj); err != nil {
+		return ""
+	}
+	if s := strings.TrimSpace(obj.ReasoningEffort); s != "" {
+		return s
+	}
+	if s := strings.TrimSpace(obj.ReasoningEffortCamel); s != "" {
+		return s
+	}
+	if strings.EqualFold(strings.TrimSpace(obj.Thinking.Type), "disabled") {
+		return "off"
+	}
+	return ""
+}
+
 // normalizeRoles 把 messages 里的 developer 角色归一为 system。
 //
 // 背景：上游对 messages 的 role 字段做白名单校验，developer 不在白名单内，

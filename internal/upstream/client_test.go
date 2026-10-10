@@ -321,7 +321,8 @@ func TestFetchModelsEffortsDriveBodyDowngrade(t *testing.T) {
 		t.Errorf("infos[0].DefaultEffort=%q want high", infos[0].DefaultEffort)
 	}
 	// glm-5.2 只支持 low/high，请求 max → 降级为 high
-	rc, status, _, err := c.ChatStream(a, []byte(`{"model":"glm-5.2","reasoning_effort":"max","messages":[]}`), "", ChatMeta{})
+	var effortOut string
+	rc, status, _, err := c.ChatStream(a, []byte(`{"model":"glm-5.2","reasoning_effort":"max","messages":[]}`), "", ChatMeta{EffortOut: &effortOut})
 	if err != nil || status != 200 {
 		t.Fatalf("chat: status=%d err=%v", status, err)
 	}
@@ -332,6 +333,10 @@ func TestFetchModelsEffortsDriveBodyDowngrade(t *testing.T) {
 	}
 	if got, _ := m["reasoning_effort"].(string); got != "high" {
 		t.Errorf("reasoning_effort=%v want high (outbound=%s)", m["reasoning_effort"], outbound)
+	}
+	// EffortOut 必须回填与出站 body 同源的降级后档位（请求日志用）。
+	if effortOut != "high" {
+		t.Errorf("EffortOut=%q want high (downgraded from max)", effortOut)
 	}
 }
 

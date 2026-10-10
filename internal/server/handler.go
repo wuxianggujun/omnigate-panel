@@ -802,6 +802,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	//     无 user 消息时退化成本请求级随机——轮转内捕获一次即共享；
 	//   - messageID 在 ChatHeaders 内每条消息生成（消息级独立，无需外部可见）。
 	chatMeta := upstream.ChatMeta{ConversationID: session.ResolveConversationID(body)}
+	// 出站实际生效的思考档位由 upstream 侧回填（见 ChatMeta.EffortOut）：请求日志用它
+	// 回答「这次到底按什么思考程度跑的」（网关注入 + 降级后真正发给模型的值）。
+	// 轮转内每次出站都会刷新，最终记的是本次请求最后那次尝试的档位。
+	var effectiveEffort string
+	chatMeta.EffortOut = &effectiveEffort
 	if v := r.Header.Get("X-Conversation-Request-ID"); v != "" {
 		chatMeta.ConversationRequestID = v
 	} else if turnKey != "" && sessKey != "" {
@@ -897,6 +902,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		// 客户端 IP 按请求传递（PassthroughIP 开启时注入；消除共享字段竞态）。
 		attemptStarted := time.Now()
 		rc, status, respBody, terr := h.cfg.Upstream.ChatStreamContext(r.Context(), acct, body, clientIP, chatMeta)
+		// 记录本次出站实际生效的思考档位（upstream 回填）。失败/成功路径都适用——
+		// 日志要回答的是「这一跳按什么程度发的」，与结果无关。
+		st.reasoningEffort = effectiveEffort
 		// 分类信封一次成型：upstream 已在错误路径返回 *upstream.Error（Kind +
 		// Retry-After 头解析）。传输层错误（非 *Error）走抖动换号分支；防御分支
 		// （terr 为 nil 但 status>=400，如 ErrNone 兜底）回落本地 Classify，双保险。
@@ -1115,6 +1123,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			if hit, miss, ok := stats.CacheTokens(); ok {
 				st.cacheHit, st.cacheMiss, st.hasCache = hit, miss, true
 			}
+			// 本次实际思考 token 数（上游末帧 usage 带该维度时才有）。
+			if rt, ok := stats.ReasoningTokens(); ok {
+				st.reasoningTokens = int64(rt)
+			}
 			recordAttempt(acct.UID, stats.Usage(), credit, hasCredit, attemptStarted, stats.TTFB())
 			// WARN 信号放 recordAttempt 之后：st.promptTokens 此时才是本次的观测值。
 			if st.hasCache {
@@ -1176,6 +1188,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			if hit, okH := upstream.UsageCacheHitTokens(usage); okH {
 				miss, _ := upstream.UsageCacheMissTokens(usage)
 				st.cacheHit, st.cacheMiss, st.hasCache = int64(hit), int64(miss), true
+			}
+			// 本次实际思考 token 数（上游 usage 带 completion_tokens_details 时才有）。
+			if rt, okR := reasoningTokensFromUsage(usage); okR {
+				st.reasoningTokens = rt
 			}
 		}
 		recordAttempt(acct.UID, usageDeltaFromResponse(resp), credit, hasCredit, attemptStarted, 0)

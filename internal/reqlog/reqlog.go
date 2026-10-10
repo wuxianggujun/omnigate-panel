@@ -83,8 +83,16 @@ type Event struct {
 	// 上游未回该维度时两者皆零值省略；hit=0 + miss>0 即整段未命中。
 	CacheHitTokens  int64 `json:"cache_hit_tokens,omitempty"`
 	CacheMissTokens int64 `json:"cache_miss_tokens,omitempty"`
-	ClientIP         string    `json:"client_ip,omitempty"`
-	UserAgent        string    `json:"user_agent,omitempty"`
+	// ReasoningEffort 本次出站请求体实际生效的思考档位（网关注入 + 降级后的
+	// reasoning_effort，如 high/medium/low；显式关闭为 "off"；空 = 未开思考/
+	// 模型不支持/旧归档条目）。回答「这次到底按什么思考程度跑的」。
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
+	// ReasoningTokens 上游返回的思考 token 数
+	// （completion_tokens_details.reasoning_tokens）；上游未回该维度时零值省略。
+	// 与 ReasoningEffort 互补：档位是「按什么程度跑」，这里是「实际想了多少」。
+	ReasoningTokens int64 `json:"reasoning_tokens,omitempty"`
+	ClientIP        string `json:"client_ip,omitempty"`
+	UserAgent       string `json:"user_agent,omitempty"`
 }
 
 // Filter 用于从归档中筛选最近记录。字符串字段一律「包含」匹配（大小写不敏感），

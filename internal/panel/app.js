@@ -1184,6 +1184,21 @@ function reqRealmCell(e) {
   return '<span class="realm-tag">' + realmLabel(r) + '</span>';
 }
 
+/* reqThinkCell 实际思考程度：网关注入 + 降级后真正发给模型的 reasoning_effort 档位
+   （如 high/medium/low；显式关闭为 off；空 = 未开思考/模型不支持/旧归档条目）。
+   上游返回思考 token 数时在 title 里补一行「实际想了多少」，与档位互补。 */
+function reqThinkCell(e) {
+  const eff = e && e.reasoning_effort ? String(e.reasoning_effort) : '';
+  const rtok = Number(e && e.reasoning_tokens || 0);
+  if (!eff && !(rtok > 0)) return '<span class="muted">—</span>';
+  const tip = [];
+  if (eff) tip.push('思考档位 ' + eff);
+  if (rtok > 0) tip.push('思考 ' + fmtTok(rtok) + ' tok');
+  const cls = eff === 'off' ? 'muted' : '';
+  return '<span class="' + (cls || 'clip') + '" title="' + esc(tip.join(' · ')) + '">' +
+    esc(eff || (fmtTok(rtok) + ' tok')) + '</span>';
+}
+
 /* renderRequestTable 渲染请求记录表。来源列是这一版的重点：IP 用等宽字体方便扫，
    UA 单行截断（完整值在 title 里，行本身用 requestLogText 作 tooltip）。 */
 function renderRequestTable() {
@@ -1200,6 +1215,7 @@ function renderRequestTable() {
       '<td>' + reqOutcomeTag(e) + '</td>' +
       '<td>' + esc(e && e.model || '—') + '</td>' +
       '<td>' + reqRealmCell(e) + '</td>' +
+      '<td>' + reqThinkCell(e) + '</td>' +
       '<td>' + esc(e && e.account || '—') + '</td>' +
       '<td>' + (ip ? '<span class="clip ip" title="' + esc(ip) + '">' + esc(ip) + '</span>' : '<span class="muted">—</span>') + '</td>' +
       '<td>' + (ua ? '<span class="clip" title="' + esc(ua) + '">' + esc(ua) + '</span>' : '<span class="muted">—</span>') + '</td>' +
@@ -1208,7 +1224,7 @@ function renderRequestTable() {
       '<td class="num">' + reqCreditCell(e) + '</td>' +
       '<td>' + (rid ? '<span class="clip rid" title="' + esc(rid) + '">' + esc(rid) + '</span>' : '<span class="muted">—</span>') + '</td>' +
       '</tr>';
-  }).join('') || '<tr><td colspan="11" class="empty">' +
+  }).join('') || '<tr><td colspan="12" class="empty">' +
       (reqEntries.length ? '没有符合当前筛选条件的请求记录' : '暂无请求记录') + '</td></tr>';
 
   const filtered = list.length !== reqEntries.length;
@@ -1304,11 +1320,18 @@ function requestLogText(e) {
     const value = Number(e.credit);
     if (Number.isFinite(value)) credit = String(Number(value.toFixed(2))) + ' credit';
   }
+  // 实际思考程度：档位取网关注入 + 降级后真正发给模型的值（off = 显式关闭）；
+  // 上游返回思考 token 数时附上「实际想了多少」。两者皆无时不占位（旧归档条目）。
+  const eff = e && e.reasoning_effort ? String(e.reasoning_effort) : '';
+  const rtok = Number(e && e.reasoning_tokens || 0);
+  const think = (!eff && !(rtok > 0)) ? ''
+    : '思考 ' + (eff || '—') + (rtok > 0 ? '·' + fmtTok(rtok) + 'tok' : '');
   return [
     when,
     String(e && e.status || '—') + ' ' + (outcomeLabel[e && e.outcome] || (e && e.outcome) || '—'),
     e && e.model || '—',
     e && e.realm ? (e.realm === 'global' ? '国际版' : '国内版') : '',
+    think,
     e && e.account || '—',
     e && e.client_ip || '—',
     e && e.user_agent || '—',

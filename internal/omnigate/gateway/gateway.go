@@ -675,14 +675,16 @@ func (g *Gateway) RunableAccounts(ctx context.Context, providerName string) ([]m
 	return out, nil
 }
 
-// RunableLogin verifies Runable credentials by logging in server-side (the panel
-// acts as the client, exactly like the APK's RunableApi does) and probing the
-// resulting session, returning the account identity + current credits.
+// RunableVerify 校验 runable 账号并返回账号身份 + 当前积分（用于面板「浏览器登录」）。
 //
-// 这是面板对 runable 的「一键登录」：runable 没有设备码/跳转授权（better-auth 的
-// device 端点全部 404），登录产物只是 api.runable.com 上的 httpOnly Cookie——任何
-// 网页都读不到，所以面板只能自己作为客户端直连登录，无需任何浏览器。
-func (g *Gateway) RunableLogin(ctx context.Context, providerName, email, password string) (map[string]any, error) {
+// runable 只支持 Google/Facebook 登录（邮箱密码已全局关闭：服务端直连会得到
+// EMAIL_PASSWORD_DISABLED），且登录产物是 runable.com 域下的 httpOnly Cookie——任何
+// 网页（含面板）都读不到，Google 也不会把结果交回面板。所以面板无法自动登录/抓取，
+// 只能由用户在浏览器登录 runable.com 后，把 session_token 贴进来，这里做一次服务端
+// 校验（get-session）并取积分。
+//
+// 若给了 email/password（runable 未来若重开密码登录）则先登录再校验；否则直接用 cookie。
+func (g *Gateway) RunableVerify(ctx context.Context, providerName, email, password, cookie string) (map[string]any, error) {
 	pcfg := g.cfg.Provider(providerName)
 	if pcfg == nil || pcfg.Type != "runable" {
 		return nil, fmt.Errorf("provider %q 不是 runable 类型", providerName)
@@ -691,21 +693,25 @@ func (g *Gateway) RunableLogin(ctx context.Context, providerName, email, passwor
 	if !ok {
 		return nil, fmt.Errorf("provider %q 不是 runable 类型", providerName)
 	}
+	cookie = normalizeRunableCookie(cookie)
 	email = strings.TrimSpace(email)
-	if email == "" || password == "" {
-		return nil, fmt.Errorf("邮箱和密码不能为空")
+	if cookie == "" && (email == "" || password == "") {
+		return nil, fmt.Errorf("请粘贴 session_token（Cookie）")
 	}
 	lctx, cancel := context.WithTimeout(ctx, 40*time.Second)
 	defer cancel()
-	cookie, err := rp.Client().SignIn(lctx, email, password)
-	if err != nil {
-		return nil, err
+	if cookie == "" {
+		c, err := rp.Client().SignIn(lctx, email, password)
+		if err != nil {
+			return nil, err
+		}
+		cookie = c
 	}
 	sess := rp.Client().FetchSession(lctx, cookie)
 	if !sess.Alive {
-		return nil, fmt.Errorf("登录成功但会话校验未通过（请确认邮箱/密码）")
+		return nil, fmt.Errorf("会话无效或已过期：请重新在 runable.com 登录后复制 session_token")
 	}
-	out := map[string]any{"name": sess.Name}
+	out := map[string]any{"name": sess.Name, "cookie": cookie}
 	if sess.Email != "" {
 		out["email"] = sess.Email
 	} else {
@@ -717,6 +723,20 @@ func (g *Gateway) RunableLogin(ctx context.Context, providerName, email, passwor
 		out["daily"] = cr.Daily
 	}
 	return out, nil
+}
+
+// normalizeRunableCookie 把用户粘贴的内容规范成可用的 Cookie 头：
+//   - 只给 session_token 的值（无 "="）→ 补 "session_token="；
+//   - 已含 "session_token=" 或整段 Cookie 头 → 原样返回。
+func normalizeRunableCookie(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if strings.Contains(raw, "=") {
+		return raw
+	}
+	return "session_token=" + raw
 }
 
 // LastCheckin returns when a named check-in task last ran.

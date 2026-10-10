@@ -94,17 +94,18 @@ func (p *Panel) omniAccountRemove(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, d)
 }
 
-// omniAccountLoginReq 一键登录请求体（runable：服务端直连登录校验）。
+// omniAccountLoginReq 一键登录请求体（runable：服务端会话校验）。
 type omniAccountLoginReq struct {
 	Provider string `json:"provider"`
 	Email    string `json:"email"`
 	Password string `json:"password"`
+	Cookie   string `json:"cookie"`
 }
 
-// omniAccountLogin 校验 runable 类账号：服务端直连登录 + 会话探测，返回身份与积分。
-// 面板「浏览器登录」一键调用；成功后由前端把邮箱/密码写入 omnigate.json 并热生效。
-// runable 无设备/跳转授权（device 端点 404），登录产物是 httpOnly Cookie，网页读不到，
-// 所以只能由面板自己作为客户端登录——无需任何浏览器。
+// omniAccountLogin 校验 runable 类账号：服务端会话探测（get-session）+ 取积分，返回
+// 身份与积分。面板「浏览器登录」调用；成功后由前端把 session_token 写入 omnigate.json
+// 并热生效。runable 只支持 Google/Facebook 登录、会话是 httpOnly Cookie（网页读不到），
+// 所以只能由用户粘贴 session_token——面板无法自动抓取。
 func (p *Panel) omniAccountLogin(w http.ResponseWriter, r *http.Request) {
 	if p.cfg.OmniLogin == nil {
 		writeErr(w, http.StatusNotImplemented, "omnigate not enabled")
@@ -124,11 +125,11 @@ func (p *Panel) omniAccountLogin(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "provider 不能为空")
 		return
 	}
-	d, err := p.cfg.OmniLogin(req.Provider, req.Email, req.Password)
+	d, err := p.cfg.OmniLogin(req.Provider, req.Email, req.Password, req.Cookie)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	log.Printf("panel: OmniGate 一键登录校验 %s（%s）", req.Provider, req.Email)
+	log.Printf("panel: OmniGate 登录校验 %s（%s）", req.Provider, req.Email)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "account": d})
 }

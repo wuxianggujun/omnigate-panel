@@ -460,16 +460,16 @@ func (m *omniManager) CheckinAll(ctx context.Context) (any, error) {
 	return map[string]any{"providers": out}, nil
 }
 
-// LoginRunable 校验 runable 账号：服务端直连登录 + 会话探测，返回账号身份与当前
-// 积分。供面板「浏览器登录」一键使用——runable 无设备/跳转授权（device 端点 404），
-// 登录产物只是 httpOnly Cookie，网页读不到，只能由面板自己作为客户端登录。
-// 仅校验，不落盘；账号由面板随后写入 omnigate.json 并热生效。
-func (m *omniManager) LoginRunable(provider, email, password string) (any, error) {
+// LoginRunable 校验 runable 账号：用粘贴的 session_token Cookie（或邮箱/密码）做一次
+// 服务端会话探测，返回账号身份与当前积分。供面板「浏览器登录」使用——runable 只支持
+// Google/Facebook 登录，且会话是 httpOnly Cookie（网页读不到），面板无法自动抓取，
+// 只能由用户粘贴。仅校验，不落盘；账号由面板随后写入 omnigate.json 并热生效。
+func (m *omniManager) LoginRunable(provider, email, password, cookie string) (any, error) {
 	rt := m.cur.Load()
 	if rt == nil {
 		return nil, errors.New("omnigate 未启用")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
-	return rt.gw.RunableLogin(ctx, provider, email, password)
+	return rt.gw.RunableVerify(ctx, provider, email, password, cookie)
 }

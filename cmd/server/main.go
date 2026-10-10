@@ -458,8 +458,8 @@ func main() {
 			defer cancel()
 			return omni.CheckinAll(ctx)
 		}
-		// runable 一键登录校验（服务端直连登录 + 会话探测）：runable 无跳转授权，
-		// 面板只能自己作为客户端登录，无需浏览器。
+		// runable 登录校验（服务端会话探测 + 取积分）：runable 只支持 Google/Facebook
+		// 登录、会话是 httpOnly Cookie（网页读不到），面板无法自动抓取，只能由用户粘贴。
 		pcfg.OmniLogin = omni.LoginRunable
 	}
 	pn := panel.New(pcfg)

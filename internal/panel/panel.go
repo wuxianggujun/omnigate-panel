@@ -119,11 +119,10 @@ type Config struct {
 	OmniCheckin    func(provider, label string) (any, error)
 	OmniRemove     func(provider, label string) (any, error)
 	OmniCheckinAll func() (any, error)
-	// OmniLogin 校验 runable 类账号（服务端直连登录 + 会话探测），返回账号身份与
-	// 当前积分。面板「浏览器登录」一键调用：runable 无设备/跳转授权，登录产物只是
-	// httpOnly Cookie，网页读不到，只能由面板自己作为客户端登录（无需浏览器）。
-	// nil 时对应接口返回 501。
-	OmniLogin func(provider, email, password string) (any, error)
+	// OmniLogin 校验 runable 类账号（服务端会话探测），返回账号身份与当前积分。
+	// 面板「浏览器登录」调用：runable 只支持 Google/Facebook 登录，会话是 httpOnly
+	// Cookie（网页读不到），只能由用户粘贴 session_token；nil 时对应接口返回 501。
+	OmniLogin func(provider, email, password, cookie string) (any, error)
 }
 
 // Panel 管理面板 handler。挂载方式：外层 mux Handle("/panel/", panel)，

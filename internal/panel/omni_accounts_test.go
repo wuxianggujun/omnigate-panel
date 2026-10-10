@@ -118,15 +118,15 @@ func TestOmniAccountCheckinRemove(t *testing.T) {
 	}
 }
 
-// 一键登录：POST /panel/api/omni/account/login 转发 provider/email/password，
+// 一键登录：POST /panel/api/omni/account/login 转发 provider/email/password/cookie，
 // 返回注入闭包给出的账号身份 + 积分；缺 provider 返回 400。
 func TestOmniAccountLogin(t *testing.T) {
-	var gotProv, gotEmail, gotPwd string
+	var gotProv, gotCookie string
 	p, tok := mustPanel(t, Config{
 		Version: "test",
-		OmniLogin: func(prov, email, password string) (any, error) {
-			gotProv, gotEmail, gotPwd = prov, email, password
-			return map[string]any{"name": "张三", "email": email, "available": 6600}, nil
+		OmniLogin: func(prov, email, password, cookie string) (any, error) {
+			gotProv, gotCookie = prov, cookie
+			return map[string]any{"name": "张三", "email": email, "cookie": cookie, "available": 6600}, nil
 		},
 	})
 	post := func(body string) *httptest.ResponseRecorder {
@@ -137,12 +137,12 @@ func TestOmniAccountLogin(t *testing.T) {
 		p.ServeHTTP(rec, req)
 		return rec
 	}
-	rec := post(`{"provider":"runable","email":"a@b.com","password":"pw"}`)
+	rec := post(`{"provider":"runable","cookie":"session_token=abc"}`)
 	if rec.Code != 200 {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	if gotProv != "runable" || gotEmail != "a@b.com" || gotPwd != "pw" {
-		t.Errorf("forwarded %q/%q/%q", gotProv, gotEmail, gotPwd)
+	if gotProv != "runable" || gotCookie != "session_token=abc" {
+		t.Errorf("forwarded %q/%q", gotProv, gotCookie)
 	}
 	if !strings.Contains(rec.Body.String(), `"available":6600`) {
 		t.Errorf("body missing credits: %s", rec.Body.String())
@@ -159,7 +159,7 @@ func TestOmniAccountLogin(t *testing.T) {
 func TestOmniAccountLoginNotEnabled(t *testing.T) {
 	p, tok := mustPanel(t, Config{Version: "test"})
 	req := httptest.NewRequest("POST", "/panel/api/omni/account/login",
-		strings.NewReader(`{"provider":"runable","email":"a@b.com","password":"pw"}`))
+		strings.NewReader(`{"provider":"runable","cookie":"session_token=abc"}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+tok)
 	rec := httptest.NewRecorder()

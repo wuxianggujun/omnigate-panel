@@ -3659,7 +3659,7 @@ function ogAcctCount() {
 }
 function ogNextLabel() {
   const t = addSourceType(addSource);
-  const base = t === 'raccoon' ? '浣熊账号' : (t === 'runable' ? '办公助手账号' : '账号');
+  const base = t === 'raccoon' ? '浣熊账号' : (t === 'runable' ? 'runable账号' : '账号');
   return base + (ogAcctCount() + 1);
 }
 
@@ -3785,57 +3785,50 @@ async function saveOmniToken() {
   }
 }
 
-// loginOgCreds 一键登录并保存 runable 类账号。
-// runable 没有跳转/设备授权（better-auth 的 device 端点全部 404），登录产物只是
-// api.runable.com 上的 httpOnly Cookie——任何网页都读不到。所以面板直接作为客户端
-// 在服务端登录（和 APK 的 RunableApi 同理），无需任何浏览器：填邮箱/密码 → 面板
-// 登录校验并取积分 → 写入 omnigate.json 热生效。仅当账号只能用 Google 登录（没有
-// 密码）时，才用折叠里的「粘贴 Cookie」兜底。
+// loginOgCreds 校验并保存 runable 类账号（浏览器登录 → 复制 session_token）。
+// runable 只支持 Google/Facebook 登录（没有邮箱密码），且会话是 api.runable.com 上的
+// httpOnly Cookie——网页读不到、也没有跳转授权，所以面板无法自动抓取。用户在浏览器
+// 登录 runable.com 后把 session_token 粘进来，这里调服务端做一次会话校验并取积分，
+// 再写入 omnigate.json 热生效。
 async function loginOgCreds() {
   const label = $('ogAcctLabel').value.trim();
-  const email = $('ogAcctEmail').value.trim();
-  const password = $('ogAcctPassword').value;
   const cookie = $('ogAcctCookie').value.trim();
   if (!label) { ogMsg('ogCredsMsg', '请填写账号名', 'err'); return; }
-  if (!cookie && (!email || !password)) { ogMsg('ogCredsMsg', '请填写邮箱 + 密码，或直接粘贴 Cookie', 'err'); return; }
+  if (!cookie) { ogMsg('ogCredsMsg', '请粘贴 session_token', 'err'); return; }
   const btn = $('btnOgCredsSave');
   const oldText = btn ? btn.textContent : '';
-  if (btn) { btn.disabled = true; btn.textContent = '登录中…'; }
+  if (btn) { btn.disabled = true; btn.textContent = '校验中…'; }
   ogMsg('ogCredsMsg', '');
   try {
-    let info = null;
-    if (!cookie) {
-      // 面板服务端直连 runable 登录 + 会话探测（无浏览器，非跳转授权）。
-      const res = await api('omni/account/login', {
-        method: 'POST',
-        body: JSON.stringify({ provider: addSource, email, password }),
-      });
-      info = (res && res.account) || {};
-    }
+    // 服务端校验会话（get-session）+ 取积分，返回规范化的 Cookie。
+    const res = await api('omni/account/login', {
+      method: 'POST',
+      body: JSON.stringify({ provider: addSource, cookie }),
+    });
+    const info = (res && res.account) || {};
     const cfg = await fetchOmniCfg();
     const prov = (cfg.providers || []).find(p => p.name === addSource);
     if (!prov) throw new Error('找不到供应商 ' + addSource);
-    const acct = { label, email, password };
-    if (cookie) acct.cookie = cookie;
+    const acct = { label, cookie: info.cookie || cookie };
     prov.accounts = prov.accounts || [];
     const idx = prov.accounts.findIndex(a => (a.label || '') === label);
     if (idx >= 0) prov.accounts[idx] = acct; else prov.accounts.push(acct);
     await api('omni/config', { method: 'POST', body: JSON.stringify(normalizeOmniForSave(cfg)) });
-    let msg;
-    if (info) {
-      msg = '登录成功：' + (info.name || info.email || label)
-        + (typeof info.available === 'number' ? ' · 积分 ' + info.available : '') + '，账号已载入池中';
-    } else {
-      msg = '已保存并热生效：' + label;
-    }
+    const msg = '已保存：' + (info.name || info.email || label)
+      + (typeof info.available === 'number' ? ' · 积分 ' + info.available : '') + '，已载入池中';
     ogMsg('ogCredsMsg', msg, 'ok');
     await loadOverview(true);
     setTimeout(closeAdd, 1100);
   } catch (e) {
-    ogMsg('ogCredsMsg', (cookie ? '保存失败：' : '登录失败：') + e.message, 'err');
+    ogMsg('ogCredsMsg', '校验失败：' + e.message, 'err');
   } finally {
-    if (btn) { btn.disabled = false; btn.textContent = oldText || '一键登录并保存'; }
+    if (btn) { btn.disabled = false; btn.textContent = oldText || '保存并校验'; }
   }
+}
+
+// openRunableLogin 打开 runable 登录页（用户在那里用 Google 登录，随后复制 session_token）。
+function openRunableLogin() {
+  window.open('https://runable.com/', '_blank', 'noopener');
 }
 
 // removeOmniAccountFromConfig 删除 runable 类账号（静态配置，改 omnigate.json 后热生效）。
@@ -4015,12 +4008,13 @@ async function saveOutbound() {
   on('btnReloadCfg', loadOmniConfig);
   const pe = $('provEditor');
   if (pe) { pe.addEventListener('input', onProvInput); pe.addEventListener('change', onProvInput); pe.addEventListener('click', onProvClick); }
-  // 账号授权（OmniGate）：raccoon 网页授权 / 粘贴 Token；runable 一键登录
+  // 账号授权（OmniGate）：raccoon 网页授权 / 粘贴 Token；runable 浏览器登录（粘贴 Cookie）
   on('btnStartOgAuth', authorizeOmni);
   on('btnOpenAuth', openOmniAuth);
   on('btnCopyAuth', copyOmniAuth);
   on('btnSubmitCb', submitOmniCallback);
   on('btnTokenSave', saveOmniToken);
+  on('btnOgOpenLogin', openRunableLogin);
   on('btnOgCredsSave', loginOgCreds);
   on('btnOgGoProv', () => { closeAdd(); go('providers'); history.replaceState(null, '', '#providers'); });
   on('addSource', switchAddSource, 'change');

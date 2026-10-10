@@ -134,6 +134,38 @@ func TestStreamOutcomeInterrupted(t *testing.T) {
 	}
 }
 
+// 客户端断连的另一种形态：连接关闭使 ctx 取消，上游读随之中断。必须归为
+// interrupted（人已走），而不是上游故障 stream_error。
+func TestStreamOutcomeClientGone(t *testing.T) {
+	g := testGateway(&errProvider{err: errors.New("read: connection reset by peer")})
+	meta := &ReqMeta{}
+	ctx, cancel := context.WithCancel(WithReqMeta(context.Background(), meta))
+	cancel()
+	g.HandleChat(ctx, streamReq(), httptest.NewRecorder())
+
+	if meta.Outcome != reqlog.OutcomeInterrupted {
+		t.Fatalf("outcome = %q, want %q", meta.Outcome, reqlog.OutcomeInterrupted)
+	}
+	if meta.Status != 0 {
+		t.Fatalf("status = %d, want 0 (keep actual 200)", meta.Status)
+	}
+}
+
+// errStream always fails its Recv, simulating an upstream read that dies.
+type errStream struct{ err error }
+
+func (s *errStream) Recv() (provider.Event, error) { return provider.Event{}, s.err }
+func (s *errStream) Close() error                  { return nil }
+
+type errProvider struct{ err error }
+
+func (p *errProvider) Name() string                                       { return "fake" }
+func (p *errProvider) Type() string                                       { return "openai" }
+func (p *errProvider) ListModels(context.Context) ([]openai.Model, error) { return nil, nil }
+func (p *errProvider) StreamChat(context.Context, *provider.Account, provider.ChatInput) (provider.Stream, error) {
+	return &errStream{err: p.err}, nil
+}
+
 // failWriter fails every write, simulating a disconnected client mid-stream.
 type failWriter struct{ h http.Header }
 

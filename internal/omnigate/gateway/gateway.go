@@ -333,10 +333,15 @@ func (g *Gateway) HandleChat(ctx context.Context, req *openai.ChatRequest, w htt
 		}
 		res, err := g.runChat(ctx, provName, prov, upstreamModel, req, incognito, hasTools, onText, onReasoning)
 		if err != nil {
-			// 上游 error 帧 / 读失败：HTTP 头已发 200，用 503 观测（与 WorkBuddy
-			// 侧流式 error 帧同语义），否则运维在请求记录里看到的是假成功。
+			// 分两类：ctx 取消 / 写失败 = 客户端断连（人已走，归 interrupted，不改
+			// 观测状态码）；其余 = 上游 error 帧 / 读失败（用 503 观测，与 WorkBuddy
+			// 侧流式 error 帧同语义）。此前一律记 200 success，是假成功。
+			if ctx.Err() != nil || ew.err != nil {
+				markStreamFailure(ctx, reqlog.OutcomeInterrupted, 0)
+			} else {
+				markStreamFailure(ctx, reqlog.OutcomeStreamError, http.StatusServiceUnavailable)
+			}
 			g.log.Error("对话失败 %s: %v", displayModel, err)
-			markStreamFailure(ctx, reqlog.OutcomeStreamError, http.StatusServiceUnavailable)
 			fmt.Fprintf(ew, "data: %s\n\n", openai.ErrorJSON("upstream_error", err.Error()))
 			_ = openai.EmitFinish(ew, id, displayModel, created, "stop")
 			_ = openai.Done(ew)

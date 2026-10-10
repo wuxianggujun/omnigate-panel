@@ -56,10 +56,24 @@ type ChatInput struct {
 
 // Event is one normalized stream event.
 type Event struct {
-	Type      string // "text" | "reasoning" | "finish" | "error" | "tool_calls"
+	Type      string // "text" | "reasoning" | "finish" | "error" | "tool_calls" | "usage"
 	Text      string
 	Finish    string
 	ToolCalls []openai.ToolCall
+	// Usage carries the upstream's OpenAI-format token accounting when it
+	// reports one (providers that emit a trailing usage chunk). nil = not
+	// reported.
+	Usage *Usage
+}
+
+// Usage is the OpenAI-format token accounting an upstream reports for a
+// completion. Zero fields mean "not reported".
+type Usage struct {
+	PromptTokens     int
+	CompletionTokens int
+	TotalTokens      int
+	CachedTokens     int
+	ReasoningTokens  int
 }
 
 // Event type constants.
@@ -69,6 +83,7 @@ const (
 	EventFinish    = "finish"
 	EventError     = "error"
 	EventToolCalls = "tool_calls"
+	EventUsage     = "usage"
 )
 
 // Stream yields normalized events until io.EOF.

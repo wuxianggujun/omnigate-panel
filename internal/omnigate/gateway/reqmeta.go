@@ -1,6 +1,10 @@
 package gateway
 
-import "context"
+import (
+	"context"
+
+	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/provider"
+)
 
 // ReqMeta 承载一次 chat 请求的路由结果，供请求记录使用。
 //
@@ -12,6 +16,9 @@ type ReqMeta struct {
 	Provider string // 命中的 provider 名（raccoon / runable / deepseek …）
 	Model    string // 展示用模型名（displayModel，通常带 provider 前缀）
 	Account  string // 实际服务账号 label（api-key 上游为 "api-key"）
+	// Usage 是上游回报的 OpenAI 格式 token 用量（raccoon 等会在末尾 chunk 带
+	// usage；不回报时为 nil），供请求记录填充 Token/思考列。
+	Usage *provider.Usage
 }
 
 type reqMetaKey struct{}

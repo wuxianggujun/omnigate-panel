@@ -75,6 +75,7 @@ type chatResult struct {
 	finish    string
 	toolCalls []openai.ToolCall
 	errText   string
+	usage     *provider.Usage
 }
 
 // Option configures the Gateway at construction time.
@@ -330,7 +331,13 @@ func (g *Gateway) HandleChat(ctx context.Context, req *openai.ChatRequest, w htt
 		if len(res.toolCalls) > 0 {
 			_ = openai.EmitToolCalls(w, id, displayModel, created, res.toolCalls)
 		}
+		if m := ReqMetaFrom(ctx); m != nil {
+			m.Usage = res.usage
+		}
 		_ = openai.EmitFinish(w, id, displayModel, created, res.finish)
+		if res.usage != nil {
+			_ = openai.EmitUsage(w, id, displayModel, created, usageMap(res.usage))
+		}
 		_ = openai.Done(w)
 		flush()
 		g.log.Info("✓ 完成 %s · 流式 · %s", displayModel, res.finish)
@@ -343,6 +350,9 @@ func (g *Gateway) HandleChat(ctx context.Context, req *openai.ChatRequest, w htt
 		writeJSON(w, 502, openai.ErrorJSON("upstream_error", err.Error()))
 		return
 	}
+	if m := ReqMetaFrom(ctx); m != nil {
+		m.Usage = res.usage
+	}
 	msg := openai.Message{Role: "assistant"}
 	if res.text != "" {
 		msg.Content = openai.Content{Text: res.text}
@@ -350,8 +360,27 @@ func (g *Gateway) HandleChat(ctx context.Context, req *openai.ChatRequest, w htt
 	if len(res.toolCalls) > 0 {
 		msg.ToolCalls = res.toolCalls
 	}
-	writeJSON(w, 200, openai.Completion(id, displayModel, created, msg, res.finish))
+	writeJSON(w, 200, openai.Completion(id, displayModel, created, msg, res.finish, usageMap(res.usage)))
 	g.log.Info("✓ 完成 %s · %s", displayModel, res.finish)
+}
+
+// usageMap renders provider usage as an OpenAI-format usage object (nil → zero).
+func usageMap(u *provider.Usage) map[string]any {
+	if u == nil {
+		return nil
+	}
+	m := map[string]any{
+		"prompt_tokens":     u.PromptTokens,
+		"completion_tokens": u.CompletionTokens,
+		"total_tokens":      u.TotalTokens,
+	}
+	if u.CachedTokens > 0 {
+		m["prompt_tokens_details"] = map[string]any{"cached_tokens": u.CachedTokens}
+	}
+	if u.ReasoningTokens > 0 {
+		m["completion_tokens_details"] = map[string]any{"reasoning_tokens": u.ReasoningTokens}
+	}
+	return m
 }
 
 func (g *Gateway) runChat(ctx context.Context, provName string, prov provider.Provider, model string, req *openai.ChatRequest, incognito, hasTools bool, onText, onReasoning func(string)) (*chatResult, error) {
@@ -386,6 +415,8 @@ func (g *Gateway) runChat(ctx context.Context, provName string, prov provider.Pr
 				}
 			case provider.EventFinish:
 				res.finish = e.Finish
+			case provider.EventUsage:
+				res.usage = e.Usage
 			case provider.EventError:
 				res.errText = e.Text
 			}
@@ -450,6 +481,8 @@ func (g *Gateway) runChat(ctx context.Context, provName string, prov provider.Pr
 			res.toolCalls = append(res.toolCalls, e.ToolCalls...)
 		case provider.EventFinish:
 			res.finish = e.Finish
+		case provider.EventUsage:
+			res.usage = e.Usage
 		case provider.EventError:
 			res.errText = e.Text
 		}

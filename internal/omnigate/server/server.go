@@ -151,6 +151,19 @@ func (s *Server) serveLogged(w http.ResponseWriter, r *http.Request, fn func(htt
 		ev.ClientIP = clientIP(r)
 		ev.UserAgent = r.UserAgent()
 	}
+	// 上游回报的 OpenAI 格式 usage（raccoon 等）：填 Token / 思考列。
+	if u := meta.Usage; u != nil {
+		ev.PromptTokens = int64(u.PromptTokens)
+		ev.CompletionTokens = int64(u.CompletionTokens)
+		ev.TotalTokens = int64(u.TotalTokens)
+		ev.ReasoningTokens = int64(u.ReasoningTokens)
+		if u.CachedTokens > 0 {
+			ev.CacheHitTokens = int64(u.CachedTokens)
+			if miss := u.PromptTokens - u.CachedTokens; miss > 0 {
+				ev.CacheMissTokens = int64(miss)
+			}
+		}
+	}
 	s.reqlog.Record(ev)
 }
 

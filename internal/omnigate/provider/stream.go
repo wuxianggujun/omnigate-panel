@@ -17,6 +17,13 @@ type OpenAIStream struct {
 	calls   []openai.ToolCall
 	byIndex map[int]int
 	pending []Event
+
+	// usage is the trailing usage block (held until end so it can be emitted
+	// before the buffered finish, letting the caller record it).
+	usage *Usage
+	// pendingFinish buffers the finish_reason until the stream ends, so a
+	// trailing usage chunk is not lost (upstreams send finish then usage).
+	pendingFinish *string
 }
 
 // NewOpenAIStream wraps an OpenAI-compatible SSE response body.
@@ -46,6 +53,39 @@ type openAIChunk struct {
 		} `json:"delta"`
 		FinishReason *string `json:"finish_reason"`
 	} `json:"choices"`
+	Usage *openAIUsage `json:"usage"`
+}
+
+// openAIUsage is the OpenAI-format usage block. Upstreams (raccoon included)
+// send it in a trailing chunk after the finish_reason chunk.
+type openAIUsage struct {
+	PromptTokens            int `json:"prompt_tokens"`
+	CompletionTokens        int `json:"completion_tokens"`
+	TotalTokens             int `json:"total_tokens"`
+	PromptTokensDetails     *struct {
+		CachedTokens int `json:"cached_tokens"`
+	} `json:"prompt_tokens_details"`
+	CompletionTokensDetails *struct {
+		ReasoningTokens int `json:"reasoning_tokens"`
+	} `json:"completion_tokens_details"`
+}
+
+func (u *openAIUsage) toUsage() *Usage {
+	if u == nil {
+		return nil
+	}
+	out := &Usage{
+		PromptTokens:     u.PromptTokens,
+		CompletionTokens: u.CompletionTokens,
+		TotalTokens:      u.TotalTokens,
+	}
+	if u.PromptTokensDetails != nil {
+		out.CachedTokens = u.PromptTokensDetails.CachedTokens
+	}
+	if u.CompletionTokensDetails != nil {
+		out.ReasoningTokens = u.CompletionTokensDetails.ReasoningTokens
+	}
+	return out
 }
 
 // Recv returns the next normalized event, or io.EOF when the stream ends.
@@ -58,27 +98,23 @@ func (s *OpenAIStream) Recv() (Event, error) {
 		}
 		data, err := s.sc.Next()
 		if err != nil {
-			if err == io.EOF && len(s.calls) > 0 {
-				c := s.calls
-				s.calls = nil
-				return Event{Type: EventToolCalls, ToolCalls: c}, nil
-			}
-			return Event{}, err
+			return s.end(err)
 		}
 		data = strings.TrimSpace(data)
 		if data == "" {
 			continue
 		}
 		if data == "[DONE]" {
-			if len(s.calls) > 0 {
-				c := s.calls
-				s.calls = nil
-				return Event{Type: EventToolCalls, ToolCalls: c}, nil
-			}
-			return Event{}, io.EOF
+			return s.end(io.EOF)
 		}
 		var ch openAIChunk
-		if err := json.Unmarshal([]byte(data), &ch); err != nil || len(ch.Choices) == 0 {
+		if err := json.Unmarshal([]byte(data), &ch); err != nil {
+			continue
+		}
+		if ch.Usage != nil {
+			s.usage = ch.Usage.toUsage()
+		}
+		if len(ch.Choices) == 0 {
 			continue
 		}
 		c0 := ch.Choices[0]
@@ -92,15 +128,45 @@ func (s *OpenAIStream) Recv() (Event, error) {
 			s.addCall(tc)
 		}
 		if c0.FinishReason != nil {
+			fin := MapOpenAIFinish(*c0.FinishReason)
+			// Hold the finish until the stream ends: upstreams report usage in
+			// a trailing chunk right after it.
+			s.pendingFinish = &fin
 			if len(s.calls) > 0 {
 				c := s.calls
 				s.calls = nil
-				s.pending = append(s.pending, Event{Type: EventFinish, Finish: MapOpenAIFinish(*c0.FinishReason)})
 				return Event{Type: EventToolCalls, ToolCalls: c}, nil
 			}
-			return Event{Type: EventFinish, Finish: MapOpenAIFinish(*c0.FinishReason)}, nil
+			continue
 		}
 	}
+}
+
+// end finalizes the stream: it queues any captured usage before the buffered
+// finish (so callers that stop on EventFinish still see usage), flushes pending
+// tool calls, then returns the next queued event or err.
+func (s *OpenAIStream) end(err error) (Event, error) {
+	if s.usage != nil {
+		u := s.usage
+		s.usage = nil
+		s.pending = append(s.pending, Event{Type: EventUsage, Usage: u})
+	}
+	if s.pendingFinish != nil {
+		f := *s.pendingFinish
+		s.pendingFinish = nil
+		s.pending = append(s.pending, Event{Type: EventFinish, Finish: f})
+	}
+	if len(s.calls) > 0 {
+		c := s.calls
+		s.calls = nil
+		s.pending = append(s.pending, Event{Type: EventToolCalls, ToolCalls: c})
+	}
+	if len(s.pending) > 0 {
+		e := s.pending[0]
+		s.pending = s.pending[1:]
+		return e, nil
+	}
+	return Event{}, err
 }
 
 func (s *OpenAIStream) addCall(tc openAIToolCallDelta) {

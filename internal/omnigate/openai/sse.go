@@ -63,14 +63,44 @@ func EmitFinish(w io.Writer, id, model string, created int64, reason string) err
 	return writeChunk(w, id, model, created, map[string]any{}, reason)
 }
 
+// EmitUsage writes a terminal usage-only chunk (empty choices), matching the
+// OpenAI streaming shape. Upstreams report usage in a trailing chunk after the
+// finish_reason chunk; forwarding it keeps clients (and the /v1/responses
+// translation) on real token counts instead of zeros.
+func EmitUsage(w io.Writer, id, model string, created int64, usage map[string]any) error {
+	obj := map[string]any{
+		"id":      id,
+		"object":  "chat.completion.chunk",
+		"created": created,
+		"model":   model,
+		"choices": []any{},
+		"usage":   usage,
+	}
+	b, err := json.Marshal(obj)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(w, "data: %s\n\n", b)
+	return err
+}
+
 // Done writes the SSE terminator.
 func Done(w io.Writer) error {
 	_, err := io.WriteString(w, "data: [DONE]\n\n")
 	return err
 }
 
-// Completion builds a non-streaming chat.completion body.
-func Completion(id, model string, created int64, msg Message, finish string) []byte {
+// ZeroUsage is the placeholder usage block used when an upstream reports none.
+func ZeroUsage() map[string]any {
+	return map[string]any{"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+}
+
+// Completion builds a non-streaming chat.completion body. usage may be nil, in
+// which case a zero-usage block is emitted.
+func Completion(id, model string, created int64, msg Message, finish string, usage map[string]any) []byte {
+	if usage == nil {
+		usage = ZeroUsage()
+	}
 	obj := map[string]any{
 		"id":      id,
 		"object":  "chat.completion",
@@ -81,7 +111,7 @@ func Completion(id, model string, created int64, msg Message, finish string) []b
 			"message":       msg,
 			"finish_reason": finish,
 		}},
-		"usage": map[string]any{"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+		"usage": usage,
 	}
 	b, _ := json.Marshal(obj)
 	return b

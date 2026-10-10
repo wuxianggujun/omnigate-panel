@@ -1585,7 +1585,7 @@ function addTabsForSource(src) {
   if (src === '__wb') return [['login', '浏览器登录'], ['import', '导入 cockpit'], ['bundle', '导入账号包']];
   const t = addSourceType(src);
   if (t === 'raccoon') return [['ogauth', '浏览器登录'], ['ogtoken', '粘贴 Token']];
-  if (t === 'runable') return [['ogcreds', '账号密码']];
+  if (t === 'runable') return [['ogcreds', '浏览器登录']];
   return [['ognone', '说明']];
 }
 const ADD_PANELS = {
@@ -3785,17 +3785,33 @@ async function saveOmniToken() {
   }
 }
 
-// saveOgCreds 保存 runable 类账号（邮箱/密码，或直接给 Cookie）到 omnigate.json。
-// runable 的凭证必须是静态配置：运行时 DynAccount 不含 email/password 字段，
-// 网关按需用邮箱/密码登录换取会话。
-async function saveOgCreds() {
+// loginOgCreds 一键登录并保存 runable 类账号。
+// runable 没有跳转/设备授权（better-auth 的 device 端点全部 404），登录产物只是
+// api.runable.com 上的 httpOnly Cookie——任何网页都读不到。所以面板直接作为客户端
+// 在服务端登录（和 APK 的 RunableApi 同理），无需任何浏览器：填邮箱/密码 → 面板
+// 登录校验并取积分 → 写入 omnigate.json 热生效。仅当账号只能用 Google 登录（没有
+// 密码）时，才用折叠里的「粘贴 Cookie」兜底。
+async function loginOgCreds() {
   const label = $('ogAcctLabel').value.trim();
   const email = $('ogAcctEmail').value.trim();
   const password = $('ogAcctPassword').value;
   const cookie = $('ogAcctCookie').value.trim();
   if (!label) { ogMsg('ogCredsMsg', '请填写账号名', 'err'); return; }
   if (!cookie && (!email || !password)) { ogMsg('ogCredsMsg', '请填写邮箱 + 密码，或直接粘贴 Cookie', 'err'); return; }
+  const btn = $('btnOgCredsSave');
+  const oldText = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = '登录中…'; }
+  ogMsg('ogCredsMsg', '');
   try {
+    let info = null;
+    if (!cookie) {
+      // 面板服务端直连 runable 登录 + 会话探测（无浏览器，非跳转授权）。
+      const res = await api('omni/account/login', {
+        method: 'POST',
+        body: JSON.stringify({ provider: addSource, email, password }),
+      });
+      info = (res && res.account) || {};
+    }
     const cfg = await fetchOmniCfg();
     const prov = (cfg.providers || []).find(p => p.name === addSource);
     if (!prov) throw new Error('找不到供应商 ' + addSource);
@@ -3805,11 +3821,20 @@ async function saveOgCreds() {
     const idx = prov.accounts.findIndex(a => (a.label || '') === label);
     if (idx >= 0) prov.accounts[idx] = acct; else prov.accounts.push(acct);
     await api('omni/config', { method: 'POST', body: JSON.stringify(normalizeOmniForSave(cfg)) });
-    ogMsg('ogCredsMsg', '已保存并热生效：' + label, 'ok');
+    let msg;
+    if (info) {
+      msg = '登录成功：' + (info.name || info.email || label)
+        + (typeof info.available === 'number' ? ' · 积分 ' + info.available : '') + '，账号已载入池中';
+    } else {
+      msg = '已保存并热生效：' + label;
+    }
+    ogMsg('ogCredsMsg', msg, 'ok');
     await loadOverview(true);
-    setTimeout(closeAdd, 900);
+    setTimeout(closeAdd, 1100);
   } catch (e) {
-    ogMsg('ogCredsMsg', '保存失败：' + e.message, 'err');
+    ogMsg('ogCredsMsg', (cookie ? '保存失败：' : '登录失败：') + e.message, 'err');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = oldText || '一键登录并保存'; }
   }
 }
 
@@ -3990,13 +4015,13 @@ async function saveOutbound() {
   on('btnReloadCfg', loadOmniConfig);
   const pe = $('provEditor');
   if (pe) { pe.addEventListener('input', onProvInput); pe.addEventListener('change', onProvInput); pe.addEventListener('click', onProvClick); }
-  // 账号授权（OmniGate）：raccoon 网页授权 / 粘贴 Token；runable 账号密码
+  // 账号授权（OmniGate）：raccoon 网页授权 / 粘贴 Token；runable 一键登录
   on('btnStartOgAuth', authorizeOmni);
   on('btnOpenAuth', openOmniAuth);
   on('btnCopyAuth', copyOmniAuth);
   on('btnSubmitCb', submitOmniCallback);
   on('btnTokenSave', saveOmniToken);
-  on('btnOgCredsSave', saveOgCreds);
+  on('btnOgCredsSave', loginOgCreds);
   on('btnOgGoProv', () => { closeAdd(); go('providers'); history.replaceState(null, '', '#providers'); });
   on('addSource', switchAddSource, 'change');
   on('btnLoadModels', loadUpstreamModels);

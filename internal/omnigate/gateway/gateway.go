@@ -675,6 +675,50 @@ func (g *Gateway) RunableAccounts(ctx context.Context, providerName string) ([]m
 	return out, nil
 }
 
+// RunableLogin verifies Runable credentials by logging in server-side (the panel
+// acts as the client, exactly like the APK's RunableApi does) and probing the
+// resulting session, returning the account identity + current credits.
+//
+// 这是面板对 runable 的「一键登录」：runable 没有设备码/跳转授权（better-auth 的
+// device 端点全部 404），登录产物只是 api.runable.com 上的 httpOnly Cookie——任何
+// 网页都读不到，所以面板只能自己作为客户端直连登录，无需任何浏览器。
+func (g *Gateway) RunableLogin(ctx context.Context, providerName, email, password string) (map[string]any, error) {
+	pcfg := g.cfg.Provider(providerName)
+	if pcfg == nil || pcfg.Type != "runable" {
+		return nil, fmt.Errorf("provider %q 不是 runable 类型", providerName)
+	}
+	rp, ok := g.providers[providerName].(*runable.Provider)
+	if !ok {
+		return nil, fmt.Errorf("provider %q 不是 runable 类型", providerName)
+	}
+	email = strings.TrimSpace(email)
+	if email == "" || password == "" {
+		return nil, fmt.Errorf("邮箱和密码不能为空")
+	}
+	lctx, cancel := context.WithTimeout(ctx, 40*time.Second)
+	defer cancel()
+	cookie, err := rp.Client().SignIn(lctx, email, password)
+	if err != nil {
+		return nil, err
+	}
+	sess := rp.Client().FetchSession(lctx, cookie)
+	if !sess.Alive {
+		return nil, fmt.Errorf("登录成功但会话校验未通过（请确认邮箱/密码）")
+	}
+	out := map[string]any{"name": sess.Name}
+	if sess.Email != "" {
+		out["email"] = sess.Email
+	} else {
+		out["email"] = email
+	}
+	if cr := rp.Client().FetchCredits(lctx, cookie); cr.OK {
+		out["available"] = cr.Total
+		out["monthly"] = cr.Monthly
+		out["daily"] = cr.Daily
+	}
+	return out, nil
+}
+
 // LastCheckin returns when a named check-in task last ran.
 func (g *Gateway) LastCheckin(name string) time.Time { return g.st.LastCheckinAt(name) }
 

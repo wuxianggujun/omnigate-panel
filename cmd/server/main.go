@@ -458,6 +458,9 @@ func main() {
 			defer cancel()
 			return omni.CheckinAll(ctx)
 		}
+		// runable 一键登录校验（服务端直连登录 + 会话探测）：runable 无跳转授权，
+		// 面板只能自己作为客户端登录，无需浏览器。
+		pcfg.OmniLogin = omni.LoginRunable
 	}
 	pn := panel.New(pcfg)
 	// 成长任务队列每日自动执行（与「执行全部待办」同管线）：Sequential 族零点解锁后

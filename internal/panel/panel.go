@@ -119,6 +119,11 @@ type Config struct {
 	OmniCheckin    func(provider, label string) (any, error)
 	OmniRemove     func(provider, label string) (any, error)
 	OmniCheckinAll func() (any, error)
+	// OmniLogin 校验 runable 类账号（服务端直连登录 + 会话探测），返回账号身份与
+	// 当前积分。面板「浏览器登录」一键调用：runable 无设备/跳转授权，登录产物只是
+	// httpOnly Cookie，网页读不到，只能由面板自己作为客户端登录（无需浏览器）。
+	// nil 时对应接口返回 501。
+	OmniLogin func(provider, email, password string) (any, error)
 }
 
 // Panel 管理面板 handler。挂载方式：外层 mux Handle("/panel/", panel)，
@@ -250,6 +255,7 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("POST /panel/api/realm_routing", p.admin(p.saveRealmRouting))
 	p.mux.HandleFunc("POST /panel/api/omni/account/checkin", p.admin(p.omniAccountCheckin))
 	p.mux.HandleFunc("POST /panel/api/omni/account/remove", p.admin(p.omniAccountRemove))
+	p.mux.HandleFunc("POST /panel/api/omni/account/login", p.admin(p.omniAccountLogin))
 	p.mux.HandleFunc("POST /panel/api/login/start", p.admin(p.loginStart))
 	p.mux.HandleFunc("POST /panel/api/import/cockpit", p.admin(p.importCockpit))
 	p.mux.HandleFunc("GET /panel/api/accounts/export", p.admin(p.exportAccounts))

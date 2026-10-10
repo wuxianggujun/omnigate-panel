@@ -811,7 +811,7 @@
     <div class="body">
       <label class="fld" style="margin-bottom:14px"><span class="lb">来源</span>
         <select id="addSource"></select>
-        <span class="hint">WorkBuddy 走浏览器登录；OmniGate 供应商按类型给出对应流程（raccoon=浏览器登录 / runable=账号密码 / openai 无需账号）。</span>
+        <span class="hint">WorkBuddy 走浏览器登录；OmniGate 供应商按类型给出对应流程（raccoon=浏览器登录 / runable=一键登录 / openai 无需账号）。</span>
       </label>
 
       <!-- WorkBuddy：浏览器登录 -->
@@ -895,19 +895,25 @@
         </div>
       </div>
 
-      <!-- OmniGate · runable：账号密码 -->
+      <!-- OmniGate · runable：一键登录（面板服务端直连登录；runable 无跳转授权） -->
       <div id="addTabOgCreds" class="tab-panel" hidden>
         <div class="og-fields">
           <label>账号名（唯一）<input id="ogAcctLabel" placeholder="如 runable-1"></label>
           <label>邮箱<input id="ogAcctEmail" type="email" placeholder="登录邮箱"></label>
           <label>密码<input id="ogAcctPassword" type="password" placeholder="登录密码"></label>
-          <label class="og-full">Cookie（可空，留空=用邮箱/密码登录）<input id="ogAcctCookie" placeholder="session_token=..."></label>
         </div>
-        <div class="og-hint">保存后写入 <code>omnigate.json</code> 并热生效；网关按需用邮箱/密码登录换取会话，无需手动维护 Cookie。</div>
+        <div class="og-hint">runable 没有跳转/设备授权，登录后会话是 <code>api.runable.com</code> 上的 httpOnly Cookie（网页读不到），所以由面板自己作为客户端登录：填邮箱/密码点「一键登录」，面板直连登录、校验并取积分，然后写入 <code>omnigate.json</code> 热生效。全程无需浏览器。</div>
         <div class="og-row" style="margin-top:8px">
-          <button class="primary" id="btnOgCredsSave">保存账号</button>
+          <button class="primary" id="btnOgCredsSave">一键登录并保存</button>
           <span class="og-msg" id="ogCredsMsg"></span>
         </div>
+        <details class="og-adv">
+          <summary>账号只能用 Google 登录？（粘贴 Cookie 兜底）</summary>
+          <div class="og-hint">若该账号是 Google 注册、没有密码，可在浏览器登录 runable.com 后，从 DevTools → Application → Cookies → <code>api.runable.com</code> 复制 <code>session_token</code> 的值粘到下面（可只填这一项）。</div>
+          <div class="og-row" style="margin-top:6px">
+            <input id="ogAcctCookie" style="flex:1;min-width:280px" placeholder="session_token=...">
+          </div>
+        </details>
       </div>
 
       <!-- OmniGate · openai 等：无需账号 -->

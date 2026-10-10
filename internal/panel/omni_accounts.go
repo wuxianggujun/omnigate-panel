@@ -93,3 +93,42 @@ func (p *Panel) omniAccountRemove(w http.ResponseWriter, r *http.Request) {
 	log.Printf("panel: OmniGate 移除账号 %s/%s", req.Provider, req.Label)
 	writeJSON(w, http.StatusOK, d)
 }
+
+// omniAccountLoginReq 一键登录请求体（runable：服务端直连登录校验）。
+type omniAccountLoginReq struct {
+	Provider string `json:"provider"`
+	Email    string `json:"email"`
+	Password string `json:"password"`
+}
+
+// omniAccountLogin 校验 runable 类账号：服务端直连登录 + 会话探测，返回身份与积分。
+// 面板「浏览器登录」一键调用；成功后由前端把邮箱/密码写入 omnigate.json 并热生效。
+// runable 无设备/跳转授权（device 端点 404），登录产物是 httpOnly Cookie，网页读不到，
+// 所以只能由面板自己作为客户端登录——无需任何浏览器。
+func (p *Panel) omniAccountLogin(w http.ResponseWriter, r *http.Request) {
+	if p.cfg.OmniLogin == nil {
+		writeErr(w, http.StatusNotImplemented, "omnigate not enabled")
+		return
+	}
+	var req omniAccountLoginReq
+	raw, err := io.ReadAll(io.LimitReader(r.Body, 1<<16))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "read body: "+err.Error())
+		return
+	}
+	if err := json.Unmarshal(raw, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid body: "+err.Error())
+		return
+	}
+	if req.Provider == "" {
+		writeErr(w, http.StatusBadRequest, "provider 不能为空")
+		return
+	}
+	d, err := p.cfg.OmniLogin(req.Provider, req.Email, req.Password)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	log.Printf("panel: OmniGate 一键登录校验 %s（%s）", req.Provider, req.Email)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "account": d})
+}

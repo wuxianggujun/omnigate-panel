@@ -291,15 +291,15 @@ func main() {
 
 	// 内置 OmniGate 引擎（Runable / 浣熊 / 任意 OpenAI 兼容上游）：先装配，
 	// 好把供应商配置读写器注入面板（保存即热重载，无需重启进程）。
-	omni := newOmniManager(cfg, requestLog, func() bool { return live.Load().RecordClientInfo })
+	omni := newOmniManager(cfg, requestLog, rec, func() bool { return live.Load().RecordClientInfo })
 	if omni.Enabled() {
 		defer omni.Stop()
 	}
 
 	// 面板登录鉴权运行时（独立于网关 api_key）：账号来自 config.json 的 panel_auth
-	// 段。配了账号后面板只认密码登录（api_key 不再能打开面板）；空集合退回旧 api_key
-	// 门（未配置态过渡行为）。账号管理页保存后 Reconfigure 热重建（会话保留，按当前
-	// 账号集合即时校验）。
+	// 段。面板只认密码登录（api_key 不能打开面板）；未配置任何账号时 /panel/api/*
+	// 一律 401（登录端点返回 panel_auth_not_configured），不退回旧 api_key 门。
+	// 账号管理页保存后 Reconfigure 热重建（会话保留，按当前账号集合即时校验）。
 	authStore := panelauth.New(cfg.PanelAuth.Users, cfg.PanelAuth.SessionTTL(),
 		cfg.PanelAuth.MaxFail(), cfg.PanelAuth.LockDuration())
 

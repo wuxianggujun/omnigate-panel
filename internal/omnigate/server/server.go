@@ -19,6 +19,7 @@ import (
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/logx"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/openai"
 	"github.com/wuxianggujun/omnigate-panel/internal/reqlog"
+	"github.com/wuxianggujun/omnigate-panel/internal/usage"
 )
 
 const maxBody = 32 << 20 // 32 MiB
@@ -37,6 +38,10 @@ type Server struct {
 	// （客户端 IP / UA），复用面板 logging.request_client_info 开关。
 	reqlog     *reqlog.Recorder
 	clientInfo func() bool
+
+	// usage 与 WorkBuddy 面板「用量」页共用同一份逐请求用量记录器：OmniGate 的
+	// raccoon/runable 请求也计入，让「所有 AI 请求」在一处可见。nil = 不计入。
+	usage *usage.Recorder
 }
 
 // New builds a Server.
@@ -60,6 +65,12 @@ func (s *Server) Addr() string { return s.http.Addr }
 func (s *Server) SetRequestLog(rec *reqlog.Recorder, clientInfo func() bool) {
 	s.reqlog = rec
 	s.clientInfo = clientInfo
+}
+
+// SetUsageRecorder 注入逐请求用量记录器（与 WorkBuddy 面板「用量」页共用同一份）。
+// nil = OmniGate 请求不计入用量。构造后、开始服务前调用一次即可。
+func (s *Server) SetUsageRecorder(rec *usage.Recorder) {
+	s.usage = rec
 }
 
 // ServeHTTP implements http.Handler.
@@ -117,7 +128,7 @@ const omniMountPrefix = "/omni"
 // serveLogged 包裹一次 chat/responses 调用：注入路由记账、捕获状态码与首字节
 // 时间，出口把结果写进请求记录。未注入记录器时退化为直接调用（零开销）。
 func (s *Server) serveLogged(w http.ResponseWriter, r *http.Request, fn func(http.ResponseWriter, *http.Request)) {
-	if s.reqlog == nil {
+	if s.reqlog == nil && s.usage == nil {
 		fn(w, r)
 		return
 	}
@@ -126,7 +137,9 @@ func (s *Server) serveLogged(w http.ResponseWriter, r *http.Request, fn func(htt
 	meta := &gateway.ReqMeta{}
 	r = r.WithContext(gateway.WithReqMeta(r.Context(), meta))
 	lw := &logWriter{ResponseWriter: w, start: start}
-	s.reqlog.Begin()
+	if s.reqlog != nil {
+		s.reqlog.Begin()
+	}
 	fn(lw, r)
 
 	status := lw.status
@@ -176,7 +189,60 @@ func (s *Server) serveLogged(w http.ResponseWriter, r *http.Request, fn func(htt
 	ev.ReasoningEffort = meta.Effort
 	// 上游产出过思考内容但未回报 token 数时（runable），至少记录「有思考」。
 	ev.Reasoning = meta.Reasoning
-	s.reqlog.Record(ev)
+	if s.reqlog != nil {
+		s.reqlog.Record(ev)
+	}
+	// 用量页：把 OmniGate 请求也计入共享的用量记录器（realm=provider、uid=账号），
+	// 让「所有 AI 请求」在面板「用量」页也可见，与「请求记录」页口径一致。
+	if s.usage != nil {
+		s.recordUsage(meta, ev)
+	}
+}
+
+// recordUsage 把一次 OmniGate 请求写进共享的用量记录器（面板「用量」页）。
+//
+// 维度映射与「请求记录」页对齐，便于两页对照：
+//   - realm  = provider 名（raccoon / runable / …）；缺失回退 "omni"
+//   - uid    = 实际服务账号 label；缺失回退 "omni"
+//   - model  = 展示模型名（带 provider 前缀，如 runable/zai/glm-5.3-flash）
+//
+// token/cache/延迟取自 serveLogged 已算好的 ev；ok 用 ev.OK（2xx && outcome=success），
+// 失败尝试同样计入请求数（与 WorkBuddy 侧口径一致）。
+func (s *Server) recordUsage(meta *gateway.ReqMeta, ev reqlog.Event) {
+	realm := meta.Provider
+	if realm == "" {
+		realm = "omni"
+	}
+	uid := meta.Account
+	if uid == "" {
+		uid = "omni"
+	}
+	d := usage.Delta{
+		PromptTokens:     ev.PromptTokens,
+		HasPromptTokens:  ev.PromptTokens > 0,
+		CompletionTokens: ev.CompletionTokens,
+		HasCompletion:    ev.CompletionTokens > 0,
+		TotalTokens:      ev.TotalTokens,
+		HasTotal:         ev.TotalTokens > 0,
+		CacheHitTokens:   ev.CacheHitTokens,
+		CacheMissTokens:  ev.CacheMissTokens,
+		HasCacheTokens:   ev.CacheHitTokens > 0 || ev.CacheMissTokens > 0,
+		LatencyMs:        ev.DurationMs,
+		HasLatency:       true,
+	}
+	// 生成速率：与 WorkBuddy 侧 tokensPerSecond 同口径——扣除 TTFB 后剩余窗口
+	// 不足 200ms 视为「生成时长不可测」，退回端到端耗时（见 internal/server）。
+	if ev.CompletionTokens > 0 && ev.DurationMs > 0 {
+		gen := time.Duration(ev.DurationMs) * time.Millisecond
+		if ttfb := time.Duration(ev.TTFBMs) * time.Millisecond; ttfb > 0 {
+			if g := gen - ttfb; g >= 200*time.Millisecond {
+				gen = g
+			}
+		}
+		d.TokensPerSecond = float64(ev.CompletionTokens) / gen.Seconds()
+		d.HasTPS = true
+	}
+	s.usage.Add(ev.Time, realm, uid, meta.Model, d, ev.OK)
 }
 
 // outcomeOf 把 HTTP 状态码映射成请求记录口径（与 WorkBuddy 侧一致：2xx 记

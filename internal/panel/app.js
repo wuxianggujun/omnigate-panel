@@ -570,6 +570,26 @@ function ogRowHtml(p, a) {
   const status = a.has_token
     ? '<span class="tag ok">已授权</span>'
     : '<span class="tag warn">未授权</span>';
+  // 限流冷却角标：上游对某账号回 429 后网关会冷却它并优先绕开，这里把剩余时间
+  // 如实显示，避免「明明有账号却报无可用账号」时看不出原因。
+  const coolMs = a.cooling_until ? parseAPITime(a.cooling_until) : 0;
+  const coolLeft = coolMs ? Math.round((coolMs - Date.now()) / 1000) : 0;
+  const coolTag = coolLeft > 0
+    ? ' <span class="tag warn" title="上游限流，冷却中（剩余 ' + dur(coolLeft) + '）">冷却 ' + dur(coolLeft) + '</span>'
+    : '';
+  // 会话过期预警：runable 的 Cookie 由用户手动粘贴、会静默过期。失效优先；否则若
+  // 最近一次校验已超过 7 天，提示「可能过期，建议重新粘贴」。
+  const verifiedMs = a.session_verified_at ? parseAPITime(a.session_verified_at) : 0;
+  const expiredMs = a.session_expired_at ? parseAPITime(a.session_expired_at) : 0;
+  let sessTag = '';
+  if (expiredMs && expiredMs >= verifiedMs) {
+    sessTag = ' <span class="tag warn" title="' + esc(a.session_error || '会话已失效') + '">⚠ 会话失效</span>';
+  } else if (verifiedMs) {
+    const ageDays = Math.floor((Date.now() - verifiedMs) / 86400000);
+    if (ageDays >= 7) {
+      sessTag = ' <span class="tag warn" title="最近一次校验：' + esc(a.session_verified_at) + '">⚠ 会话较久未校验（' + ageDays + ' 天）</span>';
+    }
+  }
   const exp = a.expires_at
     ? '<div class="hint" style="font-size:11px;color:var(--ink-3)">至 ' + esc(a.expires_at) + '</div>' : '';
   const bi = omniBalInfo[ogBalKey(p.name, label)] || {};
@@ -588,7 +608,7 @@ function ogRowHtml(p, a) {
     '<td class="mark" aria-hidden="true"><i></i></td>' +
     '<td><span class="tag mute">' + esc(p.name) + '</span><div class="id">' + esc(p.type || '') + '</div></td>' +
     '<td class="who"><div class="nm">' + esc(title) + '</div><div class="id">' + esc(label) + (a.user_id ? ' · ' + esc(String(a.user_id).slice(0, 14)) : '') + '</div></td>' +
-    '<td>' + status + exp + '</td>' +
+    '<td>' + status + coolTag + sessTag + exp + '</td>' +
     '<td class="cred"><div class="n">' + balHtml + '</div></td>' +
     '<td class="num" style="color:var(--ink-3)">—</td>' +
     '<td class="num" style="color:var(--ink-3)">—</td>' +

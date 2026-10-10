@@ -73,6 +73,26 @@ func TestRequestToChat(t *testing.T) {
 	}
 }
 
+// 流式 Responses 请求必须向 chat 层要 include_usage：翻译层的 response.completed
+// usage 来自 chat 流末尾的 usage chunk，而 OpenAI 规范下流式 usage 是 opt-in。
+func TestRequestToChatStreamRequestsUsage(t *testing.T) {
+	cr, err := RequestToChat([]byte(`{"model":"m","stream":true,"input":"hi"}`), nil)
+	if err != nil {
+		t.Fatalf("translate: %v", err)
+	}
+	if !cr.Stream {
+		t.Fatalf("stream should be true")
+	}
+	var got map[string]any
+	if err := json.Unmarshal(cr.Body, &got); err != nil {
+		t.Fatalf("chat not json: %v", err)
+	}
+	so, ok := got["stream_options"].(map[string]any)
+	if !ok || so["include_usage"] != true {
+		t.Fatalf("stream_options = %v, want {include_usage:true}", got["stream_options"])
+	}
+}
+
 // TestInputString 字符串 input → 单条 user message。
 func TestInputString(t *testing.T) {
 	cr, err := RequestToChat([]byte(`{"model":"m","input":"hello"}`), nil)

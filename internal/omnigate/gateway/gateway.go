@@ -50,6 +50,12 @@ type Gateway struct {
 	// proxyFor resolves a per-provider outbound proxy (nil = direct). Installed
 	// via WithProxyResolver; consulted once per provider at construction.
 	proxyFor func(providerName string) *url.URL
+
+	// cool 账号级限流冷却台账（进程内）。见 cooldown.go。
+	cool *cooldownLedger
+
+	// sess 会话健康台账（进程内，目前用于 runable 会话过期预警）。见 session.go。
+	sess *sessionHealth
 }
 
 // raccoonPending remembers an in-flight browser authorization.
@@ -103,6 +109,8 @@ func New(cfg *config.Config, st *state.State, log *logx.Logger, opts ...Option) 
 		modelCache: map[string]modelEntry{},
 		convs:      map[string]*conv{},
 		pending:    map[string]raccoonPending{},
+		cool:       newCooldownLedger(),
+		sess:       newSessionHealth(),
 	}
 	for _, o := range opts {
 		o(g)
@@ -318,6 +326,10 @@ func (g *Gateway) HandleChat(ctx context.Context, req *openai.ChatRequest, w htt
 		// ew 记录首个写失败（客户端断连）：HTTP 头已发 200，写失败改不了状态码，
 		// 但请求记录要能区分「人已走」与「上游失败」。
 		ew := &errWriter{w: w}
+		// 末尾 usage chunk 按 OpenAI 规范 gate：仅当客户端显式要
+		// stream_options.include_usage 时才补发。用量本身照常记进请求记录
+		// （下方 m.Usage = res.usage），不受此开关影响。
+		includeUsage := req.StreamOptions != nil && req.StreamOptions.IncludeUsage
 		_ = openai.EmitRole(ew, id, displayModel, created)
 		flush()
 
@@ -367,7 +379,7 @@ func (g *Gateway) HandleChat(ctx context.Context, req *openai.ChatRequest, w htt
 			m.Reasoning = res.reasoning != ""
 		}
 		_ = openai.EmitFinish(ew, id, displayModel, created, res.finish)
-		if res.usage != nil {
+		if includeUsage && res.usage != nil {
 			_ = openai.EmitUsage(ew, id, displayModel, created, usageMap(res.usage))
 		}
 		_ = openai.Done(ew)
@@ -614,45 +626,82 @@ func (g *Gateway) openStream(ctx context.Context, provName string, prov provider
 	if start < 0 || start >= n {
 		start = 0
 	}
+	now := time.Now()
 	var lastErr error
-	for k := 0; k < n; k++ {
-		idx := (start + k) % n
-		acc := accts[idx]
-		// Token-based providers refresh before the call when the access token
-		// is missing or about to expire.
-		if rp, ok := prov.(*raccoon.Provider); ok && acc.RefreshToken != "" && rp.TokenExpired(acc) {
-			if err := g.refreshRaccoonToken(ctx, provName, prov, acc); err != nil {
-				g.log.Warn("账号「%s」刷新 token 失败: %v", acc.Label, err)
+	// 分两趟：第一趟跳过冷却中的账号（避免对刚被限流的账号连打）；若第一趟跳过了
+	// 一些账号且都没试成，第二趟只补试这些被跳过的——冷却只是「优先绕开」，不该把
+	// 可用账号彻底挡死，但也不重复试已试过的账号。
+	var skipped []int
+	for pass := 0; pass < 2; pass++ {
+		var order []int
+		if pass == 0 {
+			for k := 0; k < n; k++ {
+				order = append(order, (start+k)%n)
 			}
+		} else {
+			if len(skipped) == 0 {
+				break
+			}
+			order = skipped
+			g.log.Warn("provider「%s」可用账号都在冷却，兜底补试", provName)
 		}
-		if acc.Cookie == "" {
-			if !g.tryLogin(ctx, provName, prov, acc) {
+		for _, idx := range order {
+			acc := accts[idx]
+			if pass == 0 && g.cool.Cooling(provName, acc.Label, now) {
+				skipped = append(skipped, idx)
 				continue
 			}
-		}
-		stream, err := prov.StreamChat(ctx, acc, in)
-		// On an auth failure, refresh once and retry.
-		if err != nil && prov.Type() == "raccoon" && raccoon.Unauthorized(err) {
-			if rerr := g.refreshRaccoonToken(ctx, provName, prov, acc); rerr == nil {
-				stream, err = prov.StreamChat(ctx, acc, in)
+			// Token-based providers refresh before the call when the access token
+			// is missing or about to expire.
+			if rp, ok := prov.(*raccoon.Provider); ok && acc.RefreshToken != "" && rp.TokenExpired(acc) {
+				if err := g.refreshRaccoonToken(ctx, provName, prov, acc); err != nil {
+					g.log.Warn("账号「%s」刷新 token 失败: %v", acc.Label, err)
+				}
 			}
-		}
-		if err == nil {
-			if idx != start {
-				g.st.SetActive(provName, idx)
-				g.log.Info("⇄ 自动切换账号「%s」", acc.Label)
+			if acc.Cookie == "" {
+				if !g.tryLogin(ctx, provName, prov, acc) {
+					continue
+				}
 			}
-			// 请求记录：回填实际服务的账号 label。
-			if m := ReqMetaFrom(ctx); m != nil {
-				m.Account = acc.Label
+			stream, err := prov.StreamChat(ctx, acc, in)
+			// On an auth failure, refresh once and retry.
+			if err != nil && prov.Type() == "raccoon" && raccoon.Unauthorized(err) {
+				if rerr := g.refreshRaccoonToken(ctx, provName, prov, acc); rerr == nil {
+					stream, err = prov.StreamChat(ctx, acc, in)
+				}
 			}
-			return stream, nil
-		}
-		lastErr = err
-		if !provider.OutOfCredits(err) {
+			// runable 会话是用户手动粘贴的，过期时上游回 401/403：记账供面板预警。
+			if err != nil && prov.Type() == "runable" && runableUnauthorized(err) {
+				g.sess.MarkExpired(provName, acc.Label, err.Error())
+			}
+			if err == nil {
+				if idx != start {
+					g.st.SetActive(provName, idx)
+					g.log.Info("⇄ 自动切换账号「%s」", acc.Label)
+				}
+				// 请求记录：回填实际服务的账号 label。
+				if m := ReqMetaFrom(ctx); m != nil {
+					m.Account = acc.Label
+				}
+				// 成功即解除该账号冷却（连续命中计数清零）。
+				g.cool.Clear(provName, acc.Label)
+				return stream, nil
+			}
+			lastErr = err
+			// 积分耗尽 / 限流：换下一个账号；限流额外把该账号冷却一段时间。
+			if provider.OutOfCredits(err) {
+				g.log.Warn("账号「%s」积分耗尽，尝试下一个", acc.Label)
+				continue
+			}
+			if rateLimited(err) {
+				until, strikes := g.cool.Note(provName, acc.Label, err.Error(), now)
+				g.log.Warn("账号「%s」被限流，冷却至 %s（连续 %d 次），尝试下一个",
+					acc.Label, until.Format("15:04:05"), strikes)
+				continue
+			}
+			// 其它错误换号也大概率一样，直接返回。
 			return nil, err
 		}
-		g.log.Warn("账号「%s」积分耗尽，尝试下一个", acc.Label)
 	}
 	if lastErr == nil {
 		lastErr = fmt.Errorf("provider %q has no usable account", provName)
@@ -768,11 +817,13 @@ func (g *Gateway) RunableCheckin(ctx context.Context, providerName, label string
 			}
 		}
 		if !sess.Alive {
+			g.sess.MarkExpired(providerName, acc.Label, "会话无效或已过期")
 			out = append(out, RunableCheckinOutcome{Label: acc.Label, Error: "会话无效或已过期，请重新在 runable.com 登录后复制 Cookie"})
 			continue
 		}
 		acc.Cookie = cookie
 		g.st.SetCookie(providerName, acc.Label, cookie)
+		g.sess.MarkVerified(providerName, acc.Label)
 		oc := RunableCheckinOutcome{Label: acc.Label, Success: true, Message: "会话有效"}
 		if cr := rp.Client().FetchCredits(ctx, cookie); cr.OK {
 			oc.Message = fmt.Sprintf("会话有效，积分 %d（日 %d + 月 %d）", cr.Total, cr.Daily, cr.Monthly)
@@ -937,8 +988,20 @@ func (g *Gateway) LastCheckin(name string) time.Time { return g.st.LastCheckinAt
 // MarkCheckin records that a named check-in task just ran.
 func (g *Gateway) MarkCheckin(name string) { g.st.MarkCheckin(name) }
 
+// CooldownUntil 报告某账号是否处于限流冷却中（供面板账号池展示）。
+func (g *Gateway) CooldownUntil(providerName, label string) (time.Time, bool) {
+	return g.cool.Until(providerName, label, time.Now())
+}
+
+// SessionStatus 报告某账号的会话健康（供面板账号池做过期预警）。
+// ok=false 表示从未记账。
+func (g *Gateway) SessionStatus(providerName, label string) (verifiedAt, expiredAt time.Time, lastErr string, ok bool) {
+	return g.sess.Status(providerName, label)
+}
+
 // Info returns a small status snapshot for /healthz.
 func (g *Gateway) Info(ctx context.Context) map[string]any {
+	now := time.Now()
 	providers := map[string]any{}
 	for _, name := range g.order {
 		accts := g.Accounts(name)
@@ -947,6 +1010,10 @@ func (g *Gateway) Info(ctx context.Context) map[string]any {
 			state := "no-cookie"
 			if a.Cookie != "" {
 				state = "ready"
+			}
+			// 限流冷却优先级最高：冷却中的账号即便有 cookie 也不该被当成可用。
+			if until, ok := g.cool.Until(name, a.Label, now); ok {
+				state = "cooling-until-" + until.Format("15:04:05")
 			}
 			labels = append(labels, a.Label+"("+state+")")
 		}
@@ -961,6 +1028,8 @@ func (g *Gateway) Info(ctx context.Context) map[string]any {
 		"service":   "omnigate",
 		"mode":      g.cfg.Mode,
 		"providers": providers,
+		"cooldowns": g.cool.Snapshot(),
+		"sessions":  g.sess.Snapshot(),
 	}
 }
 

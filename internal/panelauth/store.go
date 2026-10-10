@@ -283,7 +283,8 @@ func (s *Store) Reconfigure(users []User, ttl time.Duration, maxFail int, lockFo
 	s.lockFor = lockFor
 }
 
-// HasUsers 是否已配置面板账号（false = 未配置，调用方可回落旧 api_key 模式）。
+// HasUsers 是否已配置面板账号（false = 未配置；面板鉴权已与网关 api_key 彻底解耦，
+// 未配置账号时 /panel/api/* 一律 401，登录端点返回 panel_auth_not_configured）。
 func (s *Store) HasUsers() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()

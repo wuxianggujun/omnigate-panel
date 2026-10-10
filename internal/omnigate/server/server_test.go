@@ -6,7 +6,9 @@ import (
 	"testing"
 
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/gateway"
+	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/provider"
 	"github.com/wuxianggujun/omnigate-panel/internal/reqlog"
+	"github.com/wuxianggujun/omnigate-panel/internal/usage"
 )
 
 // TestServeLoggedRecordsReasoning 验证 serveLogged 会把 gateway 回填的「上游产出过
@@ -36,6 +38,38 @@ func TestServeLoggedRecordsReasoning(t *testing.T) {
 	}
 	if e.Provider != "runable" {
 		t.Errorf("provider = %q, want runable", e.Provider)
+	}
+}
+
+// TestServeLoggedRecordsUsage 验证 serveLogged 会把 OmniGate 请求计入共享用量
+// 记录器（realm=provider、uid=账号、model=展示名），让「用量」页也覆盖 OmniGate。
+func TestServeLoggedRecordsUsage(t *testing.T) {
+	rec := reqlog.New(reqlog.Config{})
+	urec := usage.New("")
+	s := &Server{reqlog: rec, usage: urec}
+	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	w := httptest.NewRecorder()
+
+	s.serveLogged(w, r, func(w http.ResponseWriter, r *http.Request) {
+		if m := gateway.ReqMetaFrom(r.Context()); m != nil {
+			m.Provider = "raccoon"
+			m.Model = "raccoon/raccoon-8c4485"
+			m.Account = "浣熊账号1"
+			m.Usage = &provider.Usage{PromptTokens: 10, CompletionTokens: 5, TotalTokens: 15}
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
+
+	snap := urec.SnapshotWindow(usage.Window{}, nil, nil)
+	if snap.Totals.Requests != 1 || snap.Totals.TotalTokens != 15 {
+		t.Fatalf("usage totals = %+v, want requests=1 total=15", snap.Totals)
+	}
+	if len(snap.ByRealm) != 1 || snap.ByRealm[0].Key != "raccoon" {
+		t.Fatalf("by_realm = %+v, want one raccoon bucket", snap.ByRealm)
+	}
+	if len(snap.ByAccount) != 1 || snap.ByAccount[0].Key != "浣熊账号1" {
+		t.Fatalf("by_account = %+v, want one account bucket", snap.ByAccount)
 	}
 }
 

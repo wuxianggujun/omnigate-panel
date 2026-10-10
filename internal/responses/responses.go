@@ -156,6 +156,10 @@ func RequestToChat(raw []byte, store *Store) (*ChatRequest, error) {
 	}
 	if req.Stream {
 		out["stream"] = true
+		// Responses 流式响应的 usage 出现在 response.completed 事件里，翻译层靠
+		// chat 流末尾的 usage chunk 取真实 token 数；而 OpenAI 规范下流式 usage 是
+		// opt-in，所以这里必须显式向 chat 层要 include_usage。
+		out["stream_options"] = map[string]any{"include_usage": true}
 	}
 	if req.MaxOutputTokens != nil {
 		out["max_tokens"] = *req.MaxOutputTokens

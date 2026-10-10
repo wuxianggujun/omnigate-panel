@@ -146,6 +146,10 @@ func NewHandler(cfg Config) *Handler {
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
 	h.mux.HandleFunc("GET /healthz", h.healthz)
+	// /metrics：Prometheus 文本格式的进程级指标。鉴权与 /v1 同口径（Bearer
+	// api_key），避免运营数据（请求量/账号健康度）在公网裸奔；Prometheus 侧用
+	// authorization.credentials 配同一把 key 即可抓取。
+	h.mux.HandleFunc("GET /metrics", h.withAuth(h.metrics))
 	if cfg.Panel != nil {
 		h.mux.Handle("/panel/", cfg.Panel) // /panel → /panel/ 由 ServeMux 自动重定向
 	}
@@ -208,6 +212,58 @@ func (h *Handler) healthz(w http.ResponseWriter, r *http.Request) {
 		"service":        ServiceName,
 		"realm_servable": realmServable,
 	})
+}
+
+// metrics 以 Prometheus 文本格式（text/plain; version=0.0.4）暴露进程级指标：
+// 请求计数/成功率/延迟（来自 reqlog 累计计数器）、累计 token（来自 usage 记录器）、
+// 账号池健康度（来自 pool）。只读快照，不触发任何上游调用。
+//
+// 鉴权与 /v1 同口径（Bearer api_key）：请求量与账号健康度属于运营数据，不应在
+// 公网裸奔。Prometheus 侧用 authorization.credentials 配同一把 key 即可抓取。
+func (h *Handler) metrics(w http.ResponseWriter, r *http.Request) {
+	var b strings.Builder
+	if h.cfg.RequestLog != nil {
+		s := h.cfg.RequestLog.Snapshot()
+		b.WriteString("# HELP omnigate_requests_total Completed chat/responses requests by result.\n")
+		b.WriteString("# TYPE omnigate_requests_total counter\n")
+		fmt.Fprintf(&b, "omnigate_requests_total{result=\"success\"} %d\n", s.Succeeded)
+		fmt.Fprintf(&b, "omnigate_requests_total{result=\"failed\"} %d\n", s.Failed)
+		b.WriteString("# HELP omnigate_requests_in_flight Requests currently being processed.\n")
+		b.WriteString("# TYPE omnigate_requests_in_flight gauge\n")
+		fmt.Fprintf(&b, "omnigate_requests_in_flight %d\n", s.InFlight)
+		b.WriteString("# HELP omnigate_request_success_ratio Share of completed requests considered successful (0..1).\n")
+		b.WriteString("# TYPE omnigate_request_success_ratio gauge\n")
+		fmt.Fprintf(&b, "omnigate_request_success_ratio %g\n", s.SuccessRate/100)
+		b.WriteString("# HELP omnigate_request_duration_ms Average completed request duration in milliseconds.\n")
+		b.WriteString("# TYPE omnigate_request_duration_ms gauge\n")
+		fmt.Fprintf(&b, "omnigate_request_duration_ms %g\n", s.AvgDurationMs)
+	}
+	if h.cfg.Usage != nil {
+		u := h.cfg.Usage.SnapshotWindow(usage.Window{}, nil, nil).Totals
+		b.WriteString("# HELP omnigate_usage_requests_total Cumulative requests seen by the usage recorder.\n")
+		b.WriteString("# TYPE omnigate_usage_requests_total counter\n")
+		fmt.Fprintf(&b, "omnigate_usage_requests_total %d\n", u.Requests)
+		b.WriteString("# HELP omnigate_usage_errors_total Cumulative failed usage attempts.\n")
+		b.WriteString("# TYPE omnigate_usage_errors_total counter\n")
+		fmt.Fprintf(&b, "omnigate_usage_errors_total %d\n", u.Errors)
+		b.WriteString("# HELP omnigate_tokens_total Cumulative tokens by kind.\n")
+		b.WriteString("# TYPE omnigate_tokens_total counter\n")
+		fmt.Fprintf(&b, "omnigate_tokens_total{kind=\"prompt\"} %d\n", u.PromptTokens)
+		fmt.Fprintf(&b, "omnigate_tokens_total{kind=\"completion\"} %d\n", u.CompletionTok)
+		fmt.Fprintf(&b, "omnigate_tokens_total{kind=\"all\"} %d\n", u.TotalTokens)
+	}
+	if h.cfg.Pool != nil {
+		total, healthy, cooling, disabled, _ := h.cfg.Pool.CountsDetailed()
+		b.WriteString("# HELP omnigate_accounts Account pool size by state.\n")
+		b.WriteString("# TYPE omnigate_accounts gauge\n")
+		fmt.Fprintf(&b, "omnigate_accounts{state=\"total\"} %d\n", total)
+		fmt.Fprintf(&b, "omnigate_accounts{state=\"healthy\"} %d\n", healthy)
+		fmt.Fprintf(&b, "omnigate_accounts{state=\"cooling\"} %d\n", cooling)
+		fmt.Fprintf(&b, "omnigate_accounts{state=\"disabled\"} %d\n", disabled)
+	}
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = io.WriteString(w, b.String())
 }
 
 func (h *Handler) status(w http.ResponseWriter, r *http.Request) {

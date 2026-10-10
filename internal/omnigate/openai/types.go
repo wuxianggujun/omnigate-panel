@@ -87,6 +87,14 @@ type Tool struct {
 	Function ToolDef `json:"function"`
 }
 
+// StreamOptions mirrors OpenAI's stream_options. Only include_usage is honored:
+// when true (and stream=true) the gateway emits an extra usage-only chunk before
+// [DONE], exactly like OpenAI. Absent or false → no usage chunk (the spec
+// default; clients that never asked for usage should not receive one).
+type StreamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
+}
+
 // ChatRequest is the incoming /v1/chat/completions body.
 type ChatRequest struct {
 	Model    string    `json:"model"`
@@ -97,6 +105,9 @@ type ChatRequest struct {
 	// Forwarded to reasoning-capable upstreams (raccoon honors it) and recorded
 	// in the request log's 思考 column.
 	ReasoningEffort string `json:"reasoning_effort,omitempty"`
+	// StreamOptions gates the trailing usage chunk (see StreamOptions). Usage is
+	// still captured for the request log regardless of this flag.
+	StreamOptions *StreamOptions `json:"stream_options,omitempty"`
 }
 
 // Model is one entry in GET /v1/models.

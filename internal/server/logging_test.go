@@ -11,6 +11,8 @@ import (
 
 	"github.com/wuxianggujun/omnigate-panel/internal/auth"
 	"github.com/wuxianggujun/omnigate-panel/internal/reqlog"
+	"github.com/wuxianggujun/omnigate-panel/internal/upstream"
+	"github.com/wuxianggujun/omnigate-panel/internal/usage"
 )
 
 // captureStdout 重定向 os.Stdout（连同 chatLogOut，见 SetChatLogOutput 的注入点）
@@ -232,6 +234,60 @@ func TestCaptureClientInfoTruncatesUserAgent(t *testing.T) {
 	tr.captureClientInfo(req)
 	if len(tr.userAgent) != maxUserAgentLen {
 		t.Fatalf("ua len = %d want %d", len(tr.userAgent), maxUserAgentLen)
+	}
+}
+
+// /metrics 以 Prometheus 文本格式暴露请求/用量/账号指标，并强制 Bearer 鉴权
+// （运营数据不裸奔）；无 token → 401，带 token → 200 + text/plain。
+func TestMetricsEndpoint(t *testing.T) {
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999})
+	reqLog := reqlog.New(reqlog.Config{})
+	reqLog.Begin()
+	reqLog.Record(reqlog.Event{RequestID: "ok", Status: 200, OK: true, Outcome: reqlog.OutcomeSuccess, DurationMs: 20})
+	reqLog.Begin()
+	reqLog.Record(reqlog.Event{RequestID: "bad", Status: 502, OK: false, Outcome: reqlog.OutcomeStreamError, DurationMs: 40})
+
+	rec := usage.New("")
+	rec.Add(time.Now(), "cn", "u1", "glm-5.2", usage.Delta{
+		PromptTokens: 10, HasPromptTokens: true,
+		CompletionTokens: 5, HasCompletion: true,
+		TotalTokens: 15, HasTotal: true,
+	}, true)
+
+	h := NewHandler(Config{Pool: p, Upstream: upstream.New(), RequestLog: reqLog, Usage: rec, APIKey: "secret"})
+
+	// 无 token → 401。
+	rec401 := httptest.NewRecorder()
+	h.ServeHTTP(rec401, httptest.NewRequest("GET", "/metrics", nil))
+	if rec401.Code != http.StatusUnauthorized {
+		t.Fatalf("no token: code=%d want 401", rec401.Code)
+	}
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/metrics", nil)
+	req.Header.Set("Authorization", "Bearer secret")
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("code=%d body=%s", rr.Code, rr.Body)
+	}
+	if ct := rr.Header().Get("Content-Type"); !strings.Contains(ct, "text/plain") {
+		t.Errorf("content-type=%q want text/plain", ct)
+	}
+	body := rr.Body.String()
+	for _, want := range []string{
+		"# TYPE omnigate_requests_total counter",
+		`omnigate_requests_total{result="success"} 1`,
+		`omnigate_requests_total{result="failed"} 1`,
+		`omnigate_requests_in_flight 0`,
+		`omnigate_tokens_total{kind="prompt"} 10`,
+		`omnigate_tokens_total{kind="completion"} 5`,
+		`omnigate_tokens_total{kind="all"} 15`,
+		`omnigate_accounts{state="total"} 1`,
+		`omnigate_accounts{state="healthy"} 1`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("metrics missing %q\nbody:\n%s", want, body)
+		}
 	}
 }
 

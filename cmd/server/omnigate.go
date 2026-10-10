@@ -31,6 +31,7 @@ import (
 	omnistate "github.com/wuxianggujun/omnigate-panel/internal/omnigate/state"
 	"github.com/wuxianggujun/omnigate-panel/internal/outbound"
 	"github.com/wuxianggujun/omnigate-panel/internal/reqlog"
+	"github.com/wuxianggujun/omnigate-panel/internal/usage"
 )
 
 // omniRuntime 是一份自洽的 OmniGate 运行时（构建后只读，替换而非修改）。
@@ -61,18 +62,23 @@ type omniManager struct {
 	// 调用来源（客户端 IP / UA），复用 logging.request_client_info 开关。
 	reqlog     *reqlog.Recorder
 	clientInfo func() bool
+
+	// usageRec 与 WorkBuddy 网关共用同一份用量记录器（面板「用量」页），让
+	// OmniGate 请求的 token 也计入用量视图。nil = 不计入。
+	usageRec *usage.Recorder
 }
 
 // newOmniManager 按 cfg.OmnigateConfig 装配 OmniGate。配置文件缺失/解析失败时
-// 返回未启用的 manager（不报错，面板其余功能照常）。requestLog 为共享请求记录器
-// （可为 nil）；clientInfo 报告是否记录调用来源（可为 nil）。
-func newOmniManager(cfg *Config, requestLog *reqlog.Recorder, clientInfo func() bool) *omniManager {
+// 返回未启用的 manager（不报错，面板其余功能照常）。requestLog / usageRec 为共享
+// 记录器（可为 nil）；clientInfo 报告是否记录调用来源（可为 nil）。
+func newOmniManager(cfg *Config, requestLog *reqlog.Recorder, usageRec *usage.Recorder, clientInfo func() bool) *omniManager {
 	m := &omniManager{
 		path:       cfg.OmnigateConfig,
 		apiKey:     cfg.APIKey,
 		logger:     omnilogx.New(300),
 		outbound:   cfg.Outbound,
 		reqlog:     requestLog,
+		usageRec:   usageRec,
 		clientInfo: clientInfo,
 	}
 	if m.path == "" {
@@ -125,6 +131,8 @@ func (m *omniManager) build(cfg *omniconfig.Config) (*omniRuntime, error) {
 	srv := omnisrv.New(cfg, gw, m.logger)
 	// 请求记录：把 OmniGate 的 chat/responses 也记进与 WorkBuddy 同一份 reqlog。
 	srv.SetRequestLog(m.reqlog, m.clientInfo)
+	// 用量记录：OmniGate 请求的 token 也计入与 WorkBuddy 同一份用量记录器。
+	srv.SetUsageRecorder(m.usageRec)
 	return &omniRuntime{cfg: cfg, gw: gw, sched: sched, srv: srv}, nil
 }
 
@@ -404,6 +412,28 @@ func (m *omniManager) Accounts(ctx context.Context, withBalance bool) (any, erro
 				item := map[string]any{"label": a.Label, "has_token": a.Cookie != ""}
 				enrichOmniAccount(item, meta)
 				pa.Accounts = append(pa.Accounts, item)
+			}
+		}
+		// 限流冷却：把当前冷却截止时刻并入账号行，面板据此显示「冷却」角标。
+		for _, r := range pa.Accounts {
+			label, _ := r["label"].(string)
+			if label == "" {
+				continue
+			}
+			if until, ok := rt.gw.CooldownUntil(name, label); ok {
+				r["cooling_until"] = until
+			}
+			// 会话健康：runable 会话会静默过期，面板据此做「重新粘贴 Cookie」预警。
+			if v, e, lastErr, ok := rt.gw.SessionStatus(name, label); ok {
+				if !v.IsZero() {
+					r["session_verified_at"] = v
+				}
+				if !e.IsZero() {
+					r["session_expired_at"] = e
+				}
+				if lastErr != "" {
+					r["session_error"] = lastErr
+				}
 			}
 		}
 		out = append(out, pa)

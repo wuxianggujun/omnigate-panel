@@ -186,6 +186,46 @@ func TestStreamNoReasoningFlag(t *testing.T) {
 	}
 }
 
+// 末尾 usage chunk 按 OpenAI 规范 gate：未要 stream_options.include_usage 不发；
+// 要了才发。用量本身无论如何都记进请求记录（面板 Token 列不依赖客户端开关）。
+func TestStreamUsageGatedByIncludeUsage(t *testing.T) {
+	events := []provider.Event{
+		{Type: provider.EventText, Text: "hi"},
+		// 真实上游把 usage 放在 finish 之前（OpenAIStream 缓冲 finish 后先发 usage）。
+		{Type: provider.EventUsage, Usage: &provider.Usage{PromptTokens: 3, CompletionTokens: 5, TotalTokens: 8}},
+		{Type: provider.EventFinish, Finish: "stop"},
+	}
+	for _, tc := range []struct {
+		name string
+		inc  bool
+		want bool
+	}{
+		{"absent", false, false},
+		{"explicit false", false, false},
+		{"include_usage true", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := streamReq()
+			if tc.name != "absent" {
+				req.StreamOptions = &openai.StreamOptions{IncludeUsage: tc.inc}
+			}
+			g := testGateway(&scriptProvider{events: events})
+			meta := &ReqMeta{}
+			w := httptest.NewRecorder()
+			g.HandleChat(WithReqMeta(context.Background(), meta), req, w)
+
+			body := w.Body.String()
+			hasUsage := strings.Contains(body, `"usage"`)
+			if hasUsage != tc.want {
+				t.Fatalf("usage chunk present = %v, want %v\nbody: %s", hasUsage, tc.want, body)
+			}
+			if meta.Usage == nil || meta.Usage.TotalTokens != 8 {
+				t.Fatalf("meta.Usage = %+v, want total 8 (request log must always capture usage)", meta.Usage)
+			}
+		})
+	}
+}
+
 // errStream always fails its Recv, simulating an upstream read that dies.
 type errStream struct{ err error }
 

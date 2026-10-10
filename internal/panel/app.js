@@ -415,6 +415,8 @@ const EXP_FRESH_MS = 2 * 60 * 1000;            // 缓存新鲜窗口：2 分钟�
 const TITLES = { accounts: '账号池', usage: '用量', packages: '积分构成', taskscenter: '任务中心', models: '模型与档位', providers: '上游供应商', outbound: '出站代理', config: '配置', logs: '请求日志' };
 function go(v) {
   view = v;
+  // 供 CSS 挂钩：请求日志页要把 .main 锁成一屏高（表格内部滚动），其余页面照常整页滚动。
+  document.body.dataset.view = v;
   document.querySelectorAll('.view').forEach(s => s.hidden = s.id !== 'view-' + v);
   document.querySelectorAll('.nav a').forEach(a => a.classList.toggle('on', a.dataset.view === v));
   $('ttl').textContent = TITLES[v];

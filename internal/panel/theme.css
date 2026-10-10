@@ -558,8 +558,10 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
   .acc.req { min-width: 1080px; }
   .acc.req th, .acc.req td { padding: 8px 10px; }
   .acc.req tbody tr { cursor: default; }
-  /* 请求日志整页铺满：视图撑满视口剩余高度，表格占满剩余空间并内部滚动。
+  /* 请求日志整页铺满：仅该视图激活时把 .main 锁成一屏高（其余页面仍整页滚动，
+     行为不变），视图/卡片/表格依次 flex:1，表格占满剩余空间并内部滚动。
      取代原来的 460px 限高——限高会让表格只占屏幕上半张卡片，下半屏全是空白。 */
+  body[data-view="logs"] .main { height: 100vh; height: 100dvh; overflow: hidden; }
   #view-logs {
     flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0;
     max-width: none; padding-bottom: 22px;

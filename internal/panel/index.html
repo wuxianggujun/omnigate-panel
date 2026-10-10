@@ -908,7 +908,7 @@
         <div id="ogAuthDone" class="state ok" hidden style="margin-top:12px"></div>
         <details class="og-adv">
           <summary>手动粘贴回调（备选）</summary>
-          <div class="og-hint">若浏览器没有自动跳回：登录后把地址栏里的整段 <code>office-raccoon://auth/callback?code=...&amp;state=...</code>（或只把 <code>code</code>）粘到下面提交即可。可重复添加多个账号。</div>
+          <div class="og-hint" id="ogAuthHint">若浏览器没有自动跳回：登录后把地址栏里的整段 <code>office-raccoon://auth/callback?code=...&amp;state=...</code>（或只把 <code>code</code>）粘到下面提交即可。可重复添加多个账号。</div>
           <div class="og-row" style="margin-top:6px">
             <input id="callback" style="flex:1;min-width:280px" placeholder="office-raccoon://auth/callback?code=...&state=...">
             <button class="primary" id="btnSubmitCb">提交回调</button>

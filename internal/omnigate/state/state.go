@@ -31,7 +31,13 @@ type DynAccount struct {
 	OrgRole      string `json:"org_role,omitempty"`
 	AccessToken  string `json:"access_token,omitempty"`
 	RefreshToken string `json:"refresh_token,omitempty"`
-	AddedAt      int64  `json:"added_at,omitempty"`
+	// TRAE-specific per-account fingerprint (machine/device ids must stay stable
+	// and distinct per account for daily check-in). Empty for other providers.
+	MachineID string `json:"machine_id,omitempty"`
+	DeviceID  string `json:"device_id,omitempty"`
+	ApiHost   string `json:"api_host,omitempty"`
+	ExpiresAt int64  `json:"expires_at,omitempty"`
+	AddedAt   int64  `json:"added_at,omitempty"`
 }
 
 // Load reads (or creates) the state file inside dir.

@@ -1031,3 +1031,7 @@ func (p *Provider) RefreshAccount(ctx context.Context, acc *provider.Account) er
 	acc.RefreshToken = res.RefreshToken
 	return nil
 }
+
+// Unauthorized reports whether err is an auth failure (implements the gateway's
+// generic TokenRefresher, so openStream can refresh any token-based provider).
+func (p *Provider) Unauthorized(err error) bool { return Unauthorized(err) }

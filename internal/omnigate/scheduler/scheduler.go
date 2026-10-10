@@ -87,6 +87,13 @@ func (s *Scheduler) runTask(task config.CheckinTask) {
 		}
 		s.log.Info("签到任务：小浣熊桌面登录奖励（%s）", provider)
 		s.gw.RunRaccoonCheckin(provider)
+	case "trae":
+		provider := task.Provider
+		if provider == "" {
+			provider = s.cfg.DefaultProvider
+		}
+		s.log.Info("签到任务：TRAE 每日签到（%s）", provider)
+		s.gw.RunTraeCheckin(provider)
 	case "http", "":
 		s.runHTTP(task)
 	default:

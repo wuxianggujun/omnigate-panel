@@ -42,7 +42,11 @@ type ProviderConfig struct {
 	MainOrigin string          `json:"main_origin"`
 	LLMBase    string          `json:"llm_base"`
 	AuthBase   string          `json:"auth_base"`
-	Accounts   []AccountConfig `json:"accounts"`
+	// TRAE-specific hosts (SOLO agent / check-in / OAuth). Empty = the defaults.
+	AgentHost string          `json:"agent_host"`
+	UgHost    string          `json:"ug_host"`
+	OAuthHost string          `json:"oauth_host"`
+	Accounts  []AccountConfig `json:"accounts"`
 }
 
 // AccountConfig is one credential set.
@@ -54,6 +58,12 @@ type AccountConfig struct {
 	// RefreshToken is used by token-based providers (raccoon). When set, the
 	// gateway can mint fresh access tokens without re-authorizing.
 	RefreshToken string `json:"refresh_token"`
+	// UID / MachineID / DeviceID / ApiHost are TRAE-specific per-account
+	// fingerprint fields (see provider.Account). Omitted for other types.
+	UID       string `json:"uid,omitempty"`
+	MachineID string `json:"machine_id,omitempty"`
+	DeviceID  string `json:"device_id,omitempty"`
+	ApiHost   string `json:"api_host,omitempty"`
 }
 
 // CheckinConfig controls the scheduled check-in / keep-alive tasks.
@@ -158,6 +168,8 @@ func (c *Config) applyDefaults() {
 			if p.AuthBase == "" {
 				p.AuthBase = p.MainOrigin + "/api/web/auth/v1"
 			}
+		case "trae":
+			// Hosts default inside the provider; nothing to fill here.
 		}
 	}
 }
@@ -176,7 +188,7 @@ func (c *Config) validate() error {
 		}
 		seen[p.Name] = true
 		switch p.Type {
-		case "runable", "openai", "raccoon":
+		case "runable", "openai", "raccoon", "trae":
 		default:
 			return fmt.Errorf("provider %q: unknown type %q", p.Name, p.Type)
 		}

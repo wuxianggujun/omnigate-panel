@@ -123,6 +123,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.handleRaccoonAdmin(w, r)
+	case strings.HasPrefix(path, "/admin/trae/"):
+		if !s.authorized(w, r) {
+			return
+		}
+		s.handleTraeAdmin(w, r)
 	default:
 		writeJSON(w, 404, openai.ErrorJSON("not_found", "not found"))
 	}
@@ -535,8 +540,111 @@ func (s *Server) raccoonProviderOrDefault(name string) string {
 	return ""
 }
 
-func (s *Server) writeValue(w http.ResponseWriter, status int, v any) {
-	body, err := json.Marshal(v)
+// handleTraeAdmin serves /admin/trae/* — the browser-login flow (open the URL,
+// then paste the callback link back) and account/balance/check-in management.
+func (s *Server) handleTraeAdmin(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/admin/trae/")
+	switch {
+	case r.Method == http.MethodGet && path == "authorize":
+		res, err := s.gw.TraeAuthorize(s.traeProviderOrDefault(r.URL.Query().Get("provider")), r.URL.Query().Get("label"))
+		if err != nil {
+			s.adminError(w, err)
+			return
+		}
+		s.writeValue(w, 200, res)
+	case r.Method == http.MethodPost && path == "callback":
+		var req struct {
+			Provider    string `json:"provider"`
+			State       string `json:"state"`
+			CallbackURL string `json:"callback_url"`
+			Callback    string `json:"callback"`
+		}
+		if err := decodeBody(r, &req); err != nil {
+			s.adminError(w, err)
+			return
+		}
+		cb := req.CallbackURL
+		if cb == "" {
+			cb = req.Callback
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+		defer cancel()
+		res, err := s.gw.TraeCompleteCallback(ctx, s.traeProviderOrDefault(req.Provider), req.State, cb)
+		if err != nil {
+			s.adminError(w, err)
+			return
+		}
+		s.writeValue(w, 200, map[string]any{"ok": true, "account": res})
+	case r.Method == http.MethodGet && path == "accounts":
+		ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+		defer cancel()
+		res, err := s.gw.TraeAccounts(ctx, s.traeProviderOrDefault(r.URL.Query().Get("provider")))
+		if err != nil {
+			s.adminError(w, err)
+			return
+		}
+		s.writeValue(w, 200, map[string]any{"accounts": res})
+	case r.Method == http.MethodPost && path == "checkin":
+		var req struct {
+			Provider string `json:"provider"`
+			Label    string `json:"label"`
+		}
+		if err := decodeBody(r, &req); err != nil {
+			s.adminError(w, err)
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
+		defer cancel()
+		res, err := s.gw.TraeCheckin(ctx, s.traeProviderOrDefault(req.Provider), req.Label)
+		if err != nil {
+			s.adminError(w, err)
+			return
+		}
+		s.writeValue(w, 200, map[string]any{"results": res})
+	case r.Method == http.MethodPost && path == "remove":
+		var req struct {
+			Provider string `json:"provider"`
+			Label    string `json:"label"`
+		}
+		if err := decodeBody(r, &req); err != nil {
+			s.adminError(w, err)
+			return
+		}
+		if req.Label == "" {
+			s.adminError(w, fmt.Errorf("label 不能为空"))
+			return
+		}
+		removed := s.gw.TraeRemoveAccount(s.traeProviderOrDefault(req.Provider), req.Label)
+		s.writeValue(w, 200, map[string]any{"ok": true, "removed": removed})
+	default:
+		writeJSON(w, 404, openai.ErrorJSON("not_found", "unknown admin route"))
+	}
+}
+
+// traeProviderOrDefault resolves the provider for /admin/trae/*: an explicit name
+// wins, otherwise prefer the default provider when it is a trae one, otherwise
+// the first trae provider configured.
+func (s *Server) traeProviderOrDefault(name string) string {
+	if name != "" {
+		return name
+	}
+	if s.cfg.DefaultProvider != "" {
+		if p := s.cfg.Provider(s.cfg.DefaultProvider); p != nil && p.Type == "trae" {
+			return s.cfg.DefaultProvider
+		}
+	}
+	for _, p := range s.cfg.Providers {
+		if p.Type == "trae" {
+			return p.Name
+		}
+	}
+	if len(s.cfg.Providers) > 0 {
+		return s.cfg.Providers[0].Name
+	}
+	return ""
+}
+
+func (s *Server) writeValue(w http.ResponseWriter, status int, v any) {	body, err := json.Marshal(v)
 	if err != nil {
 		writeJSON(w, 500, openai.ErrorJSON("internal_error", err.Error()))
 		return

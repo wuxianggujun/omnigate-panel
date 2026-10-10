@@ -1733,6 +1733,7 @@ function addTabsForSource(src) {
   if (src === '__wb') return [['login', '浏览器登录'], ['import', '导入 cockpit'], ['bundle', '导入账号包']];
   const t = addSourceType(src);
   if (t === 'raccoon') return [['ogauth', '浏览器登录'], ['ogtoken', '粘贴 Token']];
+  if (t === 'trae') return [['ogauth', '浏览器登录']];
   if (t === 'runable') return [['ogcreds', '浏览器登录']];
   return [['ognone', '说明']];
 }
@@ -1784,7 +1785,7 @@ function switchAddTab(tab) {
   $('btnCopyUrl').hidden = !(wbLogin && !!loginState);
   $('btnOpenUrl').hidden = !(wbLogin && !!loginState);
   // 预填 OmniGate 账号名
-  if (tab === 'ogauth' && $('authLabel')) { $('authLabel').value = ogNextLabel(); resetOgAuthPanel(); }
+  if (tab === 'ogauth' && $('authLabel')) { $('authLabel').value = ogNextLabel(); resetOgAuthPanel(); setOgAuthCopy(addSourceType(addSource) === 'trae'); }
   if (tab === 'ogtoken' && $('tokLabel')) $('tokLabel').value = ogNextLabel();
   if (tab === 'ogcreds' && $('ogAcctLabel')) $('ogAcctLabel').value = ogNextLabel();
   ogMsg('authMsg', ''); ogMsg('tokenMsg', ''); ogMsg('ogCredsMsg', '');
@@ -1793,6 +1794,7 @@ function switchAddTab(tab) {
 // resetOgAuthPanel 把 raccoon 浏览器登录面板复位到「未开始」态（切页 / 关闭时调用）。
 function resetOgAuthPanel() {
   stopAutoPoll();
+  ogAuthState = '';
   if ($('ogAuthLoad')) $('ogAuthLoad').hidden = true;
   if ($('ogAuthReady')) $('ogAuthReady').hidden = true;
   if ($('ogAuthDone')) $('ogAuthDone').hidden = true;
@@ -3688,12 +3690,16 @@ function omniModelsText(p) { return Array.isArray(p.models) ? p.models.join('\n'
 
 function provCard(p, i) {
   const type = p.type || 'runable';
-  const typeOpts = ['runable', 'raccoon', 'openai']
+  const typeOpts = ['runable', 'raccoon', 'trae', 'openai']
     .map(t => '<option value="' + t + '"' + (t === type ? ' selected' : '') + '>' + t + '</option>').join('');
   const raccoonFields = type === 'raccoon' ? '' +
       '<label>main_origin<input data-i="' + i + '" data-f="main_origin" value="' + esc(p.main_origin || '') + '" placeholder="https://..."></label>' +
       '<label>llm_base<input data-i="' + i + '" data-f="llm_base" value="' + esc(p.llm_base || '') + '"></label>' +
       '<label>auth_base<input data-i="' + i + '" data-f="auth_base" value="' + esc(p.auth_base || '') + '"></label>' : '';
+  const traeFields = type === 'trae' ? '' +
+      '<label>agent_host<input data-i="' + i + '" data-f="agent_host" value="' + esc(p.agent_host || '') + '" placeholder="留空 = 默认"></label>' +
+      '<label>ug_host<input data-i="' + i + '" data-f="ug_host" value="' + esc(p.ug_host || '') + '" placeholder="留空 = 默认"></label>' +
+      '<label>oauth_host<input data-i="' + i + '" data-f="oauth_host" value="' + esc(p.oauth_host || '') + '" placeholder="留空 = 默认"></label>' : '';
   const deviceField = type === 'runable' ? '' +
       '<label>device_header<input data-i="' + i + '" data-f="device_header" value="' + esc(p.device_header || '') + '" placeholder="留空 = 默认"></label>' : '';
   return '<div class="og-card">' +
@@ -3706,7 +3712,7 @@ function provCard(p, i) {
       '<label>类型<select data-i="' + i + '" data-f="type">' + typeOpts + '</select></label>' +
       '<label class="og-full">base_url<input data-i="' + i + '" data-f="base_url" value="' + esc(p.base_url || '') + '" placeholder="https://api.example.com/v1"></label>' +
       '<label class="og-full">api_key<input data-i="' + i + '" data-f="api_key" value="' + esc(p.api_key || '') + '" placeholder="上游密钥（openai 类用）；已脱敏，不改 = 保持原值"></label>' +
-      deviceField + raccoonFields +
+      deviceField + raccoonFields + traeFields +
       '<label class="og-full">models（逗号或换行分隔，留空 = 自动发现）<textarea data-i="' + i + '" data-f="models" rows="2">' + esc(omniModelsText(p)) + '</textarea></label>' +
     '</div>' +
     '<div class="og-sep"></div>' +
@@ -3807,11 +3813,23 @@ function ogAcctCount() {
 }
 function ogNextLabel() {
   const t = addSourceType(addSource);
-  const base = t === 'raccoon' ? '浣熊账号' : (t === 'runable' ? 'runable账号' : '账号');
+  const base = t === 'raccoon' ? '浣熊账号' : (t === 'trae' ? 'TRAE账号' : (t === 'runable' ? 'runable账号' : '账号'));
   return base + (ogAcctCount() + 1);
 }
 
+// setOgAuthCopy 让「浏览器登录」面板适配 raccoon（自动捕获）与 trae（粘贴回调链接）。
+function setOgAuthCopy(isTrae) {
+  if ($('btnStartOgAuth')) $('btnStartOgAuth').textContent = isTrae ? '生成登录链接并打开登录页' : '生成授权链接并打开登录页';
+  if ($('ogAuthHint')) $('ogAuthHint').innerHTML = isTrae
+    ? '登录后 TRAE 会跳到一个打不开的本机地址（<code>127.0.0.1</code>）。把浏览器地址栏里的整条 URL（含 <code>refreshToken</code> / <code>userInfo</code>）复制到下面提交即可。可重复添加多个账号。'
+    : '若浏览器没有自动跳回：登录后把地址栏里的整段 <code>office-raccoon://auth/callback?code=...&amp;state=...</code>（或只把 <code>code</code>）粘到下面提交即可。可重复添加多个账号。';
+  if ($('callback')) $('callback').placeholder = isTrae
+    ? 'http://127.0.0.1:18080/authorize?refreshToken=...&userInfo=...'
+    : 'office-raccoon://auth/callback?code=...&state=...';
+}
+
 let autoPollTimer = null;
+let ogAuthState = '';
 function stopAutoPoll() { if (autoPollTimer) { clearInterval(autoPollTimer); autoPollTimer = null; } }
 
 async function authorizeOmni() {
@@ -3824,24 +3842,36 @@ async function authorizeOmni() {
   $('btnStartOgAuth').disabled = true;
   ogMsg('authMsg', '');
   $('ogAuthLoad').hidden = false;
-  const redirectBase = location.origin + '/omni/admin/raccoon/redirect';
+  const isTrae = addSourceType(addSource) === 'trae';
   try {
-    const data = await apiAbs('/omni/admin/raccoon/authorize?provider=' + encodeURIComponent(provName())
-      + '&label=' + encodeURIComponent($('authLabel').value)
-      + '&redirect_base=' + encodeURIComponent(redirectBase));
+    let data;
+    if (isTrae) {
+      data = await apiAbs('/omni/admin/trae/authorize?provider=' + encodeURIComponent(provName())
+        + '&label=' + encodeURIComponent($('authLabel').value));
+      ogAuthState = data.state || '';
+    } else {
+      const redirectBase = location.origin + '/omni/admin/raccoon/redirect';
+      data = await apiAbs('/omni/admin/raccoon/authorize?provider=' + encodeURIComponent(provName())
+        + '&label=' + encodeURIComponent($('authLabel').value)
+        + '&redirect_base=' + encodeURIComponent(redirectBase));
+    }
     const url = data.authorize_url || data.url || data.auth_url || '';
     $('authUrl').value = url;
     $('ogAuthUrl').textContent = url;
     $('ogAuthLoad').hidden = true;
     $('ogAuthReady').hidden = false;
-    if (data.mode === 'auto') {
+    if (isTrae || data.mode !== 'auto') {
+      $('authMode').textContent = '手动粘贴回调';
+      $('ogAuthPoll').hidden = true;
+      ogMsg('authMsg', isTrae
+        ? '已生成登录链接；登录后把浏览器地址栏里的整条 URL 粘到下方「手动粘贴回调」提交。'
+        : '已生成授权链接；登录后请展开下方「手动粘贴回调（备选）」提交。', 'ok');
+      const det = $('addTabOgAuth') ? $('addTabOgAuth').querySelector('details.og-adv') : null;
+      if (det) det.open = true;
+    } else {
       $('authMode').textContent = '自动捕获';
       $('ogAuthPoll').hidden = false;
       startAutoPoll($('authLabel').value);
-    } else {
-      $('authMode').textContent = '手动粘贴';
-      $('ogAuthPoll').hidden = true;
-      ogMsg('authMsg', '已生成授权链接；登录后请展开下方「手动粘贴回调（备选）」提交。', 'ok');
     }
     if (url) window.open(url, '_blank', 'noopener');
   } catch (e) {
@@ -3895,11 +3925,17 @@ async function submitOmniCallback() {
   const cb = $('callback').value.trim();
   if (!cb) { ogMsg('authMsg', '请先粘贴回调 URL 或 code', 'err'); return; }
   const label = $('authLabel').value.trim();
+  const isTrae = addSourceType(addSource) === 'trae';
   try {
-    const data = await apiAbs('/omni/admin/raccoon/callback', {
-      method: 'POST',
-      body: JSON.stringify({ provider: provName(), label, callback: cb }),
-    });
+    const data = isTrae
+      ? await apiAbs('/omni/admin/trae/callback', {
+          method: 'POST',
+          body: JSON.stringify({ provider: provName(), state: ogAuthState, callback: cb }),
+        })
+      : await apiAbs('/omni/admin/raccoon/callback', {
+          method: 'POST',
+          body: JSON.stringify({ provider: provName(), label, callback: cb }),
+        });
     const acc = (data && data.account) || {};
     stopAutoPoll();
     $('ogAuthLoad').hidden = true;

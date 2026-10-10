@@ -22,6 +22,7 @@ import (
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/provider/openaibackend"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/provider/raccoon"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/provider/runable"
+	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/provider/trae"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/state"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/toolcall"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/util"
@@ -56,6 +57,12 @@ type Gateway struct {
 	pendingMu sync.Mutex
 	pending   map[string]raccoonPending
 
+	// traePend remembers in-flight TRAE browser logins (keyed by state). TRAE
+	// needs the machine/device fingerprint chosen at login time to be reused when
+	// the account is finally created, so it cannot share raccoonPending.
+	traePendMu sync.Mutex
+	traePend   map[string]traePending
+
 	// proxyFor resolves a per-provider outbound proxy (nil = direct). Installed
 	// via WithProxyResolver; consulted once per provider at construction.
 	proxyFor func(providerName string) *url.URL
@@ -77,6 +84,15 @@ type raccoonPending struct {
 	provider string
 	label    string
 	at       time.Time
+}
+
+// traePending remembers an in-flight TRAE browser login.
+type traePending struct {
+	provider  string
+	label     string
+	machineID string
+	deviceID  string
+	at        time.Time
 }
 
 type modelEntry struct {
@@ -145,6 +161,9 @@ var (
 	_ interface {
 		SetProxySelector(outbound.Selector)
 	} = (*openaibackend.Provider)(nil)
+	_ interface {
+		SetProxySelector(outbound.Selector)
+	} = (*trae.Provider)(nil)
 )
 
 // New builds a Gateway from config and state.
@@ -158,6 +177,7 @@ func New(cfg *config.Config, st *state.State, log *logx.Logger, opts ...Option) 
 		modelCache: map[string]modelEntry{},
 		convs:      map[string]*conv{},
 		pending:    map[string]raccoonPending{},
+		traePend:   map[string]traePending{},
 		cool:       newCooldownLedger(),
 		sess:       newSessionHealth(),
 	}
@@ -174,6 +194,8 @@ func New(cfg *config.Config, st *state.State, log *logx.Logger, opts ...Option) 
 			prov = openaibackend.New(p.Name, p.BaseURL, p.APIKey, p.Models)
 		case "raccoon":
 			prov = raccoon.NewProvider(p.Name, p.MainOrigin, p.LLMBase, p.AuthBase)
+		case "trae":
+			prov = trae.NewProvider(p.Name, p.AgentHost, p.UgHost, p.OAuthHost)
 		default:
 			return nil, fmt.Errorf("provider %q: unknown type %q", p.Name, p.Type)
 		}
@@ -212,6 +234,10 @@ func New(cfg *config.Config, st *state.State, log *logx.Logger, opts ...Option) 
 				Email:        a.Email,
 				Password:     a.Password,
 				RefreshToken: st.RefreshToken(p.Name, label, a.RefreshToken),
+				UID:          a.UID,
+				MachineID:    a.MachineID,
+				DeviceID:     a.DeviceID,
+				ApiHost:      a.ApiHost,
 			})
 		}
 		// Merge accounts added at runtime (e.g. via the Raccoon web login).
@@ -224,6 +250,11 @@ func New(cfg *config.Config, st *state.State, log *logx.Logger, opts ...Option) 
 				Label:        d.Label,
 				Cookie:       st.Cookie(p.Name, d.Label, d.AccessToken),
 				RefreshToken: st.RefreshToken(p.Name, d.Label, d.RefreshToken),
+				UID:          d.UserID,
+				MachineID:    d.MachineID,
+				DeviceID:     d.DeviceID,
+				ApiHost:      d.ApiHost,
+				ExpiresAt:    d.ExpiresAt,
 			})
 		}
 		g.accounts[p.Name] = accts
@@ -783,6 +814,27 @@ func (g *Gateway) runChat(ctx context.Context, provName string, prov provider.Pr
 	return res, nil
 }
 
+// TokenRefresher is implemented by token-based providers (raccoon, trae) that can
+// renew an expired access token from a refresh token. The gateway uses it to
+// refresh proactively (before a call) and reactively (once, on a 401).
+type TokenRefresher interface {
+	// TokenExpired reports whether acc's access token is missing or near expiry.
+	TokenExpired(acc *provider.Account) bool
+	// RefreshAccount mints a fresh access token, updating acc in place.
+	RefreshAccount(ctx context.Context, acc *provider.Account) error
+	// Unauthorized reports whether err is an auth failure worth a refresh+retry.
+	Unauthorized(err error) bool
+}
+
+// refreshToken mints a fresh access token via the provider and persists it.
+func (g *Gateway) refreshToken(ctx context.Context, provName string, tr TokenRefresher, acc *provider.Account) error {
+	if err := tr.RefreshAccount(ctx, acc); err != nil {
+		return err
+	}
+	g.st.SetTokens(provName, acc.Label, acc.Cookie, acc.RefreshToken)
+	return nil
+}
+
 // openStream picks an account (switching on exhausted credits) and opens the stream.
 func (g *Gateway) openStream(ctx context.Context, provName string, prov provider.Provider, in provider.ChatInput) (provider.Stream, error) {
 	g.accountsMu.RLock()
@@ -832,8 +884,9 @@ func (g *Gateway) openStream(ctx context.Context, provName string, prov provider
 			}
 			// Token-based providers refresh before the call when the access token
 			// is missing or about to expire.
-			if rp, ok := prov.(*raccoon.Provider); ok && acc.RefreshToken != "" && rp.TokenExpired(acc) {
-				if err := g.refreshRaccoonToken(ctx, provName, prov, acc); err != nil {
+			tr, _ := prov.(TokenRefresher)
+			if tr != nil && acc.RefreshToken != "" && tr.TokenExpired(acc) {
+				if err := g.refreshToken(ctx, provName, tr, acc); err != nil {
 					g.log.Warn("账号「%s」刷新 token 失败: %v", acc.Label, err)
 				}
 			}
@@ -844,8 +897,8 @@ func (g *Gateway) openStream(ctx context.Context, provName string, prov provider
 			}
 			stream, err := prov.StreamChat(ctx, acc, in)
 			// On an auth failure, refresh once and retry.
-			if err != nil && prov.Type() == "raccoon" && raccoon.Unauthorized(err) {
-				if rerr := g.refreshRaccoonToken(ctx, provName, prov, acc); rerr == nil {
+			if err != nil && tr != nil && tr.Unauthorized(err) {
+				if rerr := g.refreshToken(ctx, provName, tr, acc); rerr == nil {
 					stream, err = prov.StreamChat(ctx, acc, in)
 				}
 			}

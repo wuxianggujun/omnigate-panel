@@ -36,6 +36,18 @@ type Account struct {
 	// RefreshToken is used by token-based providers (e.g. raccoon) to mint a
 	// fresh access token when Cookie expires. Empty for cookie-based providers.
 	RefreshToken string
+	// ExpiresAt is the access token's expiry (unix seconds) for token-based
+	// providers that learn it from the token endpoint (TRAE). 0 = unknown
+	// (fall back to reading the JWT).
+	ExpiresAt int64
+	// UID / MachineID / DeviceID / ApiHost carry TRAE-specific per-account
+	// fingerprint fields. TRAE sends x-machine-id / x-device-id on every SOLO
+	// request and requires a *distinct* deviceId per account for the daily
+	// check-in, so these must be persisted per account. Empty for other types.
+	UID       string
+	MachineID string
+	DeviceID  string
+	ApiHost   string
 }
 
 // ChatInput is a normalized chat request handed to a provider.

@@ -433,6 +433,16 @@ func (m *omniManager) Accounts(ctx context.Context, withBalance bool) (any, erro
 				enrichOmniAccount(r, meta)
 			}
 			pa.Accounts = rows
+		case withBalance && typ == "trae":
+			// TRAE SOLO 是积分（credits）制：withBalance 时实时查上游权益包余额。
+			rows, err := rt.gw.TraeAccounts(ctx, name)
+			if err != nil {
+				return nil, err
+			}
+			for _, r := range rows {
+				enrichOmniAccount(r, meta)
+			}
+			pa.Accounts = rows
 		default:
 			for _, a := range rt.gw.Accounts(name) {
 				item := map[string]any{"label": a.Label, "has_token": a.Cookie != ""}
@@ -505,6 +515,12 @@ func (m *omniManager) Checkin(ctx context.Context, provider, label string) (any,
 			return nil, err
 		}
 		return map[string]any{"results": res}, nil
+	case "trae":
+		res, err := rt.gw.TraeCheckin(ctx, provider, label)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"results": res}, nil
 	default:
 		return nil, fmt.Errorf("provider %q 不支持签到", provider)
 	}
@@ -542,6 +558,12 @@ func (m *omniManager) CheckinAll(ctx context.Context) (any, error) {
 			}
 		case "runable":
 			if res, err := rt.gw.RunableCheckin(ctx, name, ""); err != nil {
+				item["error"] = err.Error()
+			} else {
+				item["results"] = res
+			}
+		case "trae":
+			if res, err := rt.gw.TraeCheckin(ctx, name, ""); err != nil {
 				item["error"] = err.Error()
 			} else {
 				item["results"] = res

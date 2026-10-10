@@ -2,6 +2,7 @@ package outbound
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -265,5 +266,56 @@ func TestPoolRefreshFromAPI(t *testing.T) {
 	}
 	if got, err := p.Next(); err != nil || got == nil || got.Host != goodHost {
 		t.Fatalf("Next 应返回存活代理，得到 %v err=%v", got, err)
+	}
+}
+
+// TestReportIgnoresCancellation 验证「请求被取消 / 超时」不会被当成代理故障剔除。
+func TestReportIgnoresCancellation(t *testing.T) {
+	u := mustURL(t, "http://10.0.0.1:1")
+	p := newPool(Proxy{Name: "p", PoolScheme: "http"}, nil)
+	p.live = []*url.URL{u}
+
+	p.Report(u, context.Canceled)
+	p.Report(u, context.DeadlineExceeded)
+	if st := p.Status(); st.Live != 1 {
+		t.Fatalf("取消/超时不应剔除代理，live=%d", st.Live)
+	}
+
+	// 真正的连接错误仍应剔除。
+	p.Report(u, errors.New("connection refused"))
+	if st := p.Status(); st.Live != 0 {
+		t.Fatalf("连接错误应剔除代理，live=%d", st.Live)
+	}
+}
+
+// TestFailoverCancelKeepsPool 端到端验证：请求超时（客户端取消）不会清空代理池。
+// 回归背景：failoverTransport 曾对 ctx 错误也 Report + 换下一个重试，导致一次断连
+// 会带着同一个已取消的 ctx 把池里所有代理逐个试坏并全部剔除。
+func TestFailoverCancelKeepsPool(t *testing.T) {
+	// 假代理：挂住直到客户端断开，制造「请求被取消」而非「代理故障」。
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	defer slow.Close()
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer origin.Close()
+
+	p := newPool(Proxy{Name: "p", PoolScheme: "http"}, nil)
+	p.live = []*url.URL{mustURL(t, slow.URL)}
+
+	client := &http.Client{Transport: WrapTransport(&http.Transport{}, p)}
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, origin.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Do(req); err == nil {
+		t.Fatal("应因请求超时失败")
+	}
+	if st := p.Status(); st.Live != 1 {
+		t.Fatalf("请求超时不应剔除代理，live=%d last_error=%q", st.Live, st.LastError)
 	}
 }

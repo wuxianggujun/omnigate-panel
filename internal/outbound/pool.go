@@ -270,9 +270,13 @@ func (p *Pool) Next() (*url.URL, error) {
 	return u, nil
 }
 
-// Report 汇报一次尝试结果：失败即把该代理踢出可用集。
+// Report 汇报一次尝试结果：失败即把该代理踢出可用集。请求被取消（客户端断连 /
+// 上层超时）不算代理故障，直接忽略——否则健康代理会被无关的断连逐出。
 func (p *Pool) Report(u *url.URL, err error) {
 	if err == nil || u == nil {
+		return
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return
 	}
 	p.mu.Lock()
@@ -446,6 +450,12 @@ func (t *failoverTransport) RoundTrip(req *http.Request) (*http.Response, error)
 		if err == nil {
 			t.sel.Report(u, nil)
 			return resp, nil
+		}
+		// 客户端断连 / 请求被取消不是代理故障：既不剔除该代理，也不换下一个重试。
+		// 否则一次断连会顺着「重试下一个代理」的路径，带着同一个已取消的 ctx 把池里
+		// 其它代理逐个试坏并全部剔除（每个重试都会立刻返回 ctx 错误）。
+		if req.Context().Err() != nil || errors.Is(err, context.Canceled) {
+			return nil, err
 		}
 		t.sel.Report(u, err)
 		lastErr = err

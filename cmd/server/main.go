@@ -163,7 +163,7 @@ func main() {
 		log.Printf("[outbound] "+f, a...)
 	})
 	defer obRT.Close()
-	up.SetProxy(obRT.ProxyFunc(outbound.TargetWorkbuddy))
+	applyUpstreamProxy(up, obRT)
 
 	// 积分保底的「收费」兜底判据：接上游模型目录的积分倍率表。本地实测台账无观测
 	// 时用它判收费——否则「没学过」恒等于「放行」，高价新模型会把触底号一笔打穿
@@ -747,12 +747,27 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	// （清空闲池即时生效）。
 	if obRT != nil {
 		obRT.Reload(newCfg.Outbound)
-		up.SetProxy(obRT.ProxyFunc(outbound.TargetWorkbuddy))
+		applyUpstreamProxy(up, obRT)
 	} else {
 		up.SetProxy(newCfg.Outbound.ProxyFunc(outbound.TargetWorkbuddy))
 	}
 
 	return restartRequiredFields(newCfg), nil
+}
+
+// applyUpstreamProxy 把当前出站配置应用到面板上游（WorkBuddy 目标）：路由到代理池
+// 时安装带故障切换的 Selector（与 OmniGate 供应商一致）；否则用单代理 / 直连。
+// 每次保存都先 SetProxySelector 复位，避免「池 → 单代理」切换时残留池包装。
+func applyUpstreamProxy(up *upstream.Client, obRT *outbound.Runtime) {
+	if up == nil || obRT == nil {
+		return
+	}
+	if pl := obRT.Pool(outbound.TargetWorkbuddy); pl != nil {
+		up.SetProxySelector(pl)
+		return
+	}
+	up.SetProxySelector(nil)
+	up.SetProxy(obRT.ProxyFunc(outbound.TargetWorkbuddy))
 }
 
 // restartRequiredFields 返回本次改动中无法热生效、需要重启进程的字段名。

@@ -22,6 +22,7 @@ import (
 
 	"github.com/wuxianggujun/omnigate-panel/internal/auth"
 	"github.com/wuxianggujun/omnigate-panel/internal/logfmt"
+	"github.com/wuxianggujun/omnigate-panel/internal/outbound"
 )
 
 // ErrKind 错误分类，pool 据此决定冷却时长。
@@ -612,6 +613,10 @@ type Client struct {
 	// 与 HTTP 共享同一个 *http.Transport 实例，连接池不重复。
 	ChatHTTP *http.Client
 
+	// baseTr 是 HTTP / ChatHTTP 共用的基础 *http.Transport。安装代理池时会被包一层
+	// failoverTransport，这里保留原始实例，供卸载代理池（还原直连）时复位。
+	baseTr *http.Transport
+
 	// HeaderTimeout 聊天 SSE 首字节前（响应头）超时；<=0 表示未设置（回落 HTTP.Timeout）。
 	HeaderTimeout time.Duration
 	// IdleTimeout 聊天 SSE 流中空闲超时；<=0 表示禁用空闲监控。
@@ -691,6 +696,7 @@ func New() *Client {
 	c := &Client{
 		HTTP:          &http.Client{Timeout: 120 * time.Second, Transport: tr},
 		ChatHTTP:      &http.Client{Timeout: 0, Transport: tr}, // 无总时长；首字节由 ResponseHeaderTimeout 管
+		baseTr:        tr,
 		ChatBaseCN:    "https://copilot.tencent.com",
 		BillingBaseCN: "https://www.codebuddy.cn",
 		WebBaseCN:     "https://www.workbuddy.cn",
@@ -715,6 +721,52 @@ func (c *Client) SetProxy(fn func(*http.Request) (*url.URL, error)) {
 			tr.CloseIdleConnections()
 		}
 	}
+}
+
+// SetProxySelector 让面板上游的出站请求按代理池逐请求选代理（轮询 + 连接级故障
+// 切换），与 OmniGate 供应商走同一套 outbound.Selector 语义。sel 为 nil 时还原为
+// 基础 Transport（回到 SetProxy / 直连 语义）。
+//
+// 背景：WorkBuddy 目标此前只通过 SetProxy 拿到「轮询选代理」的 Proxy 函数，没有
+// 故障切换（Proxy 只能选一个代理，失败无法重试）。这里把基础 Transport 包一层
+// failoverTransport，让面板上游的代理池也具备「失败自动换下一个」。
+func (c *Client) SetProxySelector(sel outbound.Selector) {
+	base := c.baseTransport()
+	if base == nil {
+		return
+	}
+	var rt http.RoundTripper = base
+	if sel != nil {
+		rt = outbound.WrapTransport(base, sel)
+	}
+	for _, hc := range []*http.Client{c.HTTP, c.ChatHTTP} {
+		if hc == nil {
+			continue
+		}
+		if old := hc.Transport; old != nil && old != rt {
+			if ci, ok := old.(interface{ CloseIdleConnections() }); ok {
+				ci.CloseIdleConnections()
+			}
+		}
+		hc.Transport = rt
+	}
+}
+
+// baseTransport 返回未被代理池包装的 *http.Transport。生产路径由 New() 记录；
+// 测试里手工构造的 Client 回落到当前 Transport（若是 *http.Transport）。
+func (c *Client) baseTransport() *http.Transport {
+	if c.baseTr != nil {
+		return c.baseTr
+	}
+	for _, hc := range []*http.Client{c.HTTP, c.ChatHTTP} {
+		if hc == nil {
+			continue
+		}
+		if tr, ok := hc.Transport.(*http.Transport); ok {
+			return tr
+		}
+	}
+	return nil
 }
 
 // chatHTTP 返回聊天专用 client；未设置（如测试只注入 HTTP）时回落 HTTP。

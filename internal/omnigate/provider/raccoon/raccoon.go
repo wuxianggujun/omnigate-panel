@@ -911,6 +911,9 @@ type Provider struct {
 	client *Client
 }
 
+// 编译期保证：raccoon 的模型目录需要鉴权，实现可选能力 AccountModelLister。
+var _ provider.AccountModelLister = (*Provider)(nil)
+
 // NewProvider builds a Raccoon provider.
 func NewProvider(name, mainOrigin, llmBase, authBase string) *Provider {
 	return &Provider{name: name, client: NewClient(mainOrigin, llmBase, authBase)}
@@ -934,8 +937,19 @@ func (p *Provider) SetProxy(u *url.URL) { p.client.SetProxy(u) }
 func (p *Provider) SetProxySelector(sel outbound.Selector) { p.client.SetProxySelector(sel) }
 
 // ListModels fetches the upstream catalog, falling back to built-in defaults.
+// 目录端点需要鉴权，没有账号时只能拿到内置默认目录。
 func (p *Provider) ListModels(ctx context.Context) ([]openai.Model, error) {
-	models, err := p.client.FetchModelCatalog(ctx, "")
+	return p.ListModelsWithAccount(ctx, nil)
+}
+
+// ListModelsWithAccount 用账号凭证拉取带计费信息的模型目录（匿名请求 401，只能退回
+// 内置默认目录——那份没有积分价）。实现 provider.AccountModelLister，让网关带上一个
+// 可用账号。
+func (p *Provider) ListModelsWithAccount(ctx context.Context, acc *provider.Account) ([]openai.Model, error) {
+	if acc == nil || strings.TrimSpace(acc.Cookie) == "" {
+		return fallbackModels(p.name), nil
+	}
+	models, err := p.client.FetchModelCatalog(ctx, acc.Cookie)
 	if err != nil || len(models) == 0 {
 		return fallbackModels(p.name), nil
 	}

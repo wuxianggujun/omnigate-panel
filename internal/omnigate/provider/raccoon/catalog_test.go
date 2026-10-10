@@ -1,6 +1,9 @@
 package raccoon
 
-import "testing"
+import (
+	"context"
+	"testing"
+)
 
 // TestParseCatalogBilling 校验上游 catalog 的 billing_* 字段被映射到 openai.Model：
 // 生效倍率优先、单位标为 multiplier、原始元数据（含折扣）整体保留。
@@ -66,5 +69,23 @@ func TestParseCatalogNoBilling(t *testing.T) {
 	}
 	if models[0].Credits != nil || models[0].Billing != nil {
 		t.Fatalf("expected no price, got credits=%v billing=%+v", models[0].Credits, models[0].Billing)
+	}
+}
+
+// TestListModelsWithAccountFallback 无账号（或空凭证）时退回内置默认目录，
+// 且默认目录不带积分价（不编造）。
+func TestListModelsWithAccountFallback(t *testing.T) {
+	p := NewProvider("raccoon", "https://example.invalid", "", "")
+	models, err := p.ListModelsWithAccount(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(models) == 0 {
+		t.Fatal("expected fallback models")
+	}
+	for _, m := range models {
+		if m.Credits != nil || m.Billing != nil {
+			t.Fatalf("fallback model %s should have no price", m.ID)
+		}
 	}
 }

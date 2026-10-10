@@ -249,7 +249,14 @@ func (g *Gateway) models(ctx context.Context, name string) ([]openai.Model, erro
 	if prov == nil {
 		return nil, fmt.Errorf("unknown provider %q", name)
 	}
-	models, err := prov.ListModels(ctx)
+	var models []openai.Model
+	var err error
+	if lister, ok := prov.(provider.AccountModelLister); ok {
+		// 需要鉴权的目录（raccoon）：带上一个可用账号才能拿到计费 / 积分价。
+		models, err = lister.ListModelsWithAccount(ctx, g.pickAccount(name))
+	} else {
+		models, err = prov.ListModels(ctx)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -257,6 +264,18 @@ func (g *Gateway) models(ctx context.Context, name string) ([]openai.Model, erro
 	g.modelCache[name] = modelEntry{models: models, at: time.Now()}
 	g.modelMu.Unlock()
 	return models, nil
+}
+
+// pickAccount 返回该 provider 的一个可用账号（有凭证），无则 nil。
+func (g *Gateway) pickAccount(name string) *provider.Account {
+	g.accountsMu.RLock()
+	defer g.accountsMu.RUnlock()
+	for _, a := range g.accounts[name] {
+		if a != nil && a.Cookie != "" {
+			return a
+		}
+	}
+	return nil
 }
 
 // ListModels aggregates every provider's models, prefixed with "provider/".

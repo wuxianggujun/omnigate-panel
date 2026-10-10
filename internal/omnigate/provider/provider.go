@@ -103,6 +103,15 @@ type Provider interface {
 	StreamChat(ctx context.Context, acc *Account, in ChatInput) (Stream, error)
 }
 
+// AccountModelLister is an optional Provider capability: some upstreams (raccoon)
+// only return their model catalog — and its billing metadata — to an
+// authenticated request. When a Provider implements it, the gateway supplies a
+// live account so the catalog (and per-model credit price) can be fetched;
+// otherwise the gateway falls back to ListModels(ctx).
+type AccountModelLister interface {
+	ListModelsWithAccount(ctx context.Context, acc *Account) ([]openai.Model, error)
+}
+
 // SSEScanner reads Server-Sent Events and returns the concatenated data payload
 // of each event. Comment lines and non-data fields are ignored.
 type SSEScanner struct {

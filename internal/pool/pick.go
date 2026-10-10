@@ -67,6 +67,56 @@ func (p *Pool) PickExcludingForRealms(tried map[string]bool, reqModel string, re
 	return nil
 }
 
+// PreferRealmAvailable 报告 realms 里是否有优先级**严格高于** stickyRealm 的域当前存在
+// 可服务 reqModel 的账号。纯查询：不消耗在途名额、不记 lastUsed、不改任何状态。
+//
+// 用途：域优先级高于会话粘性。会话粘在次选域（如 cn）时，只要粘性域还在候选列表里，
+// 选号逻辑就会一直选中它——「deepseek 优先国际版」被历史粘性绑定永久旁路。此方法让
+// handler 在首选域仍有可用号时放弃粘性、改由 realm 选号重绑到首选域。
+// 调用方必须先做 realmIn(realms, stickyRealm) 校验（stickyRealm 不在 realms 时本方法
+// 按「粘性域不可用」处理，任一 realms 有号即返回 true）。
+func (p *Pool) PreferRealmAvailable(stickyRealm, reqModel string, realms []string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	now := time.Now()
+	for _, realm := range realms {
+		if realm == stickyRealm {
+			return false // 已到粘性域：其之前的域都无可用号
+		}
+		if p.realmHasCapacityLocked(realm, reqModel, now) {
+			return true
+		}
+	}
+	return false
+}
+
+// realmHasCapacityLocked 报告 realm 是否有可服务 reqModel 的账号：healthyForModel
+// （模型级冷却豁免生效）+ 未触积分保底 + 在途未满。调用方必须已持 p.mu。
+func (p *Pool) realmHasCapacityLocked(realm, reqModel string, now time.Time) bool {
+	for _, e := range p.byUID {
+		if e.a.Realm() != realm {
+			continue
+		}
+		e.pruneExpiredModelCooldowns(now)
+		e.pruneExpiredModelCosts(now)
+		healthy := e.healthy(now)
+		if reqModel != "" {
+			healthy = e.healthyForModel(now, reqModel)
+		}
+		if !healthy {
+			continue
+		}
+		if p.floorBlockedForRealmModel(e, reqModel, realm, now) {
+			continue
+		}
+		if p.inFlightFull(e) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
 // pick 在 healthy 候选集中按权重加权随机选出账号，并记录 lastUsed（防并发撞号）。
 // reqModel 非空时把健康口径换成 healthyForModel（6004 模型豁免生效）。
 // realm 非空时候选过滤叠加 Realm()==realm 谓词（分池选号域）。

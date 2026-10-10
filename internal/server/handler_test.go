@@ -578,6 +578,100 @@ func TestChatStickyFullFallsBackToRotation(t *testing.T) {
 	p.Release("bad")
 }
 
+// TestChatStickyRealmPreferenceOverridesBinding 域优先级 > 会话粘性：会话粘在 cn 号上，
+// 但裸名模型配置了 global 优先（RealmRouter order=[global,cn]）且 global 有可用号时，
+// 请求应放弃 cn 粘性、改由 global 号服务并把绑定收敛到 global——否则「deepseek 优先
+// 国际版」会被历史粘性绑定永久旁路（粘性号所在域只要还在候选列表里就会被一直选中）。
+func TestChatStickyRealmPreferenceOverridesBinding(t *testing.T) {
+	auth.SetGlobalEnabled(true)
+	t.Cleanup(func() { auth.SetGlobalEnabled(true) })
+
+	st := newBindStore()
+	sess := session.New(session.Config{
+		TTL:       time.Minute,
+		Store:     st,
+		Available: func() []string { return []string{"cn-acct", "g-acct"} },
+	})
+	p := testPoolWith(
+		&auth.Auth{UID: "cn-acct", Domain: "www.codebuddy.cn", AccessToken: "at-cn", ExpiresAt: 9999999999},
+		&auth.Auth{UID: "g-acct", Domain: "www.workbuddy.ai", AccessToken: "at-g", ExpiresAt: 9999999999},
+	)
+	var served []string
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		served = append(served, authz)
+		return 200, sseOK, true
+	})
+	rr := NewRealmRouter([]string{"global", "cn"}, map[string]string{"deepseek-*": "global"})
+	h := NewHandler(Config{
+		Pool:         p,
+		Upstream:     up,
+		Session:      sess,
+		RealmRouter:  rr,
+		SoftCooldown: time.Minute,
+	})
+	// 预绑定到 cn（模拟历史粘性：早于 global 优先配置生效的会话）。
+	sess.Bind("conv-1", "cn-acct")
+	req := httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"deepseek-v4.1-flash","messages":[],"metadata":{"conversation_id":"conv-1"}}`))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
+	}
+	if len(served) != 1 || served[0] != "Bearer at-g" {
+		t.Fatalf("served=%v want [Bearer at-g]（域优先级应覆盖 cn 粘性）", served)
+	}
+	if uid, ok := st.lastUID("conv-1"); !ok || uid != "g-acct" {
+		t.Fatalf("binding should move to g-acct, got %s ok=%v (binds=%v)", uid, ok, st.binds)
+	}
+}
+
+// TestChatStickyRealmKeptWhenPreferredCooling 首选域无可用号时，次选域的粘性号应保留
+// （域优先级不该把会话从唯一可用域上踢走）：global 全冷却 → cn 粘性号直接服务。
+func TestChatStickyRealmKeptWhenPreferredCooling(t *testing.T) {
+	auth.SetGlobalEnabled(true)
+	t.Cleanup(func() { auth.SetGlobalEnabled(true) })
+
+	st := newBindStore()
+	sess := session.New(session.Config{
+		TTL:       time.Minute,
+		Store:     st,
+		Available: func() []string { return []string{"cn-acct", "g-acct"} },
+	})
+	p := testPoolWith(
+		&auth.Auth{UID: "cn-acct", Domain: "www.codebuddy.cn", AccessToken: "at-cn", ExpiresAt: 9999999999},
+		&auth.Auth{UID: "g-acct", Domain: "www.workbuddy.ai", AccessToken: "at-g", ExpiresAt: 9999999999},
+	)
+	p.Cooldown("g-acct", pool.CoolSoft, time.Hour, "429")
+	var served []string
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		served = append(served, authz)
+		return 200, sseOK, true
+	})
+	rr := NewRealmRouter([]string{"global", "cn"}, map[string]string{"deepseek-*": "global"})
+	h := NewHandler(Config{
+		Pool:         p,
+		Upstream:     up,
+		Session:      sess,
+		RealmRouter:  rr,
+		SoftCooldown: time.Minute,
+	})
+	sess.Bind("conv-1", "cn-acct")
+	req := httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"deepseek-v4.1-flash","messages":[],"metadata":{"conversation_id":"conv-1"}}`))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
+	}
+	if len(served) != 1 || served[0] != "Bearer at-cn" {
+		t.Fatalf("served=%v want [Bearer at-cn]（首选域冷却 → 保留 cn 粘性）", served)
+	}
+	if uid, ok := st.lastUID("conv-1"); !ok || uid != "cn-acct" {
+		t.Fatalf("binding should stay cn-acct, got %s ok=%v", uid, ok)
+	}
+}
+
 func TestChatHardCreditCooldownUntilNextDay4AM(t *testing.T) {
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
 		if authz == "Bearer at-bad" {

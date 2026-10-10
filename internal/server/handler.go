@@ -821,9 +821,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		var acct *auth.Auth
 		if stickyUID != "" {
 			acct = h.cfg.Pool.PickByUIDForModel(stickyUID, bareModel)
-			if acct == nil || !realmIn(realms, acct.Realm()) {
-				// 粘性号在当前模型不可用（冷却/占满/该模型被 6004 限额）或不在候选域 → 解绑，
-				// 本次回落普通轮换。
+			// 解绑条件（任一成立）：粘性号在当前模型不可用（冷却/占满/该模型被 6004 限额）、
+			// 不在候选域，或**所在域已让位于更高优先域**——域优先级高于会话粘性：裸名设置了
+			// 优先域（如 deepseek→global）时，历史粘在次选域（cn）的会话不应永久旁路该偏好，
+			// 只要首选域仍有可用号就放弃粘性、回落普通轮换（成功时按既有路径重绑到新号）。
+			if acct == nil || !realmIn(realms, acct.Realm()) ||
+				h.cfg.Pool.PreferRealmAvailable(acct.Realm(), bareModel, realms) {
 				unbindSticky()
 				acct = nil
 			}

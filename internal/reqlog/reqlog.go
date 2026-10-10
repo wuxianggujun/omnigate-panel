@@ -90,7 +90,7 @@ type Event struct {
 	// ReasoningTokens 上游返回的思考 token 数
 	// （completion_tokens_details.reasoning_tokens）；上游未回该维度时零值省略。
 	// 与 ReasoningEffort 互补：档位是「按什么程度跑」，这里是「实际想了多少」。
-	ReasoningTokens int64 `json:"reasoning_tokens,omitempty"`
+	ReasoningTokens int64  `json:"reasoning_tokens,omitempty"`
 	ClientIP        string `json:"client_ip,omitempty"`
 	UserAgent       string `json:"user_agent,omitempty"`
 	// Provider 实际服务的上游供应商名（OmniGate 的 raccoon/runable/deepseek…；

@@ -29,6 +29,14 @@
       "base_url": "https://api.deepseek.com/v1",
       "api_key": "sk-xxxxxxxxxxxxxxxx",
       "models": ["deepseek-chat", "deepseek-reasoner"]
+    },
+    {
+      "name": "trae",
+      "type": "trae",
+      "agent_host": "https://trae-api-cn.mchost.guru",
+      "ug_host": "https://api.trae.cn",
+      "oauth_host": "https://api.trae.com.cn",
+      "accounts": []
     }
   ],
   "checkin": {
@@ -45,6 +53,12 @@
         "name": "raccoon-checkin",
         "type": "raccoon",
         "provider": "raccoon",
+        "interval_minutes": 720
+      },
+      {
+        "name": "trae-checkin",
+        "type": "trae",
+        "provider": "trae",
         "interval_minutes": 720
       }
     ]

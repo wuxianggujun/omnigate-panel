@@ -20,6 +20,7 @@ import (
 	"github.com/wuxianggujun/omnigate-panel/internal/httpauth"
 	"github.com/wuxianggujun/omnigate-panel/internal/livecfg"
 	"github.com/wuxianggujun/omnigate-panel/internal/logfmt"
+	"github.com/wuxianggujun/omnigate-panel/internal/outbound"
 	"github.com/wuxianggujun/omnigate-panel/internal/pool"
 	"github.com/wuxianggujun/omnigate-panel/internal/prompt"
 	"github.com/wuxianggujun/omnigate-panel/internal/reqlog"
@@ -996,10 +997,19 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 连败兜底（issue #114）：喂连败计数——连不上上游是「不知道原因的失败」，
 			// 连败 N 次临时出池，单次/偶发不罚（NoteFailures 内部达阈才动作）。
 			// 上游 client 已打 transport error 日志。
+			//
+			// 例外：出站代理层失败（代理挂了 / 严格池空）不是账号的问题——代理不可达时
+			// 每个账号都会以同样方式失败，喂连败会把整个池的账号一起降权（代理故障被
+			// 误记成账号故障）。这类失败只换号、不计入账号健康。
 			recordAttempt(acct.UID, pool.TokenUsageDelta{}, 0, false, attemptStarted, 0)
 			st.status = http.StatusServiceUnavailable
 			lastErr = terr
-			h.cfg.Pool.NoteFailures(acct.UID)
+			if outbound.IsProxyError(terr) {
+				log.Printf("WARN: [server] outbound proxy error acct=%s: %v (account not penalized)",
+					logfmt.Label(acct.UID, acct.Nickname), terr)
+			} else {
+				h.cfg.Pool.NoteFailures(acct.UID)
+			}
 			fail(acct.UID)
 			if !rotateBackoff(i, r.Context()) {
 				break // ctx 取消：终止轮转（传输层错误换号退避）
@@ -1291,9 +1301,19 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		code = "upstream_timeout"
 		msg = "upstream timed out: rotation stopped (another account would hit the same slow upstream), please retry later"
 	}
+	// 出站代理层失败（代理不可达 / 严格模式池空）：不是「没有可用账号」。给一条能区分
+	// 的 code/文案（不暴露代理地址——出口代理是网关内部信息），排查方向是「出口代理」
+	// 而不是「账号池」。放在超时判定之后：代理 CONNECT 超时仍按上游超时止损。
+	if outbound.IsProxyError(lastErr) {
+		code = "proxy_unavailable"
+		msg = "outbound proxy is unavailable (requests are not falling back to direct), please retry later"
+	}
 	// gateway_hint（末端透传）：上游错误按 Kind + 原文 + 请求形态判定；本地调度类
 	// 错误（无上游原文）固定 no_healthy_account hint。
 	hint := upstream.NoHealthyAccountHint()
+	if outbound.IsProxyError(lastErr) {
+		hint = "outbound proxy failure: the configured egress proxy is unreachable; requests are not falling back to direct"
+	}
 	// upstreamMsgPassed 记录 error.message 是否已被上游原文占据：模型级阻塞分支
 	// 据此决定要不要覆盖 msg（上游原文优先，含 requestId）。
 	upstreamMsgPassed := false

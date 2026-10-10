@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -30,6 +31,31 @@ const poolProbeConcurrency = 24
 
 // poolTransportCacheMax 每个池最多缓存的「单代理 Transport」数量，超出即重建。
 const poolTransportCacheMax = 128
+
+// ErrProxy 标识「出站代理层失败」：代理不可达 / 握手失败 / 严格模式下池空不回退直连。
+// 与上游响应、账号状态无关——面板上游的账号调度据此判定「不是账号的错」，不把这类
+// 失败计入账号健康（连败降权 / 熔断）。
+var ErrProxy = errors.New("outbound: proxy layer failure")
+
+// IsProxyError 判定错误是否出在出站代理层（而非上游或账号）。两类来源：
+//  1. 代理池路径：failoverTransport / Pool.Next 已用 ErrProxy 包装（含严格模式池空）；
+//  2. 单代理路径（http.Transport.Proxy）：Go 对 HTTP 代理连接失败包成 Op="proxyconnect"
+//     的 *net.OpError，SOCKS5 握手失败为 "socks connect"（可能被 url.Error 再包装，
+//     故 errors.As 之后附一段文本兜底）。
+func IsProxyError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, ErrProxy) {
+		return true
+	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) && (opErr.Op == "proxyconnect" || strings.HasPrefix(opErr.Op, "socks")) {
+		return true
+	}
+	s := err.Error()
+	return strings.Contains(s, "proxyconnect") || strings.Contains(s, "socks connect")
+}
 
 // Selector 为一次出站请求挑代理：Next 返回本次尝试要用的代理（nil=直连；严格模式
 // 下池空时返回错误），Report 汇报本次尝试结果（失败即把该代理踢出可用集），
@@ -261,7 +287,7 @@ func (p *Pool) Next() (*url.URL, error) {
 			if msg == "" {
 				msg = "无可用代理"
 			}
-			return nil, fmt.Errorf("outbound: 代理池「%s」%s（严格模式不回退直连）", p.name, msg)
+			return nil, fmt.Errorf("%w: 代理池「%s」%s（严格模式不回退直连）", ErrProxy, p.name, msg)
 		}
 		return nil, nil
 	}
@@ -461,9 +487,12 @@ func (t *failoverTransport) RoundTrip(req *http.Request) (*http.Response, error)
 		lastErr = err
 	}
 	if lastErr == nil {
-		lastErr = errors.New("outbound: 代理池无可用代理")
+		lastErr = errors.New("代理池无可用代理")
 	}
-	return nil, lastErr
+	// 这一跳走的是代理池：传输层失败一律归为「代理层失败」（代理挂了 / 池空与账号
+	// 健康无关）。用双 %w 同时保留 ErrProxy 与原始错误链，调用方既能 errors.Is 判代理
+	// 层，又能 errors.As 取 *net.OpError / net.Error（超时判定不受影响）。
+	return nil, fmt.Errorf("%w: %w", ErrProxy, lastErr)
 }
 
 // Runtime 是 Config 的运行时视图：持有代理池（后台刷新 + 探活），并按目标解析出站方案。

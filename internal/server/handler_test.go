@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,6 +17,7 @@ import (
 	"time"
 
 	"github.com/wuxianggujun/omnigate-panel/internal/auth"
+	"github.com/wuxianggujun/omnigate-panel/internal/outbound"
 	"github.com/wuxianggujun/omnigate-panel/internal/pool"
 	"github.com/wuxianggujun/omnigate-panel/internal/prompt"
 	"github.com/wuxianggujun/omnigate-panel/internal/redisstore"
@@ -895,6 +898,58 @@ func TestChatTransportErrorDoesNotPenalize(t *testing.T) {
 	st, _ := p.Status("u1")
 	if st.Cooling || st.ErrTotal != 0 {
 		t.Fatalf("transport error should not penalize account: %+v", st)
+	}
+}
+
+// TestChatProxyErrorDoesNotPenalize 验证出站代理层失败不连累账号健康：连败阈值设为 1
+// （若被喂入必然降权），代理不可达也不得触发降权——否则代理挂一次就把整池账号降权
+// （代理故障被误记成账号故障）。响应须明确指向「代理不可用」而非「没有可用账号」。
+func TestChatProxyErrorDoesNotPenalize(t *testing.T) {
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	p.SetDegrade(1, time.Hour, time.Hour)
+	up := &upstream.Client{
+		HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			return nil, &net.OpError{Op: "proxyconnect", Net: "tcp", Err: errors.New("connection refused")}
+		})},
+		ChatBaseCN:    "https://fake.example",
+		BillingBaseCN: "https://fake.example",
+	}
+	h := NewHandler(Config{Pool: p, Upstream: up})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
+	if rec.Code != 503 {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
+	}
+	st, _ := p.Status("u1")
+	if !st.DegradeUntil.IsZero() {
+		t.Fatalf("proxy error should not degrade account: %+v", st)
+	}
+	if !strings.Contains(rec.Body.String(), "proxy_unavailable") {
+		t.Errorf("body 应带 proxy_unavailable code: %s", rec.Body)
+	}
+}
+
+// TestChatProxyPoolErrorDoesNotPenalize 同上，但错误来自代理池路径（outbound.ErrProxy
+// 包装、不含 proxyconnect 文本），验证判定不依赖错误文本。
+func TestChatProxyPoolErrorDoesNotPenalize(t *testing.T) {
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	p.SetDegrade(1, time.Hour, time.Hour)
+	up := &upstream.Client{
+		HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			return nil, fmt.Errorf("%w: %w", outbound.ErrProxy, errors.New("pool empty"))
+		})},
+		ChatBaseCN:    "https://fake.example",
+		BillingBaseCN: "https://fake.example",
+	}
+	h := NewHandler(Config{Pool: p, Upstream: up})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
+	if rec.Code != 503 {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
+	}
+	st, _ := p.Status("u1")
+	if !st.DegradeUntil.IsZero() {
+		t.Fatalf("proxy pool error should not degrade account: %+v", st)
 	}
 }
 

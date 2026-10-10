@@ -3,7 +3,9 @@ package outbound
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -317,5 +319,62 @@ func TestFailoverCancelKeepsPool(t *testing.T) {
 	}
 	if st := p.Status(); st.Live != 1 {
 		t.Fatalf("请求超时不应剔除代理，live=%d last_error=%q", st.Live, st.LastError)
+	}
+}
+
+// TestIsProxyError 覆盖代理层失败的识别：哨兵、HTTP 代理握手、SOCKS、以及反例。
+func TestIsProxyError(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"sentinel", ErrProxy, true},
+		{"wrapped sentinel", fmt.Errorf("%w: %w", ErrProxy, errors.New("boom")), true},
+		{"proxyconnect", &net.OpError{Op: "proxyconnect", Net: "tcp", Err: errors.New("connection refused")}, true},
+		{"url.Error wraps proxyconnect", &url.Error{Op: "Post", URL: "https://x", Err: &net.OpError{Op: "proxyconnect", Net: "tcp", Err: errors.New("refused")}}, true},
+		{"socks connect text", errors.New("socks connect tcp: connection refused"), true},
+		{"plain dial", &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("refused")}, false},
+		{"connection refused", errors.New("connection refused"), false},
+	}
+	for _, c := range cases {
+		if got := IsProxyError(c.err); got != c.want {
+			t.Errorf("%s: IsProxyError=%v want %v (err=%v)", c.name, got, c.want, c.err)
+		}
+	}
+}
+
+// TestStrictEmptyPoolErrorIsProxyError 严格模式空池的自有错误必须判定为代理层失败，
+// 这样面板上游才不会把「代理池空」记成账号故障。
+func TestStrictEmptyPoolErrorIsProxyError(t *testing.T) {
+	p := newPool(Proxy{Name: "p", PoolScheme: "http", Strict: true}, nil)
+	_, err := p.Next()
+	if err == nil {
+		t.Fatal("严格模式空池应返回错误")
+	}
+	if !IsProxyError(err) {
+		t.Fatalf("严格模式池空应判定为代理层失败，得 %v", err)
+	}
+}
+
+// TestFailoverErrorIsProxyError failoverTransport 的失败必须用 ErrProxy 包装（不依赖
+// 错误文本），供上层区分「代理问题」与「账号问题」。
+func TestFailoverErrorIsProxyError(t *testing.T) {
+	p := newPool(Proxy{Name: "p", PoolScheme: "http"}, nil)
+	p.live = []*url.URL{mustURL(t, "http://127.0.0.1:1")}
+	client := &http.Client{Transport: WrapTransport(&http.Transport{}, p)}
+	resp, err := client.Get("https://example.com/")
+	if resp != nil {
+		resp.Body.Close()
+	}
+	if err == nil {
+		t.Fatal("死代理应失败")
+	}
+	if !errors.Is(err, ErrProxy) {
+		t.Fatalf("failoverTransport 应包装 ErrProxy，得 %v", err)
+	}
+	if !IsProxyError(err) {
+		t.Fatalf("死代理失败应判定为代理层失败，得 %v", err)
 	}
 }

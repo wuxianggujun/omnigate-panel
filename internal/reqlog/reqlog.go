@@ -67,6 +67,7 @@ type Event struct {
 	Path             string    `json:"path"`
 	Account          string    `json:"account,omitempty"`
 	Model            string    `json:"model,omitempty"`
+	Realm            string    `json:"realm,omitempty"` // 实际调度域 cn/global：由**实际服务账号**决定，非请求里的 "[realm:]" 前缀
 	Status           int       `json:"status"`
 	OK               bool      `json:"ok"`
 	Outcome          string    `json:"outcome"`

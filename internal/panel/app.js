@@ -1169,7 +1169,8 @@ function reqMatch(e, f) {
   f = f || reqFilter;
   if (f.outcome && String(e && e.outcome || '') !== f.outcome) return false;
   if (f.q) {
-    const text = [e && e.client_ip, e && e.user_agent, e && e.model, e && e.account, e && e.request_id]
+    const realm = e && (e.realm === 'global' ? 'global 国际版' : e.realm === 'cn' ? 'cn 国内版' : '');
+    const text = [e && e.client_ip, e && e.user_agent, e && e.model, realm, e && e.account, e && e.request_id]
       .filter(Boolean).join(' ').toLowerCase();
     for (const kw of f.q.toLowerCase().split(/\s+/).filter(Boolean)) {
       if (!text.includes(kw)) return false;
@@ -1199,6 +1200,15 @@ function reqCreditCell(e) {
   return Number.isFinite(v) ? trimFixed(v.toFixed(2)) : '<span class="muted">—</span>';
 }
 
+/* reqRealmCell 实际调度域：裸名请求经 realm_routing 选号后，这里显示**服务账号**的域
+   （国内版/国际版），回答「这次到底走了国内版还是国际版、扣哪套上游的积分」。
+   旧归档条目（该字段上线前写入）没有 realm → 显示 —，而不是误判成国内版。 */
+function reqRealmCell(e) {
+  const r = e && e.realm;
+  if (r !== 'cn' && r !== 'global') return '<span class="muted">—</span>';
+  return '<span class="realm-tag">' + realmLabel(r) + '</span>';
+}
+
 /* renderRequestTable 渲染请求记录表。来源列是这一版的重点：IP 用等宽字体方便扫，
    UA 单行截断（完整值在 title 里，行本身用 requestLogText 作 tooltip）。 */
 function renderRequestTable() {
@@ -1214,6 +1224,7 @@ function renderRequestTable() {
       '<td class="num">' + esc(when) + '</td>' +
       '<td>' + reqOutcomeTag(e) + '</td>' +
       '<td>' + esc(e && e.model || '—') + '</td>' +
+      '<td>' + reqRealmCell(e) + '</td>' +
       '<td>' + esc(e && e.account || '—') + '</td>' +
       '<td>' + (ip ? '<span class="clip ip" title="' + esc(ip) + '">' + esc(ip) + '</span>' : '<span class="muted">—</span>') + '</td>' +
       '<td>' + (ua ? '<span class="clip" title="' + esc(ua) + '">' + esc(ua) + '</span>' : '<span class="muted">—</span>') + '</td>' +
@@ -1222,7 +1233,7 @@ function renderRequestTable() {
       '<td class="num">' + reqCreditCell(e) + '</td>' +
       '<td>' + (rid ? '<span class="clip rid" title="' + esc(rid) + '">' + esc(rid) + '</span>' : '<span class="muted">—</span>') + '</td>' +
       '</tr>';
-  }).join('') || '<tr><td colspan="10" class="empty">' +
+  }).join('') || '<tr><td colspan="11" class="empty">' +
       (reqEntries.length ? '没有符合当前筛选条件的请求记录' : '暂无请求记录') + '</td></tr>';
 
   const filtered = list.length !== reqEntries.length;
@@ -1267,6 +1278,7 @@ function requestLogText(e) {
     when,
     String(e && e.status || '—') + ' ' + (outcomeLabel[e && e.outcome] || (e && e.outcome) || '—'),
     e && e.model || '—',
+    e && e.realm ? (e.realm === 'global' ? '国际版' : '国内版') : '',
     e && e.account || '—',
     e && e.client_ip || '—',
     e && e.user_agent || '—',

@@ -297,10 +297,10 @@ func TestUIDPrefix(t *testing.T) {
 func TestLogChatRowFormat(t *testing.T) {
 	withChatLog(t)
 	out := captureStdout(t, func() {
-		logChatRow(412*time.Millisecond, 27100*time.Millisecond, "deepseek-v4-flash", "stream", "00e26541abcdef", "示例号", http.StatusOK, 1234)
+		logChatRow(412*time.Millisecond, 27100*time.Millisecond, "deepseek-v4-flash", "cn", "stream", "00e26541abcdef", "示例号", http.StatusOK, 1234)
 	})
 	for _, want := range []string{
-		"| #", "deepseek-v4", "| stream |", "| 200 |", "示例号(00e26541)", "TTFB=412ms", "tok=1234", "tok/s   |", "total=",
+		"| #", "deepseek-v4", "| cn ", "| stream |", "| 200 |", "示例号(00e26541)", "TTFB=412ms", "tok=1234", "tok/s   |", "total=",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("row missing %q:\n%s", want, out)
@@ -314,7 +314,7 @@ func TestLogChatRowFormat(t *testing.T) {
 func TestLogChatRowNoUsageShowsDash(t *testing.T) {
 	withChatLog(t)
 	out := captureStdout(t, func() {
-		logChatRow(0, time.Second, "glm-5.2", "sync", "s1", "", http.StatusServiceUnavailable, -1)
+		logChatRow(0, time.Second, "glm-5.2", "", "sync", "s1", "", http.StatusServiceUnavailable, -1)
 	})
 	for _, want := range []string{"TTFB=-", "tok=-", "tok=-      |", "| 503 |"} {
 		if !strings.Contains(out, want) {
@@ -326,10 +326,10 @@ func TestLogChatRowNoUsageShowsDash(t *testing.T) {
 func TestLogChatRowExtendedFields(t *testing.T) {
 	withChatLog(t)
 	out := captureStdout(t, func() {
-		logChatRowEx(10*time.Millisecond, 2*time.Second, "glm-5.3", "stream", "u123456789", "示例号",
+		logChatRowEx(10*time.Millisecond, 2*time.Second, "glm-5.3", "global", "stream", "u123456789", "示例号",
 			http.StatusOK, 42, "req-abc123", reqlog.OutcomeSuccess, 2, 1.25, true, "", "")
 	})
-	for _, want := range []string{"rid=req-abc123", "out=success", "try=2", "credit=1.2500"} {
+	for _, want := range []string{"| global", "rid=req-abc123", "out=success", "try=2", "credit=1.2500"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("extended row missing %q:\n%s", want, out)
 		}
@@ -344,7 +344,7 @@ func TestLogChatRowExtendedFields(t *testing.T) {
 func TestLogChatRowSourceFields(t *testing.T) {
 	withChatLog(t)
 	out := captureStdout(t, func() {
-		logChatRowEx(10*time.Millisecond, 2*time.Second, "glm-5.3", "stream", "u123456789", "示例号",
+		logChatRowEx(10*time.Millisecond, 2*time.Second, "glm-5.3", "cn", "stream", "u123456789", "示例号",
 			http.StatusOK, 42, "req-abc123", reqlog.OutcomeSuccess, 1, 0, false,
 			"203.0.113.7", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 	})
@@ -363,7 +363,7 @@ func TestLogChatRowSourceFields(t *testing.T) {
 func TestLogChatRowSourcePartial(t *testing.T) {
 	withChatLog(t)
 	out := captureStdout(t, func() {
-		logChatRow(0, time.Second, "m", "sync", "u", "", 200, 1)
+		logChatRow(0, time.Second, "m", "", "sync", "u", "", 200, 1)
 	})
 	if strings.Contains(out, "src=") {
 		t.Errorf("logChatRow has no source, want no src field:\n%s", out)
@@ -373,8 +373,8 @@ func TestLogChatRowSourcePartial(t *testing.T) {
 func TestLogChatRowSeqIncrements(t *testing.T) {
 	withChatLog(t)
 	out := captureStdout(t, func() {
-		logChatRow(0, time.Second, "m", "sync", "u", "", 200, 1)
-		logChatRow(0, time.Second, "m", "sync", "u", "", 200, 1)
+		logChatRow(0, time.Second, "m", "", "sync", "u", "", 200, 1)
+		logChatRow(0, time.Second, "m", "", "sync", "u", "", 200, 1)
 	})
 	lines := strings.Split(strings.TrimSpace(out), "\n")
 	if len(lines) != 2 {
@@ -387,6 +387,23 @@ func TestLogChatRowSeqIncrements(t *testing.T) {
 	}
 	if first == second {
 		t.Errorf("seq not incremented: %q == %q", first, second)
+	}
+}
+
+// 归档事件必须带上实际调度域：面板「请求记录」的「域」列只认 Event.Realm，stdout 行
+// 与 JSONL 归档共用同一份 chatStat，两处不得漂移。
+func TestRequestTraceEventCarriesRealm(t *testing.T) {
+	tr := &requestTrace{
+		id:    "req-test",
+		start: time.Now(),
+		stat:  &chatStat{model: "deepseek-v4.1-flash", realm: "global", uid: "u1", nick: "号", toks: 3},
+	}
+	e := tr.event(200)
+	if e.Realm != "global" {
+		t.Errorf("event realm = %q want global", e.Realm)
+	}
+	if e.Model != "deepseek-v4.1-flash" {
+		t.Errorf("event model = %q want deepseek-v4.1-flash", e.Model)
 	}
 }
 
@@ -407,7 +424,7 @@ func TestChatLogsStreamRow(t *testing.T) {
 			t.Fatalf("code=%d", rec.Code)
 		}
 	})
-	for _, want := range []string{"| stream |", "| 200 |", "| u1 ", "TTFB=", "tok=1"} {
+	for _, want := range []string{"| cn ", "| stream |", "| 200 |", "| u1 ", "TTFB=", "tok=1"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("stream row missing %q:\n%s", want, out)
 		}

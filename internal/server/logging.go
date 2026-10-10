@@ -48,6 +48,7 @@ type chatStat struct {
 	mode             string // "stream" | "sync"
 	uid              string // 完整 uid，展示时只取前 8 位
 	nick             string // 账号昵称（随选号同步），流水行经 logfmt.Label 拼成 "昵称(uid8)"
+	realm            string // 实际调度域（cn/global）：选号时随账号同步，回答「这次走了国内版还是国际版」
 	ttfb             time.Duration
 	toks             int // <0 表示 usage 缺失 → 显示 "-"
 	status           int
@@ -88,7 +89,7 @@ func (s *chatStat) done() {
 		return
 	}
 	s.logged = true
-	logChatRowEx(s.ttfb, time.Since(s.start), s.model, s.mode, s.uid, s.nick, s.status, s.toks,
+	logChatRowEx(s.ttfb, time.Since(s.start), s.model, s.realm, s.mode, s.uid, s.nick, s.status, s.toks,
 		s.requestID, s.outcome, s.attempts, s.credit, s.hasCredit, s.clientIP, s.userAgent)
 }
 
@@ -412,6 +413,7 @@ func (t *requestTrace) event(status int) reqlog.Event {
 		s := t.stat
 		e.Account = logfmt.Label(s.uid, s.nick)
 		e.Model = s.model
+		e.Realm = s.realm
 		e.Outcome = s.outcome
 		e.TTFBMs = s.ttfb.Milliseconds()
 		e.Attempts = s.attempts
@@ -474,25 +476,28 @@ const (
 	chatModelWidth = 26
 	// chatAcctWidth 容纳 "昵称(uid8)"：中文昵称按 2 列/字算，5 字中文 + "(xxxxxxxx)" = 20 列。
 	chatAcctWidth = 22
-	chatTTFBWidth = 8
-	chatTokWidth  = 6
-	chatRateWidth = 11 // 形如 "183.6tok/s"
+	// chatRealmWidth 容纳最长域字面量 "global" (6)；未选中账号（全失败）时显示 "-"。
+	chatRealmWidth = 6
+	chatTTFBWidth  = 8
+	chatTokWidth   = 6
+	chatRateWidth  = 11 // 形如 "183.6tok/s"
 )
 
 // logChatRow 打印一行请求级表格日志（输出 chatLogOut，无 log 时间戳前缀）。
 //
 // 参数：
 //   - model：模型名（含 realm 前缀），超 chatModelWidth 截断（模型名是 ASCII，字节截即列宽）；
+//   - realm：实际调度域（cn/global），空串显示 "-"（未选中任何账号）；
 //   - uid/nick：完整 uid 与账号昵称，经 logfmt.Label 拼成 "昵称(uid8)" 展示——只有
 //     uid8 时人眼无法判断是哪个号，要辨认必须再查 auths/，排障多一跳；
 //   - toks<0 表示 usage 缺失，显示 "-"。
-func logChatRow(ttfb, total time.Duration, model, mode, uid, nick string, status int, toks int) {
-	logChatRowEx(ttfb, total, model, mode, uid, nick, status, toks, "", "", 0, 0, false, "", "")
+func logChatRow(ttfb, total time.Duration, model, realm, mode, uid, nick string, status int, toks int) {
+	logChatRowEx(ttfb, total, model, realm, mode, uid, nick, status, toks, "", "", 0, 0, false, "", "")
 }
 
 // logChatRowEx 是带请求 ID、结果、重试、积分与调用来源字段的扩展流水行。旧调用保持
 // 原格式；requestID 非空时才追加扩展字段；来源两参均为空时不追加来源段。
-func logChatRowEx(ttfb, total time.Duration, model, mode, uid, nick string, status int, toks int,
+func logChatRowEx(ttfb, total time.Duration, model, realm, mode, uid, nick string, status int, toks int,
 	requestID, outcome string, attempts int, credit float64, hasCredit bool,
 	clientIP, userAgent string) {
 	if !chatLogEnabled {
@@ -500,6 +505,9 @@ func logChatRowEx(ttfb, total time.Duration, model, mode, uid, nick string, stat
 	}
 	seq := chatSeq.Add(1)
 	model = logfmt.Pad(logfmt.Truncate(model, chatModelWidth), chatModelWidth)
+	// 实际调度域独立成列（紧挨模型名）：裸名请求经 realm_routing 选号后，这一列才是
+	// 「这次到底走了国内版还是国际版」的答案；空 = 全失败没选中账号。
+	realmField := logfmt.Pad(dashIfEmpty(realm), chatRealmWidth)
 	// 账号标签只补不截：超宽时宁可让该行变宽，也不丢昵称信息（昵称是排查的主线索）。
 	acct := logfmt.Pad(logfmt.Label(uid, nick), chatAcctWidth)
 	tokField := "-"
@@ -544,10 +552,11 @@ func logChatRowEx(ttfb, total time.Duration, model, mode, uid, nick string, stat
 		}
 		src = fmt.Sprintf(" src=%s ua=%s |", dashIfEmpty(clientIP), ua)
 	}
-	fmt.Fprintf(chatLogOut, "| #%03d | %s | %s | %s | %d | %s | TTFB=%s | tok=%s | %s | total=%.1fs |%s%s\n",
+	fmt.Fprintf(chatLogOut, "| #%03d | %s | %s | %s | %s | %d | %s | TTFB=%s | tok=%s | %s | total=%.1fs |%s%s\n",
 		seq,
 		time.Now().Format("15:04:05"),
 		model,
+		realmField,
 		mode,
 		status,
 		acct,

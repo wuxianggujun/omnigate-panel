@@ -3705,7 +3705,7 @@ function provCard(p, i) {
       '<label>名称（唯一）<input data-i="' + i + '" data-f="name" value="' + esc(p.name || '') + '" placeholder="如 my-openai"></label>' +
       '<label>类型<select data-i="' + i + '" data-f="type">' + typeOpts + '</select></label>' +
       '<label class="og-full">base_url<input data-i="' + i + '" data-f="base_url" value="' + esc(p.base_url || '') + '" placeholder="https://api.example.com/v1"></label>' +
-      '<label class="og-full">api_key<input data-i="' + i + '" data-f="api_key" value="' + esc(p.api_key || '') + '" placeholder="上游密钥（openai 类用）"></label>' +
+      '<label class="og-full">api_key<input data-i="' + i + '" data-f="api_key" value="' + esc(p.api_key || '') + '" placeholder="上游密钥（openai 类用）；已脱敏，不改 = 保持原值"></label>' +
       deviceField + raccoonFields +
       '<label class="og-full">models（逗号或换行分隔，留空 = 自动发现）<textarea data-i="' + i + '" data-f="models" rows="2">' + esc(omniModelsText(p)) + '</textarea></label>' +
     '</div>' +

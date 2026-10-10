@@ -6,6 +6,7 @@
 package panel
 
 import (
+	"encoding/json"
 	"io"
 	"log"
 	"net/http"
@@ -22,10 +23,17 @@ func (p *Panel) getConfig(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "load config: "+err.Error())
 		return
 	}
+	gen, err := toGeneric(cfg)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "encode config: "+err.Error())
+		return
+	}
+	// 凭证（upstash.token / upstream.device_token 等）只回显脱敏形态；顶层 api_key
+	// 刻意跳过：面板前端要用它调内置 OmniGate 的 /omni/*，见 secret.go 注释。
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":     true,
 		"path":   p.cfg.ConfigPath,
-		"config": cfg,
+		"config": maskSecrets(gen, "api_key"),
 	})
 }
 
@@ -41,7 +49,18 @@ func (p *Panel) saveConfig(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "read body: "+err.Error())
 		return
 	}
-	restartRequired, err := p.cfg.SaveConfig(raw)
+	// 表单可能把脱敏后的凭证原样回传：按「掩码 = 未改动」从落盘配置还原。
+	var incoming any
+	if err := json.Unmarshal(raw, &incoming); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid config json: "+err.Error())
+		return
+	}
+	restored, err := json.Marshal(restoreMaskedSecrets(incoming, p.cfg.LoadConfig))
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "encode config: "+err.Error())
+		return
+	}
+	restartRequired, err := p.cfg.SaveConfig(restored)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return

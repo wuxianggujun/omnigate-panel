@@ -6,6 +6,7 @@
 package panel
 
 import (
+	"encoding/json"
 	"io"
 	"log"
 	"net/http"
@@ -22,9 +23,15 @@ func (p *Panel) getOutbound(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "load outbound config: "+err.Error())
 		return
 	}
+	gen, err := toGeneric(cfg)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "encode outbound config: "+err.Error())
+		return
+	}
+	// 代理 URL 里的 user:pass@ 只回显脱敏形态（保留 scheme/host/port 便于辨认）。
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":       true,
-		"outbound": cfg,
+		"outbound": maskSecrets(gen),
 	})
 }
 
@@ -40,7 +47,19 @@ func (p *Panel) saveOutbound(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "read body: "+err.Error())
 		return
 	}
-	restartRequired, err := p.cfg.SaveOutbound(raw)
+	// 前端整份回传 outbound 段，代理 URL 的 userinfo 可能是掩码：按「掩码 = 未改动」
+	// 用落盘配置还原，避免把代理口令写成掩码串。
+	var incoming any
+	if err := json.Unmarshal(raw, &incoming); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid outbound json: "+err.Error())
+		return
+	}
+	restored, err := json.Marshal(restoreMaskedSecrets(incoming, p.cfg.LoadOutbound))
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "encode outbound config: "+err.Error())
+		return
+	}
+	restartRequired, err := p.cfg.SaveOutbound(restored)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return

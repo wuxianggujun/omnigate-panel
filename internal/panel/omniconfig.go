@@ -6,6 +6,7 @@
 package panel
 
 import (
+	"encoding/json"
 	"io"
 	"log"
 	"net/http"
@@ -22,10 +23,18 @@ func (p *Panel) getOmniConfig(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "load omnigate config: "+err.Error())
 		return
 	}
+	gen, err := toGeneric(cfg)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "encode omnigate config: "+err.Error())
+		return
+	}
+	// 凭证只回显脱敏形态（前缀 + 长度）：providers[].api_key 与 accounts[].cookie /
+	// password / refresh_token 等原始值绝不离开服务端（viewer 也能 GET 本接口）。
+	// 保存时按「掩码 = 未改动」还原，见 saveOmniConfig 与 secret.go。
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":     true,
 		"path":   p.cfg.OmniConfigPath,
-		"config": cfg,
+		"config": maskSecrets(gen),
 	})
 }
 
@@ -41,7 +50,19 @@ func (p *Panel) saveOmniConfig(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "read body: "+err.Error())
 		return
 	}
-	restartRequired, err := p.cfg.SaveOmniConfig(raw)
+	// 前端整份回传配置，凭证字段是掩码：先按「掩码 = 未改动」用落盘配置还原，
+	// 否则保存会把 cookie/password/api_key 写成 "sk-6d06…(len=48)" 这类掩码串。
+	var incoming any
+	if err := json.Unmarshal(raw, &incoming); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid config json: "+err.Error())
+		return
+	}
+	restored, err := json.Marshal(restoreMaskedSecrets(incoming, p.cfg.LoadOmniConfig))
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "encode config: "+err.Error())
+		return
+	}
+	restartRequired, err := p.cfg.SaveOmniConfig(restored)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return

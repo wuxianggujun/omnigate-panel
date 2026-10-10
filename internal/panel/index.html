@@ -54,12 +54,14 @@
       <span class="sep">/</span>
       <span class="meta" id="subMeta">-</span>
       <div class="grow"></div>
+      <span class="whoami" id="whoami" hidden title="当前登录账号"></span>
       <button class="icon ghost" id="btnTheme" title="切换明暗（跟随系统 → 浅色 → 深色）" aria-label="切换主题">
         <svg id="icoTheme" viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M13.2 9.6A5.6 5.6 0 0 1 6.4 2.8a5.6 5.6 0 1 0 6.8 6.8z"/></svg>
       </button>
       <button id="btnRefresh">刷新</button>
-      <button id="btnExportAccounts" title="导出全部账号（WorkBuddy + OmniGate，含凭证，请妥善保管）">导出账号</button>
-      <button class="primary" id="btnAdd">添加账号</button>
+      <button id="btnExportAccounts" data-admin title="导出全部账号（WorkBuddy + OmniGate，含凭证，请妥善保管）">导出账号</button>
+      <button class="primary" id="btnAdd" data-admin>添加账号</button>
+      <button class="ghost" id="btnLogout" hidden>退出登录</button>
     </div>
 
     <!-- 账号池 -->
@@ -537,6 +539,52 @@
           </div>
         </div>
 
+        <div class="box" id="paccBox" data-admin>
+          <header>
+            <h3>面板账号与权限</h3>
+            <span class="grow"></span>
+            <span class="note" id="paccNote">—</span>
+            <button type="button" class="xs" id="btnPaccReload">刷新</button>
+          </header>
+          <div class="pad">
+            <div class="hint">面板登录与网关 <code>api_key</code> 相互独立：这里管理谁能登录面板、各自角色。
+              <b>admin</b> 全权；<b>viewer</b> 只读（可看账号池 / 用量 / 日志，不能改配置、不能运维账号）。
+              密码只写不读（仅存 PBKDF2 哈希）。配置了任意账号后，<code>api_key</code> 将不再能打开面板。</div>
+            <div class="tbl-wrap" style="margin-top:10px">
+              <table class="acc" id="paccTable">
+                <thead><tr><th>账号</th><th>角色</th><th class="c-acts">操作</th></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+            <div class="hr"></div>
+            <div class="grid3">
+              <label class="fld"><span class="lb">账号名</span>
+                <input id="paccUser" placeholder="新增或已有账号名" autocomplete="off"></label>
+              <label class="fld"><span class="lb">角色</span>
+                <select id="paccRole">
+                  <option value="admin">admin（可读写）</option>
+                  <option value="viewer">viewer（只读）</option>
+                </select></label>
+              <label class="fld"><span class="lb">密码</span>
+                <input id="paccPass" type="password" placeholder="≥6 位；留空 = 仅改角色" autocomplete="new-password"></label>
+            </div>
+            <div class="inline" style="margin-top:8px">
+              <button type="button" class="primary" id="btnPaccSave">保存账号</button>
+              <span class="hint">保存已有账号时，密码留空只改角色；填了则同时重置密码。</span>
+            </div>
+            <div class="hr"></div>
+            <div class="grid3">
+              <label class="fld"><span class="lb">我的当前密码</span>
+                <input id="paccCur" type="password" autocomplete="current-password"></label>
+              <label class="fld"><span class="lb">我的新密码</span>
+                <input id="paccNew" type="password" placeholder="≥6 位" autocomplete="new-password"></label>
+              <label class="fld"><span class="lb">&nbsp;</span>
+                <button type="button" id="btnPaccSelf">修改我的密码</button></label>
+            </div>
+            <div class="hint" id="paccMeta"></div>
+          </div>
+        </div>
+
         <div class="savebar">
           <span class="grow"></span>
           <span class="restart-note" id="cfgNote"></span>
@@ -862,20 +910,44 @@
   </div>
 </div>
 
-<!-- 密钥 -->
+<!-- 密钥（未配置面板账号时的过渡门：直接复用网关 api_key） -->
 <div class="veil" id="keyVeil" data-lock="1">
-  <div class="dlg" style="width:420px">
+  <div class="dlg" style="width:440px">
     <header>
       <h3>需要访问密钥</h3>
-      <div class="hint">该网关已启用 api_key 鉴权，请输入 config.json 中的密钥。</div>
+      <div class="hint">尚未配置面板账号（<code>panel_auth.users</code>），当前沿用网关 api_key 进入。
+        建议在服务器执行 <code>omnigate-panel -set-admin-password</code> 启用独立登录；配置后 api_key 不再能打开面板。</div>
     </header>
     <div class="body">
-      <form style="display:contents" onsubmit="return false"><input type="password" id="keyInput" placeholder="api_key" autocomplete="off"></form>
+      <input type="password" id="keyInput" placeholder="api_key" autocomplete="off">
       <div class="state err" id="keyErr" hidden style="margin-top:10px">密钥不正确，请重试。</div>
     </div>
     <footer>
       <span class="grow"></span>
       <button class="primary" id="btnKey">进入</button>
+    </footer>
+  </div>
+</div>
+
+<!-- 登录（配置了面板账号后） -->
+<div class="veil" id="loginVeil" data-lock="1">
+  <div class="dlg" style="width:420px">
+    <header>
+      <h3>登录面板</h3>
+      <div class="hint">面板账号与网关 api_key 相互独立，登录后才能查看或管理。</div>
+    </header>
+    <div class="body">
+      <form id="loginForm">
+        <label class="fld"><span class="lb">账号</span>
+          <input id="loginUser" autocomplete="username" placeholder="账号"></label>
+        <label class="fld" style="margin-top:8px"><span class="lb">密码</span>
+          <input id="loginPass" type="password" autocomplete="current-password" placeholder="密码"></label>
+      </form>
+      <div class="state err" id="loginErr" hidden style="margin-top:10px">账号或密码不正确。</div>
+    </div>
+    <footer>
+      <span class="grow"></span>
+      <button class="primary" id="btnLogin">登录</button>
     </footer>
   </div>
 </div>

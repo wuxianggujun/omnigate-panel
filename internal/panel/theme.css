@@ -627,3 +627,20 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
 .og-hint { font-size: 12px; color: var(--ink-3); margin-top: 6px; }
 .og-hint code, .og-code { font-family: var(--mono); font-size: 12px; background: var(--surface-2); border: 1px solid var(--line-soft); padding: 1px 5px; border-radius: 5px; }
 .og-pre { white-space: pre-wrap; word-break: break-all; background: var(--surface-2); border: 1px solid var(--line-soft); border-radius: 8px; padding: 10px; font-family: var(--mono); font-size: 12px; color: var(--ink-2); margin-top: 8px; }
+
+/* ── 面板鉴权（登录 / 角色）────────────────────────────────────────────
+   viewer 只读：隐藏所有写操作控件（[data-admin]）。这只是 UI 收敛，真正的
+   权限由服务端 /panel/api/* 的 admin 中间件强制（403 admin_required）。 */
+body[data-role="viewer"] [data-admin] { display: none !important; }
+.whoami {
+  font: 500 12px/1 var(--sans);
+  color: var(--ink-2);
+  padding: 4px 9px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-2);
+  white-space: nowrap;
+}
+#loginVeil .fld { margin: 0; }
+#loginVeil input, #keyVeil input { width: 100%; box-sizing: border-box; }
+#paccTable td, #paccTable th { white-space: nowrap; }

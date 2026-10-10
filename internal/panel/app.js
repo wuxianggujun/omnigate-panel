@@ -1,6 +1,9 @@
 'use strict';
 /* ── 状态 ─────────────────────────────────────────────────────────── */
 const LS_KEY = 'wb2api.key', LS_THEME = 'wb2api.theme';
+/* 面板登录态（GET /panel/api/session）：{authenticated, configured, mode, username, role}。
+   mode：session（账号登录）/ legacy（未配置账号时的 api_key 门）/ open（都未启用）。 */
+let authState = { authenticated: false, configured: false, mode: '', username: '', role: '' };
 let theme = localStorage.getItem(LS_THEME) || 'auto';   // auto | light | dark
 let view = 'accounts';
 let overviewData = null, cfgLoaded = null;
@@ -25,6 +28,12 @@ let obState = { proxies: [], routes: {} };
 let obEditIdx = -1;
 
 const $ = id => document.getElementById(id);
+
+/* 当前身份是否具备写权限：session 模式看 role；旧 api_key 门 / 开放模式视为 admin。 */
+function isAdmin() {
+  if (authState.mode === 'legacy' || authState.mode === 'open') return true;
+  return authState.role === 'admin';
+}
 
 /* ── 主题 ─────────────────────────────────────────────────────────── */
 /* 两态翻转（浅/深），首次访问跟随系统偏好；点击总是切换可见外观，符合直觉。 */
@@ -54,8 +63,11 @@ async function api(path, opts = {}) {
   if (k) h['Authorization'] = 'Bearer ' + k;
   if (opts.body) h['Content-Type'] = 'application/json';
   const r = await fetch('/panel/api/' + path, Object.assign({}, opts, { headers: h }));
-  if (r.status === 401) { openKey(); throw new Error('密钥无效或未填写'); }
   const d = await r.json().catch(() => ({}));
+  if (r.status === 401) { showAuthGate(); throw new Error('未登录或会话已过期'); }
+  if (r.status === 403) {
+    throw new Error(d.error === 'admin_required' ? '需要管理员权限（当前为只读账号）' : (d.error || 'HTTP 403'));
+  }
   if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
   return d;
 }
@@ -323,8 +335,15 @@ function formatRate(rate) {
   return n.toFixed(1) + 'tok/s';
 }
 
-/* ── 密钥门 ───────────────────────────────────────────────────────── */
+/* ── 鉴权门（账号登录 / 旧 api_key / 开放）─────────────────────────── */
+function showAuthGate() {
+  if (authState.configured) openLogin(); else openKey();
+}
 function openKey() { $('keyVeil').classList.add('on'); setTimeout(() => $('keyInput').focus(), 60); }
+function openLogin() { $('loginVeil').classList.add('on'); setTimeout(() => $('loginUser').focus(), 60); }
+function closeGates() { $('keyVeil').classList.remove('on'); $('loginVeil').classList.remove('on'); }
+
+/* 旧 api_key 门（仅未配置面板账号时）：沿用网关密钥进入。 */
 $('btnKey').onclick = async () => {
   const v = $('keyInput').value.trim();
   if (!v) return;
@@ -332,11 +351,73 @@ $('btnKey').onclick = async () => {
   try {
     await api('overview');
     $('keyErr').hidden = true;
-    $('keyVeil').classList.remove('on');
-    start();
+    closeGates();
+    await bootstrapAuth();
   } catch (e) { $('keyErr').hidden = false; }
 };
 $('keyInput').addEventListener('keydown', e => { if (e.key === 'Enter') $('btnKey').click(); });
+
+/* 账号登录。 */
+async function doLogin() {
+  const u = $('loginUser').value.trim(), p = $('loginPass').value;
+  if (!u || !p) return;
+  const btn = $('btnLogin');
+  btn.disabled = true;
+  try {
+    await api('session', { method: 'POST', body: JSON.stringify({ username: u, password: p }) });
+    $('loginErr').hidden = true;
+    $('loginPass').value = '';
+    closeGates();
+    await bootstrapAuth();
+  } catch (e) {
+    const msg = String(e.message);
+    $('loginPass').value = '';
+    $('loginErr').textContent = msg.includes('too_many') ? '尝试次数过多，请稍后再试。'
+      : (msg.includes('invalid_credentials') ? '账号或密码不正确。' : '登录失败：' + msg);
+    $('loginErr').hidden = false;
+  } finally { btn.disabled = false; }
+}
+$('loginForm').addEventListener('submit', e => { e.preventDefault(); doLogin(); });
+$('btnLogin').addEventListener('click', doLogin);
+$('loginUser').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); doLogin(); } });
+$('loginPass').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); doLogin(); } });
+
+/* 退出登录：注销会话并回到登录页。 */
+$('btnLogout').onclick = async () => {
+  try { await api('session', { method: 'DELETE' }); } catch (e) { /* 已失效也照常回登录页 */ }
+  location.reload();
+};
+
+/* 应用身份到界面：viewer 隐藏所有 [data-admin] 写操作控件（服务端仍强校验）。 */
+function applyRole() {
+  const mode = authState.mode || '';
+  const role = mode === 'session' ? (authState.role || 'viewer')
+    : (mode === 'legacy' || mode === 'open' ? 'admin' : 'viewer');
+  document.body.dataset.role = role;
+  const w = $('whoami');
+  if (w) {
+    const show = mode === 'session' && authState.username && authState.username !== 'api_key';
+    w.hidden = !show;
+    if (show) w.textContent = authState.username + ' · ' + role;
+  }
+  const lo = $('btnLogout');
+  if (lo) lo.hidden = !(mode === 'session');
+}
+
+/* 启动引导：查会话 → 已登录即进入；否则按模式弹登录 / 密钥门。 */
+async function bootstrapAuth() {
+  let s;
+  try { s = await (await fetch('/panel/api/session')).json(); }
+  catch (e) { s = { authenticated: false, configured: false, mode: '' }; }
+  authState = Object.assign({ authenticated: false, configured: false, mode: '', username: '', role: '' }, s);
+  applyRole();
+  if (authState.authenticated) {
+    closeGates();
+    start();
+  } else {
+    showAuthGate();
+  }
+}
 
 /* ── 路由 ─────────────────────────────────────────────────────────── */
 /* 积分包明细共享缓存：「积分构成」视图与首页「积分到期提醒」卡片共用同一份
@@ -1280,6 +1361,7 @@ async function loadConfig() {
     }
     markDurationFields(); // 回填后重置校验态（清掉残留红框；现值来自后端必然合法）
     $('cfgNote').textContent = '';
+    if (isAdmin() && $('paccBox')) loadPanelAccounts();
   } catch (e) { toast('读取配置失败：' + e.message, 'err'); }
 }
 function collectConfig() {
@@ -1359,6 +1441,77 @@ $('cfgForm').onsubmit = async ev => {
   } catch (e) { toast('保存失败：' + e.message, 'err'); }
   finally { btn.disabled = false; btn.textContent = '保存配置'; }
 };
+
+/* ── 面板账号管理（配置页；仅 admin 可见，服务端另有一道 admin 校验）───── */
+async function loadPanelAccounts() {
+  if (!$('paccBox')) return;
+  try {
+    const d = await api('admin/users');
+    renderPanelAccounts(d.users || []);
+    $('paccNote').textContent = (d.users || []).length + ' 个账号';
+    $('paccMeta').textContent = '会话有效期 ' + (d.session_hours || 72) + ' 小时 · 连续失败 '
+      + (d.max_failures || 5) + ' 次锁定 ' + (d.lock_minutes || 15) + ' 分钟（参数请编辑 config.json 的 panel_auth 段）';
+  } catch (e) { $('paccNote').textContent = '读取失败：' + e.message; }
+}
+function renderPanelAccounts(users) {
+  const tb = $('paccTable').querySelector('tbody');
+  if (!users.length) { tb.innerHTML = '<tr><td colspan="3" class="hint">暂无账号（应由命令行引导创建）</td></tr>'; return; }
+  tb.innerHTML = users.map(u => {
+    const self = authState.username === u.username;
+    const role = u.role === 'admin' ? 'admin（可读写）' : 'viewer（只读）';
+    return '<tr>'
+      + '<td class="who"><div class="nm">' + esc(u.username) + (self ? ' <span class="realm-tag">我</span>' : '') + '</div></td>'
+      + '<td>' + esc(role) + '</td>'
+      + '<td class="c-acts">'
+      + '<button type="button" class="xs" data-pacc-reset="' + esc(u.username) + '">重置密码</button>'
+      + (self ? '' : ' <button type="button" class="xs" data-pacc-del="' + esc(u.username) + '">删除</button>')
+      + '</td></tr>';
+  }).join('');
+}
+if ($('paccBox')) {
+  // 卡片在 cfgForm 内：拦掉输入框回车触发的表单提交（避免误存整份配置）。
+  $('paccBox').addEventListener('keydown', e => {
+    if (e.key === 'Enter' && e.target && e.target.tagName === 'INPUT') e.preventDefault();
+  });
+  $('btnPaccReload').onclick = loadPanelAccounts;
+  $('btnPaccSave').onclick = async () => {
+    const username = $('paccUser').value.trim();
+    const role = $('paccRole').value;
+    const password = $('paccPass').value;
+    if (!username) { toast('请填写账号名', 'err'); return; }
+    try {
+      await api('admin/users', { method: 'POST', body: JSON.stringify({ username, role, password }) });
+      $('paccUser').value = ''; $('paccPass').value = '';
+      toast('已保存账号 ' + username + (password ? '' : '（仅更新角色）'), 'ok');
+      loadPanelAccounts();
+    } catch (e) { toast('保存失败：' + e.message, 'err'); }
+  };
+  $('btnPaccSelf').onclick = async () => {
+    const cur = $('paccCur').value, nw = $('paccNew').value;
+    if (!cur || !nw) { toast('请填写当前密码与新密码', 'err'); return; }
+    try {
+      await api('password', { method: 'POST', body: JSON.stringify({ current_password: cur, new_password: nw }) });
+      $('paccCur').value = ''; $('paccNew').value = '';
+      toast('密码已更新', 'ok');
+    } catch (e) { toast('修改失败：' + e.message, 'err'); }
+  };
+  $('paccTable').addEventListener('click', async ev => {
+    const rst = ev.target.closest('[data-pacc-reset]');
+    const del = ev.target.closest('[data-pacc-del]');
+    if (rst) {
+      const username = rst.dataset.paccReset;
+      const pw = prompt('为「' + username + '」设置新密码（≥6 位）：');
+      if (!pw) return;
+      try { await api('admin/users/password', { method: 'POST', body: JSON.stringify({ username, password: pw }) }); toast('已重置「' + username + '」的密码', 'ok'); }
+      catch (e) { toast('重置失败：' + e.message, 'err'); }
+    } else if (del) {
+      const username = del.dataset.paccDel;
+      if (!confirm('删除账号「' + username + '」？')) return;
+      try { await api('admin/users/delete', { method: 'POST', body: JSON.stringify({ username }) }); toast('已删除「' + username + '」', 'ok'); loadPanelAccounts(); }
+      catch (e) { toast('删除失败：' + e.message, 'err'); }
+    }
+  });
+}
 
 /* ── 添加账号 ─────────────────────────────────────────────────────── */
 function openAdd() {
@@ -1523,13 +1676,8 @@ function start() {
   loadOverview(true);
   if (refTimer) clearInterval(refTimer);
   refTimer = setInterval(refreshVisible, 5000);
-  checkAuthGate();
 }
-async function checkAuthGate() {
-  try { await api('overview'); }
-  catch (e) { if (String(e.message).includes('密钥') || String(e.message).includes('api_key')) return; }
-}
-start();
+bootstrapAuth();
 
 /* ── 积分任务 ─────────────────────────────────────────────────────── */
 let taskUID = null;

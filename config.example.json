@@ -12,6 +12,12 @@
     "order": ["cn", "global"],
     "prefer": {}
   },
+  "panel_auth": {
+    "session_hours": 72,
+    "max_failures": 5,
+    "lock_minutes": 15,
+    "users": []
+  },
   "server": {
     "read_timeout": "300s"
   },

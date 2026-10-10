@@ -22,8 +22,8 @@ import (
 	"time"
 
 	"github.com/wuxianggujun/omnigate-panel/internal/auth"
-	"github.com/wuxianggujun/omnigate-panel/internal/httpauth"
 	"github.com/wuxianggujun/omnigate-panel/internal/livecfg"
+	"github.com/wuxianggujun/omnigate-panel/internal/panelauth"
 	"github.com/wuxianggujun/omnigate-panel/internal/pool"
 	"github.com/wuxianggujun/omnigate-panel/internal/reqlog"
 	"github.com/wuxianggujun/omnigate-panel/internal/scheduler"
@@ -87,6 +87,15 @@ type Config struct {
 	// 任一为 nil 时对应接口返回 501。
 	LoadRealmRouting func() (any, error)
 	SaveRealmRouting func(raw []byte) (restartRequired []string, err error)
+
+	// PanelAuth 面板登录鉴权运行时（独立于网关 api_key）：账号密码校验、服务端
+	// 会话、失败限流。nil 时面板退回旧 api_key 门（未配置账号时的过渡行为）。
+	// LoadPanelAuth/SavePanelAuth 读写 config.json 的 panel_auth 段（账号管理页用）；
+	// SavePanelAuth 完成「校验 → 落盘 → 热重建同一 *panelauth.Store」。任一为 nil
+	// 时账号管理接口返回 501（但仍可用旧 api_key 门进入面板）。
+	PanelAuth     *panelauth.Store
+	LoadPanelAuth func() (PanelAuthSection, error)
+	SavePanelAuth func(section PanelAuthSection) (restartRequired []string, err error)
 
 	// ExportOmniAccounts / ImportOmniAccounts OmniGate 供应商账号（state.json 的
 	// dyn_accounts 段）的导入导出（账号迁移用）。Export 返回
@@ -192,56 +201,71 @@ func (p *Panel) routes() {
 	// 旧的 OmniGate 独立子页已并入主面板（供应商/出站代理/账号池统一视图）；
 	// 保留 URL 302 重定向，避免旧书签失效。
 	p.mux.HandleFunc("GET /panel/omni/{$}", p.omniRedirect)
-	p.mux.HandleFunc("GET /panel/api/omni/config", p.withAuth(p.getOmniConfig))
-	p.mux.HandleFunc("POST /panel/api/omni/config", p.withAuth(p.saveOmniConfig))
-	p.mux.HandleFunc("GET /panel/api/omni/outbound", p.withAuth(p.getOutbound))
-	p.mux.HandleFunc("POST /panel/api/omni/outbound", p.withAuth(p.saveOutbound))
-	// 域路由（config.json 的 realm_routing 段）：模型与档位页「域优先级」卡片。
-	p.mux.HandleFunc("GET /panel/api/realm_routing", p.withAuth(p.getRealmRouting))
-	p.mux.HandleFunc("POST /panel/api/realm_routing", p.withAuth(p.saveRealmRouting))
-	// 统一账号池：OmniGate 账号（归一化）+ 单账号运维 + 全量签到。
-	p.mux.HandleFunc("GET /panel/api/omni/accounts", p.withAuth(p.omniAccounts))
-	p.mux.HandleFunc("POST /panel/api/omni/account/checkin", p.withAuth(p.omniAccountCheckin))
-	p.mux.HandleFunc("POST /panel/api/omni/account/remove", p.withAuth(p.omniAccountRemove))
-	p.mux.HandleFunc("GET /panel/api/overview", p.withAuth(p.overview))
-	p.mux.HandleFunc("GET /panel/api/logs", p.withAuth(p.logsHandler))
-	p.mux.HandleFunc("GET /panel/api/request_metrics", p.withAuth(p.requestMetrics))
-	p.mux.HandleFunc("GET /panel/api/request_logs", p.withAuth(p.requestLogs))
-	p.mux.HandleFunc("GET /panel/api/models", p.withAuth(p.models))
-	p.mux.HandleFunc("POST /panel/api/login/start", p.withAuth(p.loginStart))
-	p.mux.HandleFunc("GET /panel/api/login/poll", p.withAuth(p.loginPoll))
-	p.mux.HandleFunc("GET /panel/api/login/regions", p.withAuth(p.loginRegions))
-	p.mux.HandleFunc("POST /panel/api/import/cockpit", p.withAuth(p.importCockpit))
-	p.mux.HandleFunc("GET /panel/api/accounts/export", p.withAuth(p.exportAccounts))
-	p.mux.HandleFunc("POST /panel/api/accounts/import", p.withAuth(p.importAccounts))
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/revive", p.withAuth(p.accountRevive))
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/disable", p.withAuth(p.accountDisable))
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/pause", p.withAuth(p.accountPause))
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/resume", p.withAuth(p.accountResume))
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/checkin", p.withAuth(p.accountCheckin))
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/balance", p.withAuth(p.accountBalance))
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/remove", p.withAuth(p.accountRemove))
-	p.mux.HandleFunc("GET /panel/api/accounts/{uid}/tasks", p.withAuth(p.accountTasks))
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/tasks/accept", p.withAuth(p.accountTaskAccept))
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/tasks/accept_all", p.withAuth(p.taskAcceptAll))
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/tasks/claim", p.withAuth(p.accountTaskClaim))
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/tasks/auto", p.withAuth(p.accountTaskAuto))
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/tasks/auto_all", p.withAuth(p.accountTaskAutoAll))
-	p.mux.HandleFunc("POST /panel/api/tasks/scan_all", p.withAuth(p.tasksScanAll))
-	p.mux.HandleFunc("POST /panel/api/tasks/run_queue", p.withAuth(p.tasksRunQueue))
-	p.mux.HandleFunc("GET /panel/api/tasks/queue", p.withAuth(p.tasksQueueStatus))
-	p.mux.HandleFunc("GET /panel/api/school/vouchers", p.withAuth(p.schoolVouchers))
-	p.mux.HandleFunc("POST /panel/api/checkin_all", p.withAuth(p.checkinAll))
-	p.mux.HandleFunc("POST /panel/api/travel_all", p.withAuth(p.travelAll))
-	p.mux.HandleFunc("POST /panel/api/activity_all", p.withAuth(p.activityAll))
-	p.mux.HandleFunc("POST /panel/api/keepalive_all", p.withAuth(p.keepaliveAll))
-	p.mux.HandleFunc("POST /panel/api/balance_all", p.withAuth(p.balanceAll))
-	p.mux.HandleFunc("GET /panel/api/packages", p.withAuth(p.packages))
-	p.mux.HandleFunc("GET /panel/api/usage", p.withAuth(p.usage))
-	p.mux.HandleFunc("POST /panel/api/usage/save", p.withAuth(p.usageSave))
-	p.mux.HandleFunc("GET /panel/api/model_probes", p.withAuth(p.modelProbes))
-	p.mux.HandleFunc("GET /panel/api/config", p.withAuth(p.getConfig))
-	p.mux.HandleFunc("POST /panel/api/config", p.withAuth(p.saveConfig))
+
+	// 登录会话：GET 查询登录态（前端启动判定）、POST 登录、DELETE 登出。
+	// 这三个端点本身不鉴权（登录态未知），其余接口一律走 auth/admin。
+	p.mux.HandleFunc("GET /panel/api/session", p.sessionState)
+	p.mux.HandleFunc("POST /panel/api/session", p.login)
+	p.mux.HandleFunc("DELETE /panel/api/session", p.logout)
+	// 已登录用户自助改密（任意角色）。
+	p.mux.HandleFunc("POST /panel/api/password", p.auth(p.changeOwnPassword))
+	// 账号管理（仅管理员）。
+	p.mux.HandleFunc("GET /panel/api/admin/users", p.admin(p.listPanelUsers))
+	p.mux.HandleFunc("POST /panel/api/admin/users", p.admin(p.savePanelUser))
+	p.mux.HandleFunc("POST /panel/api/admin/users/password", p.admin(p.resetPanelUserPassword))
+	p.mux.HandleFunc("POST /panel/api/admin/users/delete", p.admin(p.deletePanelUser))
+
+	// 只读接口（admin/viewer 均可）。
+	p.mux.HandleFunc("GET /panel/api/omni/config", p.auth(p.getOmniConfig))
+	p.mux.HandleFunc("GET /panel/api/omni/outbound", p.auth(p.getOutbound))
+	p.mux.HandleFunc("GET /panel/api/realm_routing", p.auth(p.getRealmRouting))
+	p.mux.HandleFunc("GET /panel/api/omni/accounts", p.auth(p.omniAccounts))
+	p.mux.HandleFunc("GET /panel/api/overview", p.auth(p.overview))
+	p.mux.HandleFunc("GET /panel/api/logs", p.auth(p.logsHandler))
+	p.mux.HandleFunc("GET /panel/api/request_metrics", p.auth(p.requestMetrics))
+	p.mux.HandleFunc("GET /panel/api/request_logs", p.auth(p.requestLogs))
+	p.mux.HandleFunc("GET /panel/api/models", p.auth(p.models))
+	p.mux.HandleFunc("GET /panel/api/login/poll", p.auth(p.loginPoll))
+	p.mux.HandleFunc("GET /panel/api/login/regions", p.auth(p.loginRegions))
+	p.mux.HandleFunc("GET /panel/api/accounts/{uid}/tasks", p.auth(p.accountTasks))
+	p.mux.HandleFunc("GET /panel/api/tasks/queue", p.auth(p.tasksQueueStatus))
+	p.mux.HandleFunc("GET /panel/api/school/vouchers", p.auth(p.schoolVouchers))
+	p.mux.HandleFunc("GET /panel/api/packages", p.auth(p.packages))
+	p.mux.HandleFunc("GET /panel/api/usage", p.auth(p.usage))
+	p.mux.HandleFunc("GET /panel/api/model_probes", p.auth(p.modelProbes))
+	p.mux.HandleFunc("GET /panel/api/config", p.auth(p.getConfig))
+
+	// 写操作 / 敏感读取（仅管理员）：改配置、账号运维、任务执行、导出凭证。
+	p.mux.HandleFunc("POST /panel/api/omni/config", p.admin(p.saveOmniConfig))
+	p.mux.HandleFunc("POST /panel/api/omni/outbound", p.admin(p.saveOutbound))
+	p.mux.HandleFunc("POST /panel/api/realm_routing", p.admin(p.saveRealmRouting))
+	p.mux.HandleFunc("POST /panel/api/omni/account/checkin", p.admin(p.omniAccountCheckin))
+	p.mux.HandleFunc("POST /panel/api/omni/account/remove", p.admin(p.omniAccountRemove))
+	p.mux.HandleFunc("POST /panel/api/login/start", p.admin(p.loginStart))
+	p.mux.HandleFunc("POST /panel/api/import/cockpit", p.admin(p.importCockpit))
+	p.mux.HandleFunc("GET /panel/api/accounts/export", p.admin(p.exportAccounts))
+	p.mux.HandleFunc("POST /panel/api/accounts/import", p.admin(p.importAccounts))
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/revive", p.admin(p.accountRevive))
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/disable", p.admin(p.accountDisable))
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/pause", p.admin(p.accountPause))
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/resume", p.admin(p.accountResume))
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/checkin", p.admin(p.accountCheckin))
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/balance", p.admin(p.accountBalance))
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/remove", p.admin(p.accountRemove))
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/tasks/accept", p.admin(p.accountTaskAccept))
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/tasks/accept_all", p.admin(p.taskAcceptAll))
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/tasks/claim", p.admin(p.accountTaskClaim))
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/tasks/auto", p.admin(p.accountTaskAuto))
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/tasks/auto_all", p.admin(p.accountTaskAutoAll))
+	p.mux.HandleFunc("POST /panel/api/tasks/scan_all", p.admin(p.tasksScanAll))
+	p.mux.HandleFunc("POST /panel/api/tasks/run_queue", p.admin(p.tasksRunQueue))
+	p.mux.HandleFunc("POST /panel/api/checkin_all", p.admin(p.checkinAll))
+	p.mux.HandleFunc("POST /panel/api/travel_all", p.admin(p.travelAll))
+	p.mux.HandleFunc("POST /panel/api/activity_all", p.admin(p.activityAll))
+	p.mux.HandleFunc("POST /panel/api/keepalive_all", p.admin(p.keepaliveAll))
+	p.mux.HandleFunc("POST /panel/api/balance_all", p.admin(p.balanceAll))
+	p.mux.HandleFunc("POST /panel/api/usage/save", p.admin(p.usageSave))
+	p.mux.HandleFunc("POST /panel/api/config", p.admin(p.saveConfig))
 }
 
 // ServeHTTP 统一入口：先写安全响应头再分发，保证页面、静态资源、API
@@ -251,18 +275,8 @@ func (p *Panel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	p.mux.ServeHTTP(w, r)
 }
 
-// withAuth 与 server 包同口径的 Bearer 鉴权（经 httpauth 常量时间比较）；
-// api_key 为空时放行。密钥经 livecfg 快照读取：面板里改了 api_key，下一个请求
-// 即用新值（无需重启）。
-func (p *Panel) withAuth(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if !httpauth.VerifyBearer(r, p.apiKey()) {
-			writeErr(w, http.StatusUnauthorized, "invalid_api_key")
-			return
-		}
-		next(w, r)
-	}
-}
+// withAuth 已改造为账号会话鉴权：见 panel_auth.go 的 auth（任意登录用户）与
+// admin（管理员）中间件。旧 api_key 门仅在未配置面板账号时兜底（resolveAuth）。
 
 // apiKey 当前生效密钥（Live 优先，回落静态字段）。
 func (p *Panel) apiKey() string {

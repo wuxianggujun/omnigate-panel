@@ -21,6 +21,7 @@ import (
 	"github.com/wuxianggujun/omnigate-panel/internal/auth"
 	"github.com/wuxianggujun/omnigate-panel/internal/livecfg"
 	"github.com/wuxianggujun/omnigate-panel/internal/outbound"
+	"github.com/wuxianggujun/omnigate-panel/internal/panelauth"
 	"github.com/wuxianggujun/omnigate-panel/internal/panel"
 	"github.com/wuxianggujun/omnigate-panel/internal/pool"
 	"github.com/wuxianggujun/omnigate-panel/internal/redisstore"
@@ -51,7 +52,18 @@ func stateSibling(stateFile, name string) string {
 
 func main() {
 	cfgPath := flag.String("config", "config.json", "配置文件路径（默认当前目录 config.json；不存在时自动生成推荐配置）")
+	setAdminPW := flag.Bool("set-admin-password", false, "交互设置/重置面板账号密码后退出（首次引导或忘记密码兜底）")
+	adminUser := flag.String("admin-user", "admin", "配合 -set-admin-password：目标账号名")
+	adminRole := flag.String("admin-role", "admin", "配合 -set-admin-password：角色（admin/viewer）")
 	flag.Parse()
+
+	// 命令行设密：独立于网关 api_key 的面板引导入口。写完即退出，不启动服务。
+	if *setAdminPW {
+		if err := runSetAdminPassword(*cfgPath, *adminUser, *adminRole); err != nil {
+			log.Fatalf("set-admin-password: %v", err)
+		}
+		return
+	}
 
 	cfg, err := Load(*cfgPath)
 	if err != nil {
@@ -284,6 +296,13 @@ func main() {
 		defer omni.Stop()
 	}
 
+	// 面板登录鉴权运行时（独立于网关 api_key）：账号来自 config.json 的 panel_auth
+	// 段。配了账号后面板只认密码登录（api_key 不再能打开面板）；空集合退回旧 api_key
+	// 门（未配置态过渡行为）。账号管理页保存后 Reconfigure 热重建（会话保留，按当前
+	// 账号集合即时校验）。
+	authStore := panelauth.New(cfg.PanelAuth.Users, cfg.PanelAuth.SessionTTL(),
+		cfg.PanelAuth.MaxFail(), cfg.PanelAuth.LockDuration())
+
 	pcfg := panel.Config{
 		Pool:        p,
 		Usage:       rec,
@@ -357,6 +376,38 @@ func main() {
 					order = []string{"cn"}
 				}
 				realmRouter.Reconfigure(order, c.RealmRouting.Prefer)
+			}
+			return nil, nil
+		},
+		// 面板鉴权配置（config.json 的 panel_auth 段）读写：账号管理页用。
+		// LoadPanelAuth 返回含密码哈希的原始段（面板内部用于保留未改密码账号的哈希，
+		// 对前端只暴露用户名/角色）；SavePanelAuth 完成「校验 → 落盘 → 热重建
+		// 同一 *panelauth.Store」，全部热生效，需重启列表恒空。
+		PanelAuth: authStore,
+		LoadPanelAuth: func() (panel.PanelAuthSection, error) {
+			c, err := Load(*cfgPath)
+			if err != nil {
+				return panel.PanelAuthSection{}, err
+			}
+			return panel.PanelAuthSection{
+				SessionHours: c.PanelAuth.SessionHours,
+				MaxFailures:  c.PanelAuth.MaxFailures,
+				LockMinutes:  c.PanelAuth.LockMinutes,
+				Users:        c.PanelAuth.Users,
+			}, nil
+		},
+		SavePanelAuth: func(section panel.PanelAuthSection) ([]string, error) {
+			wrapped, err := json.Marshal(map[string]any{"panel_auth": section})
+			if err != nil {
+				return nil, err
+			}
+			if _, err := saveConfig(wrapped, *cfgPath, live, p, up, sch); err != nil {
+				return nil, err
+			}
+			// 热重建鉴权运行时（内存与磁盘对齐）。
+			if c, err := Load(*cfgPath); err == nil {
+				authStore.Reconfigure(c.PanelAuth.Users, c.PanelAuth.SessionTTL(),
+					c.PanelAuth.MaxFail(), c.PanelAuth.LockDuration())
 			}
 			return nil, nil
 		},
@@ -699,6 +750,7 @@ func restartRequiredFields(c *Config) []string {
 var atomicConfigSections = map[string]bool{
 	"outbound":      true, // 命名代理列表 + 「目标 → 代理」路由是一组，删项必须真正生效
 	"realm_routing": true, // 域优先级 + 模型优先域规则同上（删规则必须真正生效）
+	"panel_auth":    true, // 面板账号列表含密码哈希，整段替换（删账号/改角色必须真正生效）
 }
 
 // mergeConfigMaps 把 incoming 深合并进 cur（原地），返回 cur。

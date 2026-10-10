@@ -13,8 +13,50 @@ import (
 	"time"
 
 	"github.com/wuxianggujun/omnigate-panel/internal/outbound"
+	"github.com/wuxianggujun/omnigate-panel/internal/panelauth"
 	"github.com/wuxianggujun/omnigate-panel/internal/prompt"
 )
+
+// PanelAuthConfig config.json 的 panel_auth 段：面板账号（用户名 + 密码哈希 +
+// 角色）与会话/限流参数。与网关 api_key 完全独立——配了 users 后，面板只认这里
+// 的账号（api_key 不能再打开面板）；users 为空时退回旧的 api_key 门（未配置态的
+// 过渡行为，避免把自己锁在外面）。
+type PanelAuthConfig struct {
+	// SessionHours 会话有效期（小时），缺省 72；每次请求滑动续期。
+	SessionHours int `json:"session_hours"`
+	// MaxFailures 同一用户名/IP 连续登录失败达到该值即锁定，缺省 5。
+	MaxFailures int `json:"max_failures"`
+	// LockMinutes 锁定时长（分钟），缺省 15。
+	LockMinutes int `json:"lock_minutes"`
+	// Users 账号列表（含 PBKDF2 密码哈希）。空 = 未配置（退回 api_key 门）。
+	Users []panelauth.User `json:"users"`
+}
+
+// SessionTTL 会话有效期（SessionHours<=0 时回落 72h）。
+func (p PanelAuthConfig) SessionTTL() time.Duration {
+	h := p.SessionHours
+	if h <= 0 {
+		h = 72
+	}
+	return time.Duration(h) * time.Hour
+}
+
+// MaxFail 连续失败锁定阈值（<=0 回落 5）。
+func (p PanelAuthConfig) MaxFail() int {
+	if p.MaxFailures <= 0 {
+		return 5
+	}
+	return p.MaxFailures
+}
+
+// LockDuration 锁定时长（<=0 回落 15m）。
+func (p PanelAuthConfig) LockDuration() time.Duration {
+	m := p.LockMinutes
+	if m <= 0 {
+		m = 15
+	}
+	return time.Duration(m) * time.Minute
+}
 
 // Config 顶层配置。
 type Config struct {
@@ -144,6 +186,10 @@ type Config struct {
 		// 更具体（更长前缀）的规则优先。例：{"deepseek-*":"global","glm-*":"cn"}。
 		Prefer map[string]string `json:"prefer"`
 	} `json:"realm_routing"`
+
+	// PanelAuth 面板登录鉴权（config.json 的 panel_auth 段）。与网关 api_key
+	// 完全独立：配置了 users 后面板只认密码登录，api_key 不再能打开面板。
+	PanelAuth PanelAuthConfig `json:"panel_auth"`
 
 	Upstream struct {
 		// TimeoutSeconds 短 RPC（refresh/checkin/balance/FetchModels）总时长上限，默认 120。
@@ -298,6 +344,11 @@ func Default() *Config {
 	// RealmRouting 缺省优先级 ["cn","global"]：裸名走 cn（= 历史行为零回归），
 	// 首选域无号时跨域回退到 global。Prefer 缺省空（全部按 Order）。
 	c.RealmRouting.Order = []string{"cn", "global"}
+	// PanelAuth 缺省参数：会话 72h、连续失败 5 次锁 15 分钟；users 缺省空
+	//（未配置态 → 退回 api_key 门，避免升级后把管理员锁在面板外）。
+	c.PanelAuth.SessionHours = 72
+	c.PanelAuth.MaxFailures = 5
+	c.PanelAuth.LockMinutes = 15
 	c.Features.SanitizeBlacklistFingerprints = true
 	c.Prompt.Mode = "passthrough" // 缺省 passthrough：透传客户端原始 system（对齐上游；custom 由用户显式选择）
 	c.Pool.MaxInFlight = 3
@@ -512,6 +563,25 @@ func (c *Config) normalizeRealmRouting() error {
 	return nil
 }
 
+// normalizePanelAuth 校验面板鉴权配置：会话/限流参数回落缺省；账号集合经
+// panelauth.ValidateUsers（用户名唯一/角色合法/至少一个管理员）。空集合合法
+// （未配置态，退回 api_key 门）。
+func (c *Config) normalizePanelAuth() error {
+	if c.PanelAuth.SessionHours <= 0 {
+		c.PanelAuth.SessionHours = 72
+	}
+	if c.PanelAuth.MaxFailures <= 0 {
+		c.PanelAuth.MaxFailures = 5
+	}
+	if c.PanelAuth.LockMinutes <= 0 {
+		c.PanelAuth.LockMinutes = 15
+	}
+	if err := panelauth.ValidateUsers(c.PanelAuth.Users); err != nil {
+		return fmt.Errorf("panel_auth.users: %w", err)
+	}
+	return nil
+}
+
 func (c *Config) normalize() error {
 	var err error
 	if c.Panel.PackageDetailLimit <= 0 {
@@ -527,6 +597,11 @@ func (c *Config) normalize() error {
 	// 域路由：校验域字面量、去重、空回落缺省（非法 fail fast，静默忽略会让用户
 	// 以为优先级生效了）。
 	if err := c.normalizeRealmRouting(); err != nil {
+		return err
+	}
+	// 面板鉴权：会话/限流参数回落缺省；账号集合 fail fast（用户名唯一/角色合法/
+	// 至少一个管理员），非法配置宁可启动报错也不静默放行。
+	if err := c.normalizePanelAuth(); err != nil {
 		return err
 	}
 	if c.Logging.RequestRetentionDays <= 0 {

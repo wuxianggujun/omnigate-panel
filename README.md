@@ -394,6 +394,10 @@ curl -s http://localhost:7863/v1/chat/completions \
 | `state_file` | `./data/state.json` | 账号池状态持久化文件 |
 | `server.read_timeout` | `300s` | 入站请求读取（含 body 上传）总时长上限；大上下文/文件块经反代转发超时会 400 `read body: i/o timeout`；`0` = 不限制；改动需重启（#100） |
 | `panel.package_detail_limit` | `5` | 积分构成页单账号默认展示的最早到期包数；其余未用完包与已用完包聚合折叠 |
+| `panel_auth.session_hours` | `72` | 面板登录会话有效期（小时，滑动续期） |
+| `panel_auth.max_failures` | `5` | 同一账号连续登录失败达到该次数即锁定 |
+| `panel_auth.lock_minutes` | `15` | 登录失败锁定时长（分钟） |
+| `panel_auth.users` | `[]` | 面板账号列表：`[{username, role, password_hash}]`（`role` = `admin`/`viewer`）。空 = 未配置态（沿用 `api_key` 门）；非空时**至少一个 admin**，密码哈希经 `-set-admin-password` 或面板账号页写入，编辑时不要手改哈希 |
 | `logging.request_archive_enabled` | `true` | 请求元数据 JSONL 归档开关；不记录提示词、响应正文或 Authorization |
 | `logging.request_retention_days` | `7` | 请求归档保留天数；超期文件在启动和周期清理时删除 |
 | `logging.request_archive_max_mb` | `100` | 请求归档总容量上限（MiB）；超限优先删除最旧文件 |
@@ -661,7 +665,21 @@ WARN: [server] stream ...: saw M native tool call block(s) but repaired none (to
 http://127.0.0.1:7863/panel/
 ```
 
-鉴权与 API 同口径：`api_key` 非空时面板要求输入一次密钥（浏览器 localStorage 记住）；为空则直接可用。
+面板登录**独立于网关 `api_key`**（`panel_auth` 段，多账号 + 角色）：
+
+- **未配置账号**时沿用旧行为：`api_key` 非空则要求输入一次密钥（浏览器 localStorage 记住），为空则直接可用——升级后不会把管理员锁在面板外。
+- **配置了任意账号**后（推荐），面板改用**账号密码登录**：服务端会话（HttpOnly + SameSite=Strict Cookie）、退出登录、登录失败限流锁定、CSRF 同源校验、PBKDF2-SHA256 加盐哈希（零外部依赖）。此时 `api_key` **不再能打开面板**，只用于 `/v1/*`。
+- **角色**：`admin` 全权；`viewer` 只读（可看账号池 / 用量 / 日志 / 配置，但不能改配置、运维账号、导出凭证——服务端强制 403，前端同步隐藏写操作入口）。
+
+配置首个管理员账号有两种入口（都写 `config.json` 的 `panel_auth.users`，互不影响）：
+
+```bash
+# 1) 命令行交互设密（首次引导或忘记密码兜底；容器内执行，无回显）
+omnigate-panel -set-admin-password
+#    可指定账号名与角色：-admin-user ops -admin-role admin
+# 2) 已登录后在面板「配置」页 →「面板账号与权限」卡片增删账号、重置密码、改自己的密码
+```
+
 界面支持**明暗主题切换**（首次跟随系统偏好，点击按钮两态翻转并记住选择），左侧导航七个视图：
 
 | 视图 | 功能 |

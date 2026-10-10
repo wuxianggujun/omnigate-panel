@@ -40,7 +40,10 @@
         配置</a></li>
       <li><a href="#logs" data-view="logs">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.5 3.5h11M2.5 8h11M2.5 12.5h7"/></svg>
-        请求日志</a></li>
+        请求记录</a></li>
+      <li><a href="#runlogs" data-view="runlogs">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M3 2.5h10v11H3z"/><path d="M5.2 5.2h5.6M5.2 8h5.6M5.2 10.8h3.2"/></svg>
+        运行日志</a></li>
     </ul>
     <div class="sig">
       <div class="row"><span class="pulse" id="navPulse"></span><span id="navState">连接中</span></div>
@@ -636,14 +639,38 @@
       </div>
     </section>
 
-    <!-- 上游供应商（OmniGate：供应商配置 / 账号授权 / 模型目录 / 调用示例） -->
+    <!-- 运行日志（面板环形缓冲：任务 / 系统 / 对话，最多最近 500 行） -->
+    <section class="view" id="view-runlogs" hidden>
+      <div class="box">
+        <header>
+          <h3>运行日志 <span class="hint">签到 / 保活 / 任务 / 系统等运行时日志（含内置 OmniGate）；内存环形缓冲，最多保留最近 500 行</span></h3>
+          <span class="grow"></span>
+          <span class="note" id="rlCount">—</span>
+        </header>
+        <div class="fbar" id="rlFilter">
+          <select id="rlCh" aria-label="按频道筛选">
+            <option value="">全部频道</option>
+            <option value="task">任务</option>
+            <option value="sys">系统</option>
+            <option value="chat">对话</option>
+          </select>
+          <input id="rlQ" type="search" placeholder="筛选关键词（账号 / uid / 动作…）" aria-label="筛选运行日志">
+          <span class="grow"></span>
+          <label class="flab rl-auto"><input type="checkbox" id="rlAuto" checked> 自动刷新</label>
+          <button class="xs" id="btnRlReload">刷新</button>
+        </div>
+        <div class="rl-wrap" id="rlWrap"></div>
+      </div>
+    </section>
+
+    <!-- 上游供应商（OmniGate：供应商配置 / 模型目录 / 调用示例） -->
     <section class="view" id="view-providers" hidden>
       <div class="box">
         <header>
           <h3>上游供应商 <span class="hint" id="ogCfgPath"></span></h3>
         </header>
         <div class="pad">
-          <div class="og-hint" style="margin-top:0">在这里增删改上游供应商与账号，保存后<strong>进程内热生效</strong>（写入 <code>omnigate.json</code>，无需重启）。类型 <code>runable</code>=办公助手、<code>raccoon</code>=办公小浣熊、<code>openai</code>=任意 OpenAI 兼容上游。全部账号也会出现在「账号池」里。</div>
+          <div class="og-hint" style="margin-top:0">在这里增删改上游<strong>供应商</strong>（端点 / 密钥 / 模型），保存后<strong>进程内热生效</strong>（写入 <code>omnigate.json</code>，无需重启）。类型 <code>runable</code>=办公助手、<code>raccoon</code>=办公小浣熊、<code>openai</code>=任意 OpenAI 兼容上游。<strong>账号统一在「账号池」页添加与管理</strong>。</div>
           <div class="grid3" style="margin-top:12px">
             <label class="fld"><span class="lb">默认 provider</span><select id="cfgDefaultProvider"></select></label>
             <label class="fld"><span class="lb">默认模型</span><input id="cfgDefaultModel" placeholder="留空 = 上游默认"></label>

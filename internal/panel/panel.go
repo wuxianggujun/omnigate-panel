@@ -1,6 +1,6 @@
 // Package panel 内嵌式 Web 管理面板：账号池总览、单号运维（解冻/禁用/签到/
 // 刷新余额/移除）、浏览器内 OAuth 添加账号（免重启热加载进池）、手动批量
-// 签到/保活，以及请求记录（含实际调度域）与运行日志环形缓冲（后端保留）。
+// 签到/保活，以及请求记录（含实际调度域）与运行日志（环形缓冲，前端「运行日志」页）。
 //
 // 设计约束：
 //   - 前端 go:embed 单文件（index.html），无任何外部构建依赖，与二进制同体部署；
@@ -351,7 +351,7 @@ func (p *Panel) requestMetrics(w http.ResponseWriter, r *http.Request) {
 
 // requestLogs 从 JSONL 归档读取最近请求；limit 默认 200、最大 1000。
 // 支持按 outcome/account/model/client_ip/user_agent 过滤（字符串字段为包含匹配）
-// 与 from/to 时间区间（闭区间，unix 秒或 RFC3339）——面板「请求日志」的筛选框、
+// 与 from/to 时间区间（闭区间，unix 秒或 RFC3339）——面板「请求记录」的筛选框、
 // 来源查询与「今天 / 自定义区间」都走这里。
 func (p *Panel) requestLogs(w http.ResponseWriter, r *http.Request) {
 	if p.cfg.RequestLog == nil {

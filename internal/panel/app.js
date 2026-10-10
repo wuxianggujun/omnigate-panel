@@ -413,10 +413,10 @@ let lastPackagesAt = 0;
 let expFetching = false;                       // 到期卡片在途标记（防重复打上游）
 const EXP_FRESH_MS = 2 * 60 * 1000;            // 缓存新鲜窗口：2 分钟内复用
 
-const TITLES = { accounts: '账号池', usage: '用量', packages: '积分构成', taskscenter: '任务中心', models: '模型与档位', providers: '上游供应商', outbound: '出站代理', config: '配置', logs: '请求日志' };
+const TITLES = { accounts: '账号池', usage: '用量', packages: '积分构成', taskscenter: '任务中心', models: '模型与档位', providers: '上游供应商', outbound: '出站代理', config: '配置', logs: '请求记录', runlogs: '运行日志' };
 function go(v) {
   view = v;
-  // 供 CSS 挂钩：请求日志页要把 .main 锁成一屏高（表格内部滚动），其余页面照常整页滚动。
+  // 供 CSS 挂钩：请求记录页要把 .main 锁成一屏高（表格内部滚动），其余页面照常整页滚动。
   document.body.dataset.view = v;
   document.querySelectorAll('.view').forEach(s => s.hidden = s.id !== 'view-' + v);
   document.querySelectorAll('.nav a').forEach(a => a.classList.toggle('on', a.dataset.view === v));
@@ -426,6 +426,7 @@ function go(v) {
   if (v === 'outbound') loadOutbound();
   if (v === 'config') loadConfig();
   if (v === 'logs') loadRequestLogs();
+  if (v === 'runlogs') loadRunLogs();
   if (v === 'usage') loadUsage();
   if (v === 'packages') loadPackages();
   // 到期提醒卡片不再「打开账号池就自动查」：逐账号实时查上游，账号一多打开面板
@@ -1230,6 +1231,60 @@ if ($('btnReqReload')) $('btnReqReload').onclick = loadRequestLogs;
 // 加一个默认收窄的区间会让打开页面时看到的条数凭空变少。
 if ($('reqRange')) trangeBind('reqRange', loadRequestLogs, '0');
 
+/* ── 运行日志（面板环形缓冲：task / sys / chat）─────────────────────────
+   数据源 GET /panel/api/logs → {entries:[{ts,ch,text}]}（时间升序，最旧在前）。
+   本页按频道 / 关键词筛选，渲染时最新在上；自动刷新跟随全局 5s 轮询
+   （refreshVisible），关掉「自动刷新」即只按需拉取。 */
+let rlEntries = [];
+function rlClock(ts) {
+  const d = ts ? new Date(ts) : null;
+  if (!d || isNaN(d.getTime())) return '--:--:--';
+  const p = n => String(n).padStart(2, '0');
+  return p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+}
+function rlChLabel(ch) { return ch === 'task' ? '任务' : (ch === 'chat' ? '对话' : '系统'); }
+function renderRunLogs() {
+  const wrap = $('rlWrap');
+  if (!wrap) return;
+  const ch = $('rlCh') ? $('rlCh').value : '';
+  const q = ($('rlQ') ? $('rlQ').value : '').trim().toLowerCase();
+  let rows = rlEntries.slice().reverse(); // 最新在上
+  if (ch) rows = rows.filter(e => (e && e.ch) === ch);
+  if (q) rows = rows.filter(e => String(e && e.text || '').toLowerCase().indexOf(q) >= 0);
+  const cnt = $('rlCount');
+  if (cnt) cnt.textContent = rlEntries.length ? (rows.length + ' / ' + rlEntries.length + ' 行') : '—';
+  if (!rows.length) {
+    wrap.innerHTML = '<div class="empty">' +
+      (rlEntries.length ? '没有符合筛选条件的运行日志' : '暂无运行日志') + '</div>';
+    return;
+  }
+  wrap.innerHTML = rows.map(e => {
+    const c = (e && e.ch) || 'sys';
+    return '<div class="rl-row">' +
+      '<span class="rl-ts">' + esc(rlClock(e && e.ts)) + '</span>' +
+      '<span class="rl-ch ' + esc(c) + '">' + esc(rlChLabel(c)) + '</span>' +
+      '<span class="rl-text">' + esc(String(e && e.text || '')) + '</span>' +
+      '</div>';
+  }).join('');
+}
+async function loadRunLogs() {
+  try {
+    const d = await api('logs');
+    rlEntries = (d && d.entries) || [];
+    renderRunLogs();
+  } catch (e) {
+    const wrap = $('rlWrap');
+    if (wrap) wrap.innerHTML = '<div class="empty">读取运行日志失败：' + esc(e && e.message || e) + '</div>';
+  }
+}
+let rlQTimer = null;
+if ($('rlQ')) $('rlQ').oninput = () => {
+  clearTimeout(rlQTimer);
+  rlQTimer = setTimeout(renderRunLogs, 150);
+};
+if ($('rlCh')) $('rlCh').onchange = renderRunLogs;
+if ($('btnRlReload')) $('btnRlReload').onclick = loadRunLogs;
+
 function requestLogText(e) {
   const when = e && e.time ? new Date(e.time).toLocaleTimeString('zh-CN', { hour12: false }) : '—';
   const outcomeLabel = { success: '成功', http_error: 'HTTP 错误', stream_error: '流错误', interrupted: '中断' };
@@ -1702,6 +1757,7 @@ $('btnRefresh').onclick = async () => {
 function refreshVisible() {
   if (view === 'accounts') loadOverview(true);
   else if (view === 'logs') loadRequestLogs();
+  else if (view === 'runlogs') { if ($('rlAuto').checked) loadRunLogs(); }
   else if (view === 'taskscenter') reattachQueueView();
 }
 function start() {

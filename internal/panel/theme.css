@@ -561,17 +561,35 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
   /* 请求日志整页铺满：仅该视图激活时把 .main 锁成一屏高（其余页面仍整页滚动，
      行为不变），视图/卡片/表格依次 flex:1，表格占满剩余空间并内部滚动。
      取代原来的 460px 限高——限高会让表格只占屏幕上半张卡片，下半屏全是空白。 */
-  body[data-view="logs"] .main { height: 100vh; height: 100dvh; overflow: hidden; }
-  #view-logs {
+  body[data-view="logs"] .main, body[data-view="runlogs"] .main { height: 100vh; height: 100dvh; overflow: hidden; }
+  #view-logs, #view-runlogs {
     flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0;
     max-width: none; padding-bottom: 22px;
   }
-  #view-logs[hidden] { display: none; }
-  #view-logs .box {
+  #view-logs[hidden], #view-runlogs[hidden] { display: none; }
+  #view-logs .box, #view-runlogs .box {
     flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0; margin-bottom: 0;
   }
-  #view-logs .box > header, #view-logs .fbar { flex: none; }
+  #view-logs .box > header, #view-logs .fbar,
+  #view-runlogs .box > header, #view-runlogs .fbar { flex: none; }
   #view-logs .req-wrap { flex: 1 1 auto; min-height: 0; max-height: none; }
+  /* 运行日志：滚动区撑满剩余高度，逐行等宽展示（最新在上）。 */
+  #view-runlogs .box > header { flex-wrap: wrap; }
+  #view-runlogs .rl-wrap { flex: 1 1 auto; min-height: 0; }
+  .fbar .rl-auto { cursor: pointer; }
+  .fbar input[type=checkbox] { width: auto; }
+  /* 运行日志行：等宽时间 + 频道徽标 + 正文（长行折行，不撑破卡片）。 */
+  .rl-wrap { overflow: auto; padding: 6px 0; font-family: var(--mono); font-size: 12px; line-height: 1.55; }
+  .rl-wrap .empty { padding: 26px 17px; text-align: center; color: var(--ink-3); font-family: var(--sans); }
+  .rl-row { display: flex; gap: 10px; padding: 3px 17px; }
+  .rl-row:hover { background: var(--surface-2); }
+  .rl-ts { flex: none; color: var(--ink-3); font-variant-numeric: tabular-nums; }
+  .rl-ch { flex: none; align-self: flex-start; margin-top: 2px; padding: 0 6px; border-radius: 5px;
+    font-family: var(--sans); font-size: 10.5px; line-height: 16px; font-weight: 600; }
+  .rl-ch.task { background: var(--accent-soft); color: var(--accent); }
+  .rl-ch.sys { background: var(--surface-2); color: var(--ink-3); }
+  .rl-ch.chat { background: var(--ok-soft); color: var(--ok); }
+  .rl-text { flex: 1 1 auto; min-width: 0; color: var(--ink-2); white-space: pre-wrap; word-break: break-word; }
   /* 请求记录最多可读 1000 条，靠外层 flex 撑满高度 + 表头吸顶：
      滚动区域内始终能看到列名。 */
   .req-wrap { overflow: auto; }

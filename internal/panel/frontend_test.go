@@ -82,6 +82,7 @@ const inert = new Proxy(function () {}, {
   construct() { return inert; },
   has() { return true; },
 });
+const __timers = [];
 const sandbox = new Proxy({
   location: { hash: process.env.SMOKE_HASH || '#taskscenter' },
   history: { replaceState() {} },
@@ -91,13 +92,20 @@ const sandbox = new Proxy({
   fetch: () => new Promise(() => {}),
   addEventListener() {}, removeEventListener() {},
   matchMedia: () => ({ matches: false, addEventListener() {} }),
-  setInterval, clearInterval, setTimeout, clearTimeout,
+  setInterval: () => 0, clearInterval: () => {},
+  setTimeout: (fn) => { __timers.push(fn); return __timers.length; }, clearTimeout: () => {},
   console, JSON, Math, Date, Number, String, Boolean, Object, Array, Promise, Map, Set, RegExp, Error, TypeError, isNaN, parseInt, parseFloat, encodeURIComponent, decodeURIComponent, URL, Symbol, Proxy, Reflect,
 }, { get(t, k) { return t[k]; }, has() { return true; } });
 sandbox.window = sandbox; sandbox.globalThis = sandbox;
 vm.createContext(sandbox);
 try {
   vm.runInContext(src, sandbox, { filename: 'app.js' });
+  // app.js 把首次 go(hash) 推迟到 setTimeout(0)（避开模块级 let/const 的 TDZ）。
+  // 这里同步冲刷定时器队列，让 go(hash) 真正执行——否则进程在定时器触发前就 exit，
+  // hash 参数形同虚设，各视图的顶层求值路径实际从未被覆盖。
+  const __pending = __timers.slice();
+  __timers.length = 0;
+  for (const fn of __pending) fn();
   console.log('SMOKE OK');
   process.exit(0);
 } catch (e) {
@@ -113,7 +121,7 @@ try {
 		t.Fatal(err)
 	}
 	hf.Close()
-	for _, hash := range []string{"#taskscenter", "#accounts", "#usage", "#models", "#config", "#logs", "#packages"} {
+	for _, hash := range []string{"#taskscenter", "#accounts", "#usage", "#models", "#config", "#logs", "#runlogs", "#packages", "#providers", "#outbound"} {
 		cmd := exec.Command(node, hf.Name(), "app.js")
 		cmd.Dir = "." // 测试工作目录 = internal/panel
 		cmd.Env = append(os.Environ(), "SMOKE_HASH="+hash)
@@ -964,5 +972,92 @@ process.stdout.write(JSON.stringify({
 	if strings.TrimSpace(string(out)) != want {
 		t.Fatalf("chart tooltip structure=%s\nwant %s（groups 应等于数据点数，loose 应为 0）",
 			strings.TrimSpace(string(out)), want)
+	}
+}
+
+// 运行日志（GET /panel/api/logs 环形缓冲）：频道筛选、关键词筛选、最新在上、空态兜底。
+//
+// 为什么需要：运行日志页是新增视图，签到 / 保活记录靠它展示。这里把渲染顺序
+// （最新在上）、频道筛选、关键词筛选、计数文案与空态文案全部钉住，避免以后改
+// 排序或筛选条件时静默回归。
+func TestAppJSRunLogFormatting(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; run log formatting test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const start = src.indexOf('let rlEntries = [];');
+const end = src.indexOf('async function loadRunLogs');
+if (start < 0 || end < 0 || end < start) throw new Error('run log helpers not found');
+const els = { rlWrap: { innerHTML: '' }, rlCount: { textContent: '' }, rlCh: { value: '' }, rlQ: { value: '' } };
+const ctx = {
+  Date, String, Number, Array, isNaN,
+  $: id => els[id] || null,
+  esc: s => String(s == null ? '' : s),
+};
+vm.createContext(ctx);
+vm.runInContext(src.slice(start, end) +
+  '\nthis.setEntries=a=>{rlEntries=a;};this.render=renderRunLogs;this.rlClock=rlClock;this.rlChLabel=rlChLabel;', ctx);
+const iso = (h, m, s) => new Date(2026, 9, 10, h, m, s).toISOString();
+ctx.setEntries([
+  { ts: iso(9, 0, 0), ch: 'chat', text: 'chat req model=glm' },
+  { ts: iso(9, 1, 0), ch: 'task', text: 'checkin uid=abc ok' },
+  { ts: iso(9, 2, 0), ch: 'task', text: 'keepalive uid=abc ok' },
+  { ts: iso(9, 3, 0), ch: 'sys', text: 'server started' },
+]);
+els.rlCh.value = ''; els.rlQ.value = '';
+ctx.render();
+const all = els.rlWrap.innerHTML;
+const allCount = els.rlCount.textContent;
+const newestFirst = all.indexOf('server started') < all.indexOf('chat req model=glm');
+els.rlCh.value = 'task'; ctx.render();
+const task = els.rlWrap.innerHTML;
+const taskCount = els.rlCount.textContent;
+els.rlCh.value = ''; els.rlQ.value = 'uid=abc'; ctx.render();
+const kw = els.rlWrap.innerHTML;
+els.rlQ.value = 'nope'; ctx.render();
+const none = els.rlWrap.innerHTML;
+ctx.setEntries([]); els.rlQ.value = ''; ctx.render();
+const empty = els.rlWrap.innerHTML;
+const emptyCount = els.rlCount.textContent;
+process.stdout.write(JSON.stringify({
+  allHasChat: all.includes('chat req model=glm'),
+  allHasTask: all.includes('checkin uid=abc ok') && all.includes('keepalive uid=abc ok'),
+  allHasSys: all.includes('server started'),
+  allCount, newestFirst,
+  taskHasCheckin: task.includes('checkin uid=abc ok'),
+  taskHasKeepalive: task.includes('keepalive uid=abc ok'),
+  taskHasChat: task.includes('chat req model=glm'),
+  taskHasSys: task.includes('server started'),
+  taskCount,
+  kwHasCheckin: kw.includes('checkin uid=abc ok'),
+  kwHasSys: kw.includes('server started'),
+  noneEmpty: none.includes('没有符合筛选条件的运行日志'),
+  emptyText: empty.includes('暂无运行日志'),
+  emptyCount,
+  clock: ctx.rlClock(iso(9, 2, 3)),
+  clockBad: ctx.rlClock(''),
+  labels: ctx.rlChLabel('task') + '/' + ctx.rlChLabel('chat') + '/' + ctx.rlChLabel('sys') + '/' + ctx.rlChLabel(''),
+}));`
+	f, err := os.CreateTemp(t.TempDir(), "runlog-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("run log formatting node test failed: %v\n%s", err, out)
+	}
+	const want = `{"allHasChat":true,"allHasTask":true,"allHasSys":true,"allCount":"4 / 4 行","newestFirst":true,` +
+		`"taskHasCheckin":true,"taskHasKeepalive":true,"taskHasChat":false,"taskHasSys":false,"taskCount":"2 / 4 行",` +
+		`"kwHasCheckin":true,"kwHasSys":false,"noneEmpty":true,"emptyText":true,"emptyCount":"—",` +
+		`"clock":"09:02:03","clockBad":"--:--:--","labels":"任务/对话/系统/系统"}`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("run log formatting=%s\nwant %s", strings.TrimSpace(string(out)), want)
 	}
 }

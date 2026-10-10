@@ -1,9 +1,6 @@
 package upstream
 
-import (
-	"net/http"
-	"testing"
-)
+import "testing"
 
 // EffectiveEffortOf 读改写完成后出站 body 的实际思考档位：snake 优先、camel 兜底、
 // 显式关闭回 "off"、无档位回空串。它是请求日志「实际思考程度」列的数据源。
@@ -32,19 +29,26 @@ func TestEffectiveEffortOf(t *testing.T) {
 	}
 }
 
-// deepseek 系裸请求经网关注入 thinking.enabled + 模型默认档后，EffectiveReasoningEffort
-// 必须回报注入后的档位（与真正出站 body 同源），否则请求日志会误报「没思考」。
-func TestEffectiveReasoningEffortDeepSeekDefault(t *testing.T) {
-	c := testClient(func(r *http.Request) (*http.Response, error) {
-		return jsonResp(200, `{}`), nil
-	})
+// prepareBody 必须回填与出站 body 同源的思考档位：deepseek 裸请求补默认档、
+// 显式关闭记 off、非推理模型空串。这是请求日志「实际思考程度」列的数据来源。
+func TestPrepareBodyEffortOut(t *testing.T) {
+	c := testClient(nil)
 	// 只声明默认档（无 supportedEfforts）：deepseek 缺档时补模型声明默认档。
 	c.storeEfforts("cn", nil, map[string]string{"deepseek-v4-flash": "medium"})
-	if got := c.EffectiveReasoningEffort("cn", "deepseek-v4-flash", []byte(`{"model":"deepseek-v4-flash","messages":[]}`)); got != "medium" {
-		t.Errorf("deepseek default effort=%q want medium", got)
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{"deepseek 裸请求补默认档", `{"model":"deepseek-v4-flash","messages":[]}`, "medium"},
+		{"deepseek 显式关闭 → off", `{"model":"deepseek-v4-flash","thinking":{"type":"disabled"},"messages":[]}`, "off"},
+		{"非推理模型 → 空", `{"model":"glm-5.2","messages":[]}`, ""},
 	}
-	// 非 deepseek 模型不注入档位 → 空串（未开思考）。
-	if got := c.EffectiveReasoningEffort("cn", "glm-5.2", []byte(`{"model":"glm-5.2","messages":[]}`)); got != "" {
-		t.Errorf("glm effort=%q want empty", got)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, effort := c.prepareBody([]byte(tc.body), "cn", "u1", ""); effort != tc.want {
+				t.Errorf("prepareBody effort=%q want %q (body=%s)", effort, tc.want, tc.body)
+			}
+		})
 	}
 }

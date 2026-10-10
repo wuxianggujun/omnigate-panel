@@ -21,6 +21,7 @@ omnigate.json
 *.tmp
 __pycache__/
 /bin/
+/omni-deploy.tar
 
 # Backups (contains auth tokens)
 backups/

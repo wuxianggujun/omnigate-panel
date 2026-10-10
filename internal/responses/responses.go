@@ -70,41 +70,84 @@ type inputItem struct {
 	Output    json.RawMessage `json:"output"`
 }
 
-// RequestToChat translates a Responses API request body into a
-// chat/completions request body. It returns the converted JSON, whether the
-// request is streaming, and the requested model name.
-func RequestToChat(raw []byte) (chat []byte, stream bool, model string, err error) {
+// ChatRequest is a Responses request translated to a chat/completions request,
+// plus the bookkeeping the caller needs to serve and (optionally) persist it.
+type ChatRequest struct {
+	// Body is the marshalled chat/completions request body.
+	Body []byte
+	// Stream reports whether the client asked for SSE streaming.
+	Stream bool
+	// Model is the requested model, as sent by the client.
+	Model string
+	// Messages is the full chat-format message list sent upstream (system +
+	// any chained history + new input). The caller appends the assistant reply
+	// when persisting the turn for previous_response_id.
+	Messages []map[string]any
+	// PreviousID is the previous_response_id the client chained from ("" if none).
+	PreviousID string
+	// Store reports whether the caller should persist this turn for chaining.
+	Store bool
+	// Metadata is echoed back verbatim in the response ("metadata").
+	Metadata map[string]any
+}
+
+// RequestToChat translates a Responses API request body into a chat/completions
+// request. When store is non-nil and the client passed previous_response_id,
+// the stored conversation (if any) is prepended; a missing/expired history is
+// skipped rather than failing the request (this shim is stateless upstream).
+func RequestToChat(raw []byte, store *Store) (*ChatRequest, error) {
 	var req struct {
-		Model             string          `json:"model"`
-		Input             json.RawMessage `json:"input"`
-		Instructions      string          `json:"instructions"`
-		Stream            bool            `json:"stream"`
-		MaxOutputTokens   *int            `json:"max_output_tokens"`
-		Temperature       *float64        `json:"temperature"`
-		TopP              *float64        `json:"top_p"`
-		ParallelToolCalls *bool           `json:"parallel_tool_calls"`
-		Tools             []tool          `json:"tools"`
-		ToolChoice        json.RawMessage `json:"tool_choice"`
-		Reasoning         *reasoning      `json:"reasoning"`
-		Text              *textFormat     `json:"text"`
+		Model              string          `json:"model"`
+		Input              json.RawMessage `json:"input"`
+		Instructions       json.RawMessage `json:"instructions"`
+		Stream             bool            `json:"stream"`
+		MaxOutputTokens    *int            `json:"max_output_tokens"`
+		Temperature        *float64        `json:"temperature"`
+		TopP               *float64        `json:"top_p"`
+		ParallelToolCalls  *bool           `json:"parallel_tool_calls"`
+		Tools              []tool          `json:"tools"`
+		ToolChoice         json.RawMessage `json:"tool_choice"`
+		Reasoning          *reasoning      `json:"reasoning"`
+		Text               *textFormat     `json:"text"`
+		PreviousResponseID string          `json:"previous_response_id"`
+		Store              *bool           `json:"store"`
+		Metadata           json.RawMessage `json:"metadata"`
+		User               string          `json:"user"`
 	}
 	if err := json.Unmarshal(raw, &req); err != nil {
-		return nil, false, "", fmt.Errorf("invalid JSON body: %w", err)
+		return nil, fmt.Errorf("invalid JSON body: %w", err)
 	}
-	model = req.Model
-	stream = req.Stream
 
-	msgs := make([]map[string]any, 0, 4)
-	if strings.TrimSpace(req.Instructions) != "" {
-		msgs = append(msgs, map[string]any{"role": "system", "content": req.Instructions})
-	}
 	inMsgs, err := inputToMessages(req.Input)
 	if err != nil {
-		return nil, false, "", err
+		return nil, err
+	}
+
+	system := instructionsText(req.Instructions)
+	msgs := make([]map[string]any, 0, len(inMsgs)+4)
+	if strings.TrimSpace(system) != "" {
+		msgs = append(msgs, map[string]any{"role": "system", "content": system})
+	}
+	// Chain onto a stored conversation when previous_response_id is supplied.
+	if req.PreviousResponseID != "" && store != nil {
+		if conv, ok := store.Get(req.PreviousResponseID); ok {
+			hist := conv.Messages
+			// Keep exactly one system message at the front: if this request
+			// carries new instructions, drop the stored one.
+			if system != "" && len(hist) > 0 && hist[0]["role"] == "system" {
+				hist = hist[1:]
+			}
+			msgs = append(msgs, hist...)
+		}
 	}
 	msgs = append(msgs, inMsgs...)
 	if len(msgs) == 0 {
-		return nil, false, "", fmt.Errorf("request has no input")
+		return nil, fmt.Errorf("request has no input")
+	}
+
+	meta := map[string]any{}
+	if len(req.Metadata) > 0 {
+		_ = json.Unmarshal(req.Metadata, &meta)
 	}
 
 	out := map[string]any{
@@ -138,11 +181,59 @@ func RequestToChat(raw []byte) (chat []byte, stream bool, model string, err erro
 	if rf := textToChat(req.Text); rf != nil {
 		out["response_format"] = rf
 	}
-	chat, err = json.Marshal(out)
-	if err != nil {
-		return nil, false, "", err
+	if req.User != "" {
+		out["user"] = req.User
 	}
-	return chat, stream, model, nil
+	body, err := json.Marshal(out)
+	if err != nil {
+		return nil, err
+	}
+
+	return &ChatRequest{
+		Body:       body,
+		Stream:     req.Stream,
+		Model:      req.Model,
+		Messages:   msgs,
+		PreviousID: req.PreviousResponseID,
+		Store:      req.Store == nil || *req.Store, // OpenAI defaults store to true
+		Metadata:   meta,
+	}, nil
+}
+
+// instructionsText flattens instructions, which the Responses API accepts either
+// as a plain string or as an array of {type,text} parts.
+func instructionsText(raw json.RawMessage) string {
+	t := bytes.TrimSpace(raw)
+	if len(t) == 0 || string(t) == "null" {
+		return ""
+	}
+	if t[0] == '"' {
+		var s string
+		if json.Unmarshal(t, &s) == nil {
+			return s
+		}
+		return ""
+	}
+	if t[0] != '[' {
+		return ""
+	}
+	var parts []struct {
+		Text string `json:"text"`
+	}
+	if json.Unmarshal(t, &parts) != nil {
+		return ""
+	}
+	var sb strings.Builder
+	for _, p := range parts {
+		if p.Text == "" {
+			continue
+		}
+		if sb.Len() > 0 {
+			sb.WriteString("\n")
+		}
+		sb.WriteString(p.Text)
+	}
+	return sb.String()
 }
 
 // inputToMessages translates the Responses input (string / array of input
@@ -190,17 +281,19 @@ func inputToMessages(input json.RawMessage) ([]map[string]any, error) {
 				"content":      rawToString(it.Output),
 			})
 		case "reasoning":
-			// No chat equivalent; drop.
+			// No chat equivalent; drop (there is no encrypted_content
+			// round-trip here — reasoning items are not replayed upstream).
 		default:
-			role := it.Role
-			if role == "" {
-				role = "user"
+			// Only role-bearing items are messages; other item types
+			// (item_reference, computer_call_output, …) have no chat mapping.
+			if it.Role == "" {
+				continue
 			}
 			content, err := contentToChat(it.Content)
 			if err != nil {
 				return nil, err
 			}
-			msgs = append(msgs, map[string]any{"role": role, "content": content})
+			msgs = append(msgs, map[string]any{"role": it.Role, "content": content})
 		}
 	}
 	return msgs, nil
@@ -388,8 +481,14 @@ func usageToResponses(u *chatUsage) map[string]any {
 }
 
 // ChatResponseToResponses translates a non-streaming chat response into a
-// Responses response.
-func ChatResponseToResponses(chatResp []byte, fallbackModel string) ([]byte, error) {
+// Responses response. id, when empty, is generated; metadata is echoed back.
+func ChatResponseToResponses(chatResp []byte, fallbackModel, id string, metadata map[string]any) ([]byte, error) {
+	if id == "" {
+		id = RandID("resp_")
+	}
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
 	var cr struct {
 		Created int64  `json:"created"`
 		Model   string `json:"model"`
@@ -471,7 +570,7 @@ func ChatResponseToResponses(chatResp []byte, fallbackModel string) ([]byte, err
 	}
 
 	out := map[string]any{
-		"id":          RandID("resp_"),
+		"id":          id,
 		"object":      "response",
 		"created_at":  created,
 		"status":      status,
@@ -479,6 +578,7 @@ func ChatResponseToResponses(chatResp []byte, fallbackModel string) ([]byte, err
 		"output":      output,
 		"output_text": outputText,
 		"usage":       usageToResponses(cr.Usage),
+		"metadata":    metadata,
 	}
 	if incomplete != nil {
 		out["incomplete_details"] = incomplete
@@ -494,9 +594,11 @@ func ChatResponseToResponses(chatResp []byte, fallbackModel string) ([]byte, err
 // response and rewrites it into the Responses format. Callers run their chat
 // pipeline with a Translator as the writer, then call Finish.
 type Translator struct {
-	inner  http.ResponseWriter
-	stream bool
-	model  string
+	inner    http.ResponseWriter
+	stream   bool
+	model    string
+	id       string
+	metadata map[string]any
 
 	hdr         http.Header
 	status      int
@@ -509,9 +611,55 @@ type Translator struct {
 	lineBuf []byte
 }
 
-// NewTranslator builds a Translator wrapping inner.
-func NewTranslator(inner http.ResponseWriter, stream bool, model string) *Translator {
-	return &Translator{inner: inner, stream: stream, model: model, hdr: http.Header{}}
+// NewTranslator builds a Translator wrapping inner. metadata (may be nil) is
+// echoed back in the response envelope.
+func NewTranslator(inner http.ResponseWriter, stream bool, model string, metadata map[string]any) *Translator {
+	return &Translator{
+		inner:    inner,
+		stream:   stream,
+		model:    model,
+		id:       RandID("resp_"),
+		metadata: metadata,
+		hdr:      http.Header{},
+	}
+}
+
+// ResponseID returns the id assigned to the response being produced.
+func (t *Translator) ResponseID() string { return t.id }
+
+// AssistantMessage returns the assistant reply in chat format (role / content /
+// reasoning_content / tool_calls) so the caller can persist the turn and serve
+// a later previous_response_id. It returns nil when no usable reply was
+// produced (error status, empty body, or a failed stream).
+func (t *Translator) AssistantMessage() map[string]any {
+	if t.status >= 400 {
+		return nil
+	}
+	if t.stream {
+		if t.st == nil || !t.st.finished || t.st.failed {
+			return nil
+		}
+		return t.st.assistantMessage()
+	}
+	var cr struct {
+		Choices []struct {
+			Message map[string]any `json:"message"`
+		} `json:"choices"`
+	}
+	if json.Unmarshal(t.body, &cr) != nil || len(cr.Choices) == 0 {
+		return nil
+	}
+	m := cr.Choices[0].Message
+	if m == nil {
+		return nil
+	}
+	if _, ok := m["content"]; !ok {
+		m["content"] = nil
+	}
+	if m["content"] == nil && m["tool_calls"] == nil && m["reasoning_content"] == nil {
+		return nil
+	}
+	return m
 }
 
 // Header implements http.ResponseWriter.
@@ -603,7 +751,7 @@ func (t *Translator) flushNonStream() {
 		_, _ = t.inner.Write(t.body)
 		return
 	}
-	converted, err := ChatResponseToResponses(t.body, t.model)
+	converted, err := ChatResponseToResponses(t.body, t.model, t.id, t.metadata)
 	if err != nil {
 		// Unparseable: pass the original body through (best effort).
 		t.copyHeadersToInner()
@@ -695,14 +843,16 @@ type toolState struct {
 }
 
 type streamState struct {
-	t       *Translator
-	model   string
-	id      string
-	created int64
-	seq     int
+	t        *Translator
+	model    string
+	id       string
+	created  int64
+	seq      int
+	metadata map[string]any
 
 	started  bool
 	finished bool
+	failed   bool
 
 	outputIndex int
 
@@ -727,11 +877,44 @@ func newStreamState(t *Translator, model string) *streamState {
 	return &streamState{
 		t:            t,
 		model:        model,
-		id:           RandID("resp_"),
+		id:           t.id,
 		created:      time.Now().Unix(),
+		metadata:     t.metadata,
 		toolsByID:    map[string]*toolState{},
 		toolsByIndex: map[int]*toolState{},
 	}
+}
+
+// assistantMessage assembles the streamed reply into a chat-format assistant
+// message, so the caller can persist the turn for previous_response_id.
+func (s *streamState) assistantMessage() map[string]any {
+	msg := map[string]any{"role": "assistant"}
+	if text := s.msgText.String(); text != "" {
+		msg["content"] = text
+	} else {
+		msg["content"] = nil
+	}
+	if s.reasonText.Len() > 0 {
+		msg["reasoning_content"] = s.reasonText.String()
+	}
+	if len(s.toolOrder) > 0 {
+		tcs := make([]map[string]any, 0, len(s.toolOrder))
+		for _, st := range s.toolOrder {
+			tcs = append(tcs, map[string]any{
+				"id":   st.callID,
+				"type": "function",
+				"function": map[string]any{
+					"name":      st.name,
+					"arguments": st.args.String(),
+				},
+			})
+		}
+		msg["tool_calls"] = tcs
+	}
+	if msg["content"] == nil && len(s.toolOrder) == 0 {
+		return nil
+	}
+	return msg
 }
 
 // consume handles one chat SSE frame payload.
@@ -962,6 +1145,7 @@ func (s *streamState) closeTool(st *toolState, output *[]map[string]any) {
 // fail emits response.failed (upstream error frame).
 func (s *streamState) fail(code, msg string) {
 	s.finished = true
+	s.failed = true
 	env := s.envelope("failed", []map[string]any{})
 	env["error"] = map[string]any{"code": code, "message": msg}
 	s.emit("response.failed", map[string]any{"response": env})
@@ -970,6 +1154,10 @@ func (s *streamState) fail(code, msg string) {
 func (s *streamState) envelope(status string, output []map[string]any) map[string]any {
 	if output == nil {
 		output = []map[string]any{}
+	}
+	meta := s.metadata
+	if meta == nil {
+		meta = map[string]any{}
 	}
 	return map[string]any{
 		"id":                  s.id,
@@ -984,7 +1172,7 @@ func (s *streamState) envelope(status string, output []map[string]any) map[strin
 		"tools":               []any{},
 		"error":               nil,
 		"incomplete_details":  nil,
-		"metadata":            map[string]any{},
+		"metadata":            meta,
 	}
 }
 

@@ -1141,7 +1141,8 @@ function renderRequestMetrics(m, entries) {
 
 /* fillReqProviders 用当前已拉取条目里出现过的供应商重建下拉项（含「全部供应商」）。
    只在选项集合变化时重建，避免每次轮询都重设 <select>（会打断正在展开的下拉）。
-   当前选中的供应商若已不在结果里，回落到「全部」以免筛出空表。 */
+   当前选中的供应商即便本批结果里没有也保留为选项：否则「重新读取 / 切时间区间」会把
+   用户的筛选悄悄重置成「全部」，与空表提示（命中 0/N 条）自相矛盾。 */
 function fillReqProviders() {
   const sel = $('reqProvider');
   if (!sel) return;
@@ -1150,6 +1151,7 @@ function fillReqProviders() {
     const p = e && e.provider;
     if (p && set.indexOf(String(p)) < 0) set.push(String(p));
   }
+  if (reqFilter.provider && set.indexOf(reqFilter.provider) < 0) set.push(reqFilter.provider);
   set.sort();
   const sig = set.join('\n');
   if (sel.dataset.sig !== sig) {
@@ -1157,12 +1159,7 @@ function fillReqProviders() {
     sel.innerHTML = '<option value="">全部供应商</option>' +
       set.map(p => '<option value="' + esc(p) + '">' + esc(p) + '</option>').join('');
   }
-  if (reqFilter.provider && set.indexOf(reqFilter.provider) < 0) {
-    reqFilter.provider = '';
-    sel.value = '';
-  } else {
-    sel.value = reqFilter.provider || '';
-  }
+  sel.value = reqFilter.provider || '';
 }
 
 /* reqMatch 请求记录筛选：q 对 IP/UA/模型/账号/供应商/请求 ID 做空格分词的 AND

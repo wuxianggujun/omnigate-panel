@@ -55,3 +55,20 @@ func (p *Panel) saveConfig(w http.ResponseWriter, r *http.Request) {
 		"restart_required": restartRequired,
 	})
 }
+
+// regenerateKey 重新生成网关 api_key（仅管理员）：轮换密钥防泄漏被滥用。
+// RegenerateKey 闭包内部完成「生成 → 落盘 → 热生效（含内置 OmniGate 复用的
+// api_keys）」，并把新 key 明文返回给前端展示一次；此后面板不再回显它。
+func (p *Panel) regenerateKey(w http.ResponseWriter, r *http.Request) {
+	if p.cfg.RegenerateKey == nil {
+		writeErr(w, http.StatusNotImplemented, "regenerate key not available")
+		return
+	}
+	key, err := p.cfg.RegenerateKey()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "regenerate key: "+err.Error())
+		return
+	}
+	log.Printf("panel: 网关 api_key 已重新生成（操作人 %s）", authFromContext(r.Context()).session.Username)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "api_key": key})
+}

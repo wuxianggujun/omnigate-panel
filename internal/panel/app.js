@@ -7,7 +7,7 @@ let authState = { authenticated: false, configured: false, mode: '', username: '
 let theme = localStorage.getItem(LS_THEME) || 'auto';   // auto | light | dark
 let view = 'accounts';
 let overviewData = null, cfgLoaded = null;
-let logPin = true, loginState = null, loginTimer = null;
+let loginState = null, loginTimer = null;
 let refTimer = null;
 /* 视图级筛选状态（模块级声明放在文件顶部，避免顶层 go() 早于声明执行时踩 TDZ）。 */
 let mdFilter = { q: '', realm: '', cap: '', effort: '', promo: '', sort: 'default' };
@@ -29,9 +29,8 @@ let obEditIdx = -1;
 
 const $ = id => document.getElementById(id);
 
-/* 当前身份是否具备写权限：session 模式看 role；旧 api_key 门 / 开放模式视为 admin。 */
+/* 当前身份是否具备写权限：只看登录账号的角色（admin 全权 / viewer 只读）。 */
 function isAdmin() {
-  if (authState.mode === 'legacy' || authState.mode === 'open') return true;
   return authState.role === 'admin';
 }
 
@@ -57,11 +56,11 @@ $('btnTheme').onclick = () => {
 applyTheme();
 
 /* ── 请求 ─────────────────────────────────────────────────────────── */
+/* 面板 API：鉴权只走同源会话 Cookie（SameSite=Strict），不再附带任何 Bearer。
+   网关 api_key 仅用于 /omni/*（见 apiAbs），与面板登录彻底解耦。 */
 async function api(path, opts = {}) {
   const h = Object.assign({}, opts.headers || {});
-  const k = localStorage.getItem(LS_KEY);
-  if (k) h['Authorization'] = 'Bearer ' + k;
-  if (opts.body) h['Content-Type'] = 'application/json';
+  if (opts.body && !(opts.body instanceof FormData)) h['Content-Type'] = 'application/json';
   const r = await fetch('/panel/api/' + path, Object.assign({}, opts, { headers: h }));
   const d = await r.json().catch(() => ({}));
   if (r.status === 401) { showAuthGate(); throw new Error('未登录或会话已过期'); }
@@ -335,27 +334,14 @@ function formatRate(rate) {
   return n.toFixed(1) + 'tok/s';
 }
 
-/* ── 鉴权门（账号登录 / 旧 api_key / 开放）─────────────────────────── */
+/* ── 鉴权门（账号登录 / 未配置账号引导）──────────────────────────────── */
 function showAuthGate() {
-  if (authState.configured) openLogin(); else openKey();
+  if (authState.configured) openLogin(); else openSetup();
 }
-function openKey() { $('keyVeil').classList.add('on'); setTimeout(() => $('keyInput').focus(), 60); }
 function openLogin() { $('loginVeil').classList.add('on'); setTimeout(() => $('loginUser').focus(), 60); }
-function closeGates() { $('keyVeil').classList.remove('on'); $('loginVeil').classList.remove('on'); }
-
-/* 旧 api_key 门（仅未配置面板账号时）：沿用网关密钥进入。 */
-$('btnKey').onclick = async () => {
-  const v = $('keyInput').value.trim();
-  if (!v) return;
-  localStorage.setItem(LS_KEY, v);
-  try {
-    await api('overview');
-    $('keyErr').hidden = true;
-    closeGates();
-    await bootstrapAuth();
-  } catch (e) { $('keyErr').hidden = false; }
-};
-$('keyInput').addEventListener('keydown', e => { if (e.key === 'Enter') $('btnKey').click(); });
+function openSetup() { $('setupVeil').classList.add('on'); }
+function closeGates() { $('loginVeil').classList.remove('on'); $('setupVeil').classList.remove('on'); }
+$('btnSetupReload').onclick = () => location.reload();
 
 /* 账号登录。 */
 async function doLogin() {
@@ -390,21 +376,19 @@ $('btnLogout').onclick = async () => {
 
 /* 应用身份到界面：viewer 隐藏所有 [data-admin] 写操作控件（服务端仍强校验）。 */
 function applyRole() {
-  const mode = authState.mode || '';
-  const role = mode === 'session' ? (authState.role || 'viewer')
-    : (mode === 'legacy' || mode === 'open' ? 'admin' : 'viewer');
+  const role = authState.role || 'viewer';
   document.body.dataset.role = role;
   const w = $('whoami');
   if (w) {
-    const show = mode === 'session' && authState.username && authState.username !== 'api_key';
+    const show = !!(authState.authenticated && authState.username);
     w.hidden = !show;
     if (show) w.textContent = authState.username + ' · ' + role;
   }
   const lo = $('btnLogout');
-  if (lo) lo.hidden = !(mode === 'session');
+  if (lo) lo.hidden = !authState.authenticated;
 }
 
-/* 启动引导：查会话 → 已登录即进入；否则按模式弹登录 / 密钥门。 */
+/* 启动引导：查会话 → 已登录即进入；否则弹登录门 / 未配置引导。 */
 async function bootstrapAuth() {
   let s;
   try { s = await (await fetch('/panel/api/session')).json(); }
@@ -428,7 +412,7 @@ let lastPackagesAt = 0;
 let expFetching = false;                       // 到期卡片在途标记（防重复打上游）
 const EXP_FRESH_MS = 2 * 60 * 1000;            // 缓存新鲜窗口：2 分钟内复用
 
-const TITLES = { accounts: '账号池', usage: '用量', packages: '积分构成', taskscenter: '任务中心', models: '模型与档位', providers: '上游供应商', outbound: '出站代理', config: '配置', logs: '运行日志' };
+const TITLES = { accounts: '账号池', usage: '用量', packages: '积分构成', taskscenter: '任务中心', models: '模型与档位', providers: '上游供应商', outbound: '出站代理', config: '配置', logs: '请求日志' };
 function go(v) {
   view = v;
   document.querySelectorAll('.view').forEach(s => s.hidden = s.id !== 'view-' + v);
@@ -438,7 +422,7 @@ function go(v) {
   if (v === 'providers') loadOmniConfig();
   if (v === 'outbound') loadOutbound();
   if (v === 'config') loadConfig();
-  if (v === 'logs') loadLogs();
+  if (v === 'logs') loadRequestLogs();
   if (v === 'usage') loadUsage();
   if (v === 'packages') loadPackages();
   // 到期提醒卡片不再「打开账号池就自动查」：逐账号实时查上游，账号一多打开面板
@@ -451,7 +435,7 @@ document.querySelectorAll('.nav a').forEach(a => a.onclick = e => {
   e.preventDefault(); go(a.dataset.view); history.replaceState(null, '', '#' + a.dataset.view);
 });
 /* 首次进入延到本轮脚本求值之后再 go()。
-   原因：go() 会同步触发视图的数据加载（loadUsage/loadLogs/loadPackages…），而这些
+   原因：go() 会同步触发视图的数据加载（loadUsage/loadRequestLogs/loadPackages…），而这些
    函数读到的模块级 let/const（usageRateWarmAt、PK_* 等）在文件后半段才初始化——
    直接深链 #usage / #packages 打开页面时会踩 TDZ（"Cannot access 'x' before
    initialization"），表现为该页永远显示"读取失败"，而点导航进去一切正常。
@@ -1098,26 +1082,15 @@ if (rrSearchEl) {
 const btnRr = $('btnRrSave');
 if (btnRr) btnRr.onclick = saveRealmRouting;
 
-/* ── 日志（频道：全部/任务/对话/系统） ─────────────────────────────── */
-let logCh = 'all';
-$('logChips').addEventListener('click', ev => {
-  const b = ev.target.closest('button[data-ch]');
-  if (!b) return;
-  logCh = b.dataset.ch;
-  document.querySelectorAll('#logChips .chip').forEach(c => c.classList.toggle('on', c === b));
-  loadLogs();
-});
-async function loadLogs() {
-  const box = $('logBox');
-  const atEnd = box.scrollTop + box.clientHeight >= box.scrollHeight - 24;
+/* ── 请求日志（时间 / 结果 / 模型 / 域 / 账号 / 来源 / 耗时 / token / 积分）── */
+async function loadRequestLogs() {
   const limit = ($('reqLimit') && $('reqLimit').value) || 100;
   // 时间范围由归档侧过滤（不是前端筛已拉取的条目）：区间落在更早的时间段时，
   // 「最近 N 条」里根本不会有那些记录，必须让服务端按时间取。
   const rq = trangeQuery('reqRange', false);
   rq.set('limit', limit);
   try {
-    const [d, metrics, requestRows] = await Promise.all([
-      api('logs'),
+    const [metrics, requestRows] = await Promise.all([
       api('request_metrics').catch(() => ({})),
       api('request_logs?' + rq.toString()).catch(() => ({ entries: [] })),
     ]);
@@ -1127,21 +1100,6 @@ async function loadLogs() {
     const archiveOn = !!(metrics && metrics.archive && metrics.archive.enabled);
     const recent = archiveOn ? (requestRows.entries || []) : (metrics.recent || []);
     renderRequestMetrics(metrics, recent);
-    const entries = (d.entries || []).filter(e => logCh === 'all' || e.ch === logCh);
-    box.innerHTML = entries.length
-      ? entries.map(e => {
-        const lvl = /error|失败|错误/.test(e.text) ? ' e' : /warn|冷却|熔断/.test(e.text) ? ' w' : '';
-        const t = e.ts ? new Date(e.ts).toLocaleTimeString('zh-CN', { hour12: false }) : '';
-        const ch = logCh === 'all' ? '<i class="lch c-' + esc(e.ch) + '">' + ({ task: '任务', chat: '对话', sys: '系统' }[e.ch] || e.ch) + '</i>' : '';
-        return '<span class="ln' + lvl + '">' + ch + esc(t + ' ' + e.text) + '</span>';
-      }).join('')
-      : '<span style="color:var(--ink-3)">暂无日志</span>';
-    if (logPin && atEnd) box.scrollTop = box.scrollHeight;
-    const counts = {};
-    for (const e of (d.entries || [])) counts[e.ch] = (counts[e.ch] || 0) + 1;
-    $('logNote').textContent = logCh === 'all'
-      ? '任务 ' + (counts.task || 0) + ' · 对话 ' + (counts.chat || 0) + ' · 系统 ' + (counts.sys || 0)
-      : (logCh === 'task' ? '任务' : logCh === 'chat' ? '对话' : '系统') + ' ' + entries.length + ' 行';
   } catch (e) { /* 概览已提示 */ }
 }
 
@@ -1258,11 +1216,11 @@ if ($('reqOutcome')) $('reqOutcome').onchange = () => {
   reqFilter.outcome = $('reqOutcome').value;
   renderRequestTable();
 };
-if ($('reqLimit')) $('reqLimit').onchange = loadLogs;
-if ($('btnReqReload')) $('btnReqReload').onclick = loadLogs;
+if ($('reqLimit')) $('reqLimit').onchange = loadRequestLogs;
+if ($('btnReqReload')) $('btnReqReload').onclick = loadRequestLogs;
 // 时间范围：默认「全部历史」——请求记录页的历史行为就是"取最近 N 条"，
 // 加一个默认收窄的区间会让打开页面时看到的条数凭空变少。
-if ($('reqRange')) trangeBind('reqRange', loadLogs, '0');
+if ($('reqRange')) trangeBind('reqRange', loadRequestLogs, '0');
 
 function requestLogText(e) {
   const when = e && e.time ? new Date(e.time).toLocaleTimeString('zh-CN', { hour12: false }) : '—';
@@ -1304,10 +1262,6 @@ function fmtBytes(bytes) {
   if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
   return (n / 1024 / 1024).toFixed(1) + ' MB';
 }
-$('btnLogPin').onclick = () => {
-  logPin = !logPin;
-  $('btnLogPin').textContent = '自动滚动：' + (logPin ? '开' : '关');
-};
 
 /* ── 配置 ─────────────────────────────────────────────────────────── */
 const CFG_MAP = {
@@ -1362,6 +1316,10 @@ async function loadConfig() {
     const d = await api('config');
     cfgLoaded = d.config;
     $('cfgPath').textContent = d.path || '';
+    // 面板不再用 api_key 登录，但内置 OmniGate 的 /omni/* 仍以它鉴权：
+    // 读取配置时顺手缓存到 localStorage，供 apiAbs 使用（「重新生成」后也会更新）。
+    const cfgKey = dig(cfgLoaded, ['api_key']);
+    if (cfgKey) localStorage.setItem(LS_KEY, cfgKey);
     const f = $('cfgForm');
     for (const [name, path] of Object.entries(CFG_MAP)) {
       const el = f.elements[name];
@@ -1427,6 +1385,25 @@ $('btnEye').onclick = () => {
   el.type = show ? 'text' : 'password';
   $('btnEye').textContent = show ? '隐藏' : '显示';
 };
+/* 重新生成网关 api_key（仅 admin）：轮换防泄漏。服务端生成新 key 并热生效
+   （含内置 OmniGate 的 /omni/*）；前端展示一次并更新本地缓存，提示同步所有客户端。 */
+$('btnRegenKey').onclick = async () => {
+  if (!confirm('重新生成网关 API 密钥？\n\n旧密钥将立即失效：所有使用它的客户端（含 NewAPI 渠道、外部调用方）都必须同步更新为新密钥，否则会收到 401。\n\n确定继续？')) return;
+  const btn = $('btnRegenKey');
+  btn.disabled = true; btn.textContent = '生成中…';
+  try {
+    const r = await api('regenerate_key', { method: 'POST' });
+    const k = r.api_key || '';
+    if (k) {
+      localStorage.setItem(LS_KEY, k);   // 供 /omni/* 立即使用新密钥
+      $('cfgKey').value = k;
+      $('cfgKey').type = 'text';
+      $('btnEye').textContent = '隐藏';
+    }
+    toast('新密钥已生成并生效，请复制并更新所有客户端（含 NewAPI 渠道）', 'ok');
+  } catch (e) { toast('生成失败：' + e.message, 'err'); }
+  finally { btn.disabled = false; btn.textContent = '重新生成'; }
+};
 $('btnCfgReload').onclick = loadConfig;
 $('cfgForm').onsubmit = async ev => {
   ev.preventDefault();
@@ -1445,7 +1422,7 @@ $('cfgForm').onsubmit = async ev => {
     const r = await api('config', { method: 'POST', body: JSON.stringify(collectConfig()) });
     const n = (r.restart_required || []).length;
     toast(n ? '配置已保存，其中 ' + n + ' 项需重启进程生效' : '配置已保存并立即生效', 'ok');
-    // 密钥可能已改：本次会话沿用新值，避免下一次轮询被 401。
+    // 密钥可能已改：更新本地缓存，供内置 OmniGate 的 /omni/* 使用。
     const k = $('cfgKey').value.trim();
     if (k) localStorage.setItem(LS_KEY, k);
     loadConfig();
@@ -1598,11 +1575,8 @@ $('importFile').onchange = async () => {
   $('importDone').hidden = true; $('importErr').hidden = true;
   const fd = new FormData();
   fd.append('file', file);
-  const h = {};
-  const k = localStorage.getItem(LS_KEY);
-  if (k) h['Authorization'] = 'Bearer ' + k;
   try {
-    const r = await fetch('/panel/api/import/cockpit', { method: 'POST', body: fd, headers: h });
+    const r = await fetch('/panel/api/import/cockpit', { method: 'POST', body: fd });
     const d = await r.json();
     if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
     $('importDone').hidden = false;
@@ -1623,11 +1597,8 @@ $('bundleFile').onchange = async () => {
   $('bundleDone').hidden = true; $('bundleErr').hidden = true;
   const fd = new FormData();
   fd.append('file', file);
-  const h = {};
-  const k = localStorage.getItem(LS_KEY);
-  if (k) h['Authorization'] = 'Bearer ' + k;
   try {
-    const r = await fetch('/panel/api/accounts/import', { method: 'POST', body: fd, headers: h });
+    const r = await fetch('/panel/api/accounts/import', { method: 'POST', body: fd });
     const d = await r.json();
     if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
     const wb = d.workbuddy || {}, om = d.omnigate || {};
@@ -1647,10 +1618,7 @@ $('bundleFile').onchange = async () => {
 /* ── 顶部动作 ─────────────────────────────────────────────────────── */
 $('btnExportAccounts').onclick = async () => {
   try {
-    const h = {};
-    const k = localStorage.getItem(LS_KEY);
-    if (k) h['Authorization'] = 'Bearer ' + k;
-    const r = await fetch('/panel/api/accounts/export', { headers: h });
+    const r = await fetch('/panel/api/accounts/export');
     if (!r.ok) { let m = 'HTTP ' + r.status; try { m = (await r.json()).error || m; } catch (e) {} throw new Error(m); }
     const blob = await r.blob();
     const cd = r.headers.get('Content-Disposition') || '';
@@ -1675,13 +1643,13 @@ $('btnRefresh').onclick = async () => {
     toast('余额已从上游刷新', 'ok');
   } catch (e) { toast('刷新失败：' + e.message, 'err'); await loadOverview(true); }
   finally { b.disabled = false; b.textContent = '刷新'; }
-  if (view === 'logs') loadLogs();
+  if (view === 'logs') loadRequestLogs();
 };
 
 /* ── 轮询 ─────────────────────────────────────────────────────────── */
 function refreshVisible() {
   if (view === 'accounts') loadOverview(true);
-  else if (view === 'logs') loadLogs();
+  else if (view === 'logs') loadRequestLogs();
   else if (view === 'taskscenter') reattachQueueView();
 }
 function start() {
@@ -3349,10 +3317,26 @@ if ($('btnPk')) $('btnPk').onclick = () => loadPackages(true);
    事件委托，无内联事件处理器。
    ═══════════════════════════════════════════════════════════════════════ */
 
-// apiAbs 绝对路径请求：/omni/* 不在 /panel/api/ 前缀下。
+// apiAbs 绝对路径请求：/omni/* 不在 /panel/api/ 前缀下，且仍用网关 api_key
+//（Bearer）鉴权——面板登录已与 api_key 解耦，故这里按需从 /panel/api/config
+// 取一次 api_key 并缓存到 localStorage（admin/viewer 均可读配置）。
+let omniKeyFetched = false;
+async function ensureOmniKey() {
+  const cached = localStorage.getItem(LS_KEY);
+  if (cached) return cached;
+  if (!omniKeyFetched) {
+    try {
+      const d = await api('config');
+      const k = d && d.config && d.config.api_key;
+      if (k) { localStorage.setItem(LS_KEY, k); omniKeyFetched = true; return k; }
+    } catch (e) { /* 读取失败：留待下次重试 */ }
+  }
+  return '';
+}
+
 async function apiAbs(path, opts = {}) {
   const h = Object.assign({}, opts.headers || {});
-  const k = localStorage.getItem(LS_KEY);
+  const k = await ensureOmniKey();
   if (k) h['Authorization'] = 'Bearer ' + k;
   if (opts.body) h['Content-Type'] = 'application/json';
   const r = await fetch(path, Object.assign({}, opts, { headers: h }));
@@ -3738,11 +3722,8 @@ async function importOmniAccountsFile(file) {
   if (!file) return;
   const fd = new FormData();
   fd.append('file', file);
-  const headers = {};
-  const key = localStorage.getItem(LS_KEY);
-  if (key) headers['Authorization'] = 'Bearer ' + key;
   try {
-    const r = await fetch('/panel/api/accounts/import', { method: 'POST', body: fd, headers });
+    const r = await fetch('/panel/api/accounts/import', { method: 'POST', body: fd });
     const d = await r.json();
     if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
     const wb = d.workbuddy || {}, om = d.omnigate || {};

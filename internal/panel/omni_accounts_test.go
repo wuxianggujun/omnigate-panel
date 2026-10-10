@@ -12,8 +12,8 @@ import (
 func TestOmniAccountsEndpoint(t *testing.T) {
 	calls := 0
 	var gotBalance bool
-	p := New(Config{
-		Version: "test", APIKey: "k",
+	p, tok := mustPanel(t, Config{
+		Version: "test",
 		OmniAccounts: func(withBalance bool) (any, error) {
 			calls++
 			gotBalance = withBalance
@@ -25,7 +25,7 @@ func TestOmniAccountsEndpoint(t *testing.T) {
 		},
 	})
 	req := httptest.NewRequest("GET", "/panel/api/omni/accounts?balance=1", nil)
-	req.Header.Set("Authorization", "Bearer k")
+	req.Header.Set("Authorization", "Bearer "+tok)
 	rec := httptest.NewRecorder()
 	p.ServeHTTP(rec, req)
 	if rec.Code != 200 {
@@ -63,9 +63,9 @@ func TestOmniAccountsEndpoint(t *testing.T) {
 
 // OmniGate 未启用（闭包为 nil）→ 501。
 func TestOmniAccountsNotEnabled(t *testing.T) {
-	p := New(Config{Version: "test", APIKey: "k"})
+	p, tok := mustPanel(t, Config{Version: "test"})
 	req := httptest.NewRequest("GET", "/panel/api/omni/accounts", nil)
-	req.Header.Set("Authorization", "Bearer k")
+	req.Header.Set("Authorization", "Bearer "+tok)
 	rec := httptest.NewRecorder()
 	p.ServeHTTP(rec, req)
 	if rec.Code != 501 {
@@ -76,8 +76,8 @@ func TestOmniAccountsNotEnabled(t *testing.T) {
 // 单账号签到 / 移除：转发 provider+label；缺字段返回 400。
 func TestOmniAccountCheckinRemove(t *testing.T) {
 	var gotProv, gotLabel string
-	p := New(Config{
-		Version: "test", APIKey: "k",
+	p, tok := mustPanel(t, Config{
+		Version: "test",
 		OmniCheckin: func(prov, label string) (any, error) {
 			gotProv, gotLabel = prov, label
 			return map[string]any{"ok": true}, nil
@@ -90,7 +90,7 @@ func TestOmniAccountCheckinRemove(t *testing.T) {
 	post := func(path, body string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest("POST", path, strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Authorization", "Bearer k")
+		req.Header.Set("Authorization", "Bearer "+tok)
 		rec := httptest.NewRecorder()
 		p.ServeHTTP(rec, req)
 		return rec

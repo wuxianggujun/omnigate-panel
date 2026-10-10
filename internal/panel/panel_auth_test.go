@@ -87,6 +87,19 @@ func login(t *testing.T, p *Panel, user, pass string) *http.Cookie {
 	return nil
 }
 
+// mustPanel 构造面板并注入一个 admin 账号、登录取得会话令牌，返回面板与令牌
+// （令牌可直接放进 Authorization 头，自动化友好）。端点测试用它替代旧 api_key
+// Bearer——面板鉴权已与 api_key 彻底解耦，api_key 不再能过鉴权层。
+func mustPanel(t *testing.T, cfg Config) (*Panel, string) {
+	t.Helper()
+	cfg.PanelAuth = panelauth.New(
+		[]panelauth.User{pwUser(t, "tester", panelauth.RoleAdmin, "pw123456")},
+		time.Hour, 5, time.Minute)
+	p := New(cfg)
+	ck := login(t, p, "tester", "pw123456")
+	return p, ck.Value
+}
+
 func TestPanelAuthSessionLoginLogout(t *testing.T) {
 	users := []panelauth.User{pwUser(t, "admin", panelauth.RoleAdmin, "pw123456")}
 	p, _ := newAuthPanel(t, users, "test-key")
@@ -138,14 +151,54 @@ func TestPanelAuthAPIKeyRejectedWhenUsersConfigured(t *testing.T) {
 	}
 }
 
-// 未配置面板账号时，api_key 门仍作为过渡可用（不会把管理员锁在外面）。
-func TestPanelAuthLegacyFallbackWithoutUsers(t *testing.T) {
+// 未配置任何面板账号时，网关 api_key 不再能打开面板（已与 api_key 彻底解耦）：
+// 一律 401，须先用 `-set-admin-password` 引导账号。
+func TestPanelAuthNoLegacyFallbackWithoutUsers(t *testing.T) {
 	p, _ := newAuthPanel(t, nil, "test-key")
-	if rec := do(p, "GET", "/panel/api/config", "", nil, map[string]string{"Authorization": "Bearer test-key"}); rec.Code != http.StatusNotImplemented {
-		t.Fatalf("legacy api_key = %d want 501 (auth passed)", rec.Code)
+	if rec := do(p, "GET", "/panel/api/config", "", nil, map[string]string{"Authorization": "Bearer test-key"}); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("api_key without users = %d want 401", rec.Code)
 	}
 	if rec := do(p, "GET", "/panel/api/config", "", nil, nil); rec.Code != http.StatusUnauthorized {
-		t.Fatalf("legacy anon = %d want 401", rec.Code)
+		t.Fatalf("anon without users = %d want 401", rec.Code)
+	}
+	// 未配置账号时登录端点也拒绝（无账号可登）。
+	if rec := do(p, "POST", "/panel/api/session", `{"username":"admin","password":"x"}`, nil, nil); rec.Code != http.StatusBadRequest {
+		t.Fatalf("login without users = %d want 400", rec.Code)
+	}
+}
+
+// 重新生成网关 api_key：仅管理员可用；未注入闭包时 501。
+func TestPanelAuthRegenerateKey(t *testing.T) {
+	users := []panelauth.User{
+		pwUser(t, "admin", panelauth.RoleAdmin, "pw123456"),
+		pwUser(t, "guest", panelauth.RoleViewer, "pw123456"),
+	}
+	called := 0
+	p := New(Config{
+		Version: "test", APIKey: "old", PanelAuth: panelauth.New(users, time.Hour, 5, time.Minute),
+		RegenerateKey: func() (string, error) { called++; return "sk-new-key", nil },
+	})
+	admin := login(t, p, "admin", "pw123456")
+	viewer := login(t, p, "guest", "pw123456")
+
+	// viewer 403（admin 中间件）。
+	if rec := do(p, "POST", "/panel/api/regenerate_key", "", viewer, nil); rec.Code != http.StatusForbidden {
+		t.Fatalf("viewer regenerate = %d want 403", rec.Code)
+	}
+	// admin 200 + 返回新 key。
+	rec := do(p, "POST", "/panel/api/regenerate_key", "", admin, nil)
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "sk-new-key") {
+		t.Fatalf("admin regenerate = %d %s", rec.Code, rec.Body.String())
+	}
+	if called != 1 {
+		t.Fatalf("RegenerateKey calls=%d want 1", called)
+	}
+
+	// 未注入闭包 → 501。
+	p2, _ := newAuthPanel(t, users, "old")
+	admin2 := login(t, p2, "admin", "pw123456")
+	if rec := do(p2, "POST", "/panel/api/regenerate_key", "", admin2, nil); rec.Code != http.StatusNotImplemented {
+		t.Fatalf("regenerate without closure = %d want 501", rec.Code)
 	}
 }
 

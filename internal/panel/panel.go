@@ -1,11 +1,12 @@
 // Package panel 内嵌式 Web 管理面板：账号池总览、单号运维（解冻/禁用/签到/
 // 刷新余额/移除）、浏览器内 OAuth 添加账号（免重启热加载进池）、手动批量
-// 签到/保活，以及运行日志环形缓冲（镜像 log 包与 chat 表格日志）。
+// 签到/保活，以及请求记录（含实际调度域）与运行日志环形缓冲（后端保留）。
 //
 // 设计约束：
 //   - 前端 go:embed 单文件（index.html），无任何外部构建依赖，与二进制同体部署；
-//   - 鉴权复用网关 api_key（Bearer），与 /v1/* 同一口径；api_key 为空 = 不鉴权
-//     （仅本机/私网使用）。面板 HTML 本身无秘密，可匿名加载，密钥只发给 /panel/api/*；
+//   - 鉴权与网关 api_key 完全解耦：面板只认账号密码登录（会话 Cookie），见
+//     panel_auth.go；api_key 仅用于网关 /v1/* 与内置 OmniGate 的 /omni/*，不再能
+//     打开面板。面板 HTML 本身无秘密，可匿名加载；
 //   - 不改写既有池语义：所有运维操作落到 pool 已有入口（Revive/Disable/Remove...），
 //     添加账号走 auth.SaveAtomic + pool.Add，重启后与 auths/ 目录天然对齐。
 package panel
@@ -89,13 +90,19 @@ type Config struct {
 	SaveRealmRouting func(raw []byte) (restartRequired []string, err error)
 
 	// PanelAuth 面板登录鉴权运行时（独立于网关 api_key）：账号密码校验、服务端
-	// 会话、失败限流。nil 时面板退回旧 api_key 门（未配置账号时的过渡行为）。
+	// 会话、失败限流。nil 时面板所有 /panel/api/* 一律 401（未注入 store 视为未
+	// 配置，绝不放行 api_key）。
 	// LoadPanelAuth/SavePanelAuth 读写 config.json 的 panel_auth 段（账号管理页用）；
 	// SavePanelAuth 完成「校验 → 落盘 → 热重建同一 *panelauth.Store」。任一为 nil
-	// 时账号管理接口返回 501（但仍可用旧 api_key 门进入面板）。
+	// 时账号管理接口返回 501。
 	PanelAuth     *panelauth.Store
 	LoadPanelAuth func() (PanelAuthSection, error)
 	SavePanelAuth func(section PanelAuthSection) (restartRequired []string, err error)
+
+	// RegenerateKey 重新生成网关 api_key（管理员操作）：由 main 注入，完成
+	//「生成新 key → 合并落盘 → 热生效（含内置 OmniGate 复用的 api_keys）」，返回新 key。
+	// nil 时 regenerate_key 端点返回 501。
+	RegenerateKey func() (string, error)
 
 	// ExportOmniAccounts / ImportOmniAccounts OmniGate 供应商账号（state.json 的
 	// dyn_accounts 段）的导入导出（账号迁移用）。Export 返回
@@ -214,6 +221,8 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("POST /panel/api/admin/users", p.admin(p.savePanelUser))
 	p.mux.HandleFunc("POST /panel/api/admin/users/password", p.admin(p.resetPanelUserPassword))
 	p.mux.HandleFunc("POST /panel/api/admin/users/delete", p.admin(p.deletePanelUser))
+	// 重新生成网关 api_key（仅管理员）：轮换密钥防泄漏被滥用。
+	p.mux.HandleFunc("POST /panel/api/regenerate_key", p.admin(p.regenerateKey))
 
 	// 只读接口（admin/viewer 均可）。
 	p.mux.HandleFunc("GET /panel/api/omni/config", p.auth(p.getOmniConfig))
@@ -276,7 +285,7 @@ func (p *Panel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // withAuth 已改造为账号会话鉴权：见 panel_auth.go 的 auth（任意登录用户）与
-// admin（管理员）中间件。旧 api_key 门仅在未配置面板账号时兜底（resolveAuth）。
+// admin（管理员）中间件。网关 api_key 不再参与面板鉴权。
 
 // apiKey 当前生效密钥（Live 优先，回落静态字段）。
 func (p *Panel) apiKey() string {
@@ -342,7 +351,7 @@ func (p *Panel) requestMetrics(w http.ResponseWriter, r *http.Request) {
 
 // requestLogs 从 JSONL 归档读取最近请求；limit 默认 200、最大 1000。
 // 支持按 outcome/account/model/client_ip/user_agent 过滤（字符串字段为包含匹配）
-// 与 from/to 时间区间（闭区间，unix 秒或 RFC3339）——面板「运行日志」的筛选框、
+// 与 from/to 时间区间（闭区间，unix 秒或 RFC3339）——面板「请求日志」的筛选框、
 // 来源查询与「今天 / 自定义区间」都走这里。
 func (p *Panel) requestLogs(w http.ResponseWriter, r *http.Request) {
 	if p.cfg.RequestLog == nil {

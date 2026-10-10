@@ -62,14 +62,6 @@ body {
 .nav a svg { width: 15px; height: 15px; flex: none; opacity: .85; }
 .nav .sig { padding: 12px 16px; border-top: 1px solid var(--line-soft); font-size: 11.5px; color: var(--ink-3); }
 .nav .sig .row { display: flex; align-items: center; gap: 7px; }
-/* 日志频道筛选 chips */
-.chips { display: inline-flex; gap: 4px; align-items: center; }
-.chips .chip { padding: 2px 10px; border-radius: 999px; }
-.chips .chip.on { background: var(--accent-soft); color: var(--accent); border-color: transparent; font-weight: 550; }
-.ln .lch { font-style: normal; display: inline-block; font-size: 10px; line-height: 1; padding: 2px 6px; border-radius: 4px; margin-right: 8px; vertical-align: 1px; }
-.ln .lch.c-task { background: var(--accent-soft); color: var(--accent); }
-.ln .lch.c-chat { background: var(--ok-soft); color: var(--ok); }
-.ln .lch.c-sys { background: var(--surface-2); color: var(--ink-3); }
 
 /* 任务中心 */
 .tc-empty { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 42px 16px; color: var(--ink-3); }
@@ -300,14 +292,7 @@ label.fld > .hint { display: block; font-size: 11.5px; color: var(--ink-3); marg
 .empty { padding: 40px 20px; text-align: center; color: var(--ink-3); }
 .empty .big { font-size: 14px; color: var(--ink-2); margin-bottom: 6px; }
 
-/* ── 日志（终端质感）────────────────────────────────────────────── */
-#logBox {
-  max-height: 420px; overflow: auto; margin: 0; padding: 15px 17px;
-  font: 12px/1.75 var(--mono); white-space: pre-wrap; word-break: break-all; color: var(--ink-2);
-}
-#logBox .ln { display: block; }
-#logBox .ln.e { color: var(--bad); }
-#logBox .ln.w { color: var(--warn); }
+/* ── 请求日志 ─────────────────────────────────────────────────────── */
 #view-logs .box > header { flex-wrap: wrap; }
 #reqSummary, #reqNote { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #reqSummary { flex: 1 1 320px; }
@@ -519,7 +504,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
     margin-top: 6px; background: var(--surface-2); }
   .pk-card .expirybar i { display: block; height: 100%; min-width: 2px; }
 
-  /* ── 筛选栏（模型档位 / 运行日志 / 用量共用）─────────────────────────
+  /* ── 筛选栏（模型档位 / 请求日志 / 用量共用）─────────────────────────
      面板控件默认 input/select 是 width:100%（配置表单要整行），筛选栏里必须显式
      收回宽度，否则第一个控件会把整行撑满、后面的控件被挤到下一行。 */
   .fbar {
@@ -569,11 +554,11 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
   .vtabs .cnt { color: var(--ink-3); font-weight: 400; margin-left: 4px; font-variant-numeric: tabular-nums; }
   .vtabs button.on .cnt { color: var(--ink-2); }
 
-  /* ── 请求记录表（运行日志）────────────────────────────────────────── */
+  /* ── 请求记录表（请求日志）────────────────────────────────────────── */
   .acc.req { min-width: 1080px; }
   .acc.req th, .acc.req td { padding: 8px 10px; }
   .acc.req tbody tr { cursor: default; }
-  /* 请求记录最多可读 1000 条，不限高会把下面的「运行日志」推到很远的地方。
+  /* 请求记录最多可读 1000 条，不限高会把页面拉得很长。
      限高 + 表头吸顶：滚动区域内始终能看到列名。 */
   .req-wrap { max-height: 460px; overflow: auto; }
   .req-wrap thead th { position: sticky; top: 0; background: var(--surface); z-index: 1; }
@@ -642,5 +627,5 @@ body[data-role="viewer"] [data-admin] { display: none !important; }
   white-space: nowrap;
 }
 #loginVeil .fld { margin: 0; }
-#loginVeil input, #keyVeil input { width: 100%; box-sizing: border-box; }
+#loginVeil input { width: 100%; box-sizing: border-box; }
 #paccTable td, #paccTable th { white-space: nowrap; }

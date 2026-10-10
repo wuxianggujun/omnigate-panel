@@ -40,7 +40,7 @@
         配置</a></li>
       <li><a href="#logs" data-view="logs">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.5 3.5h11M2.5 8h11M2.5 12.5h7"/></svg>
-        运行日志</a></li>
+        请求日志</a></li>
     </ul>
     <div class="sig">
       <div class="row"><span class="pulse" id="navPulse"></span><span id="navState">连接中</span></div>
@@ -364,8 +364,9 @@
                 <span class="hint">改动需重启进程</span></label>
               <label class="fld"><span class="lb">API 密钥</span>
                 <div class="inline"><input name="api_key" id="cfgKey" type="password" placeholder="留空 = 不鉴权">
-                <button type="button" class="xs" id="btnEye">显示</button></div>
-                <span class="hint">立即生效（含面板自身）</span></label>
+                <button type="button" class="xs" id="btnEye">显示</button>
+                <button type="button" class="xs" id="btnRegenKey" data-admin>重新生成</button></div>
+                <span class="hint">网关 <code>/v1/*</code> 与内置 OmniGate <code>/omni/*</code> 的访问密钥（面板登录不再使用它）。保存或重新生成后立即生效。</span></label>
             </div>
             <label class="fld"><span class="lb">单账号明细默认展示条数</span>
               <input name="package_detail_limit" type="number" min="1" placeholder="5">
@@ -533,7 +534,7 @@
           <div class="pad">
             <div class="switch"><span class="lb">记录调用来源（客户端 IP / User-Agent）</span>
               <input type="checkbox" name="request_client_info"></div>
-            <div class="hint">开启后，「运行日志」页的请求记录会显示每次调用来自哪个 IP、用什么客户端；
+            <div class="hint">开启后，「请求日志」页的请求记录会显示每次调用来自哪个 IP、用什么客户端；
               关闭则归档与面板都不再出现来源信息。改动即时生效，无需重启。</div>
             <div class="hint" style="margin-top:8px">归档开关、保留天数与容量上限（<code>logging.request_archive_*</code>）需手工编辑配置文件。</div>
           </div>
@@ -548,8 +549,8 @@
           </header>
           <div class="pad">
             <div class="hint">面板登录与网关 <code>api_key</code> 相互独立：这里管理谁能登录面板、各自角色。
-              <b>admin</b> 全权；<b>viewer</b> 只读（可看账号池 / 用量 / 日志，不能改配置、不能运维账号）。
-              密码只写不读（仅存 PBKDF2 哈希）。配置了任意账号后，<code>api_key</code> 将不再能打开面板。</div>
+              <b>admin</b> 全权；<b>viewer</b> 只读（可看账号池 / 用量 / 请求日志，不能改配置、不能运维账号）。
+              密码只写不读（仅存 PBKDF2 哈希）。面板登录与 <code>api_key</code> 完全解耦：<code>api_key</code> 不能打开面板。</div>
             <div class="tbl-wrap" style="margin-top:10px">
               <table class="acc" id="paccTable">
                 <thead><tr><th>账号</th><th>角色</th><th class="c-acts">操作</th></tr></thead>
@@ -594,7 +595,7 @@
       </form>
     </section>
 
-    <!-- 日志 -->
+    <!-- 请求日志 -->
     <section class="view" id="view-logs" hidden>
       <div class="box">
         <header>
@@ -632,22 +633,6 @@
             <tbody id="reqBody"></tbody>
           </table>
         </div>
-      </div>
-
-      <div class="box">
-        <header>
-          <h3>运行日志</h3>
-          <span class="grow"></span>
-          <span class="chips" id="logChips">
-            <button class="xs chip on" data-ch="all">全部</button>
-            <button class="xs chip" data-ch="task">任务</button>
-            <button class="xs chip" data-ch="chat">对话</button>
-            <button class="xs chip" data-ch="sys">系统</button>
-          </span>
-          <span class="note" id="logNote">最近 500 行</span>
-          <button class="xs" id="btnLogPin">自动滚动：开</button>
-        </header>
-        <pre id="logBox"></pre>
       </div>
     </section>
 
@@ -910,21 +895,18 @@
   </div>
 </div>
 
-<!-- 密钥（未配置面板账号时的过渡门：直接复用网关 api_key） -->
-<div class="veil" id="keyVeil" data-lock="1">
-  <div class="dlg" style="width:440px">
+<!-- 未配置登录账号（panel_auth.users 为空）：面板无法登录，须命令行引导。 -->
+<div class="veil" id="setupVeil" data-lock="1">
+  <div class="dlg" style="width:460px">
     <header>
-      <h3>需要访问密钥</h3>
-      <div class="hint">尚未配置面板账号（<code>panel_auth.users</code>），当前沿用网关 api_key 进入。
-        建议在服务器执行 <code>omnigate-panel -set-admin-password</code> 启用独立登录；配置后 api_key 不再能打开面板。</div>
+      <h3>面板尚未配置登录账号</h3>
+      <div class="hint">面板登录已与网关 api_key 解耦，需要先在服务器执行
+        <code>omnigate-panel -set-admin-password</code> 创建一个面板账号，然后刷新本页登录。
+        （配置账号后，<code>api_key</code> 不能打开面板。）</div>
     </header>
-    <div class="body">
-      <input type="password" id="keyInput" placeholder="api_key" autocomplete="off">
-      <div class="state err" id="keyErr" hidden style="margin-top:10px">密钥不正确，请重试。</div>
-    </div>
     <footer>
       <span class="grow"></span>
-      <button class="primary" id="btnKey">进入</button>
+      <button class="primary" id="btnSetupReload">我已配置，刷新</button>
     </footer>
   </div>
 </div>

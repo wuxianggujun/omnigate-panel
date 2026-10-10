@@ -116,6 +116,41 @@ func (m *omniManager) proxyFor(providerName string) *url.URL {
 	return m.outbound.For(outbound.OmniTarget(providerName))
 }
 
+// SetAPIKey 更新 OmniGate 复用的网关 api_key 并热重载（面板「重新生成」密钥后
+// 调用，使 /omni/* 与网关 api_key 保持同一把）。未启用时仅记住新值，供后续
+// build 回填。返回错误不致命——调用方记日志，重启后自然对齐。
+func (m *omniManager) SetAPIKey(key string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.apiKey = key
+	if m.st == nil {
+		return nil
+	}
+	rt := m.cur.Load()
+	if rt == nil {
+		return nil
+	}
+	// 深拷贝当前配置并清空 api_keys：build 会用新的 m.apiKey 回填（见 build）。
+	raw, err := json.Marshal(rt.cfg)
+	if err != nil {
+		return err
+	}
+	var cfg omniconfig.Config
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return err
+	}
+	cfg.APIKeys = nil
+	newRT, err := m.build(&cfg)
+	if err != nil {
+		return err
+	}
+	if old := m.cur.Swap(newRT); old != nil {
+		old.sched.Stop()
+	}
+	log.Printf("[omnigate] api_key 已随面板密钥轮换热重载")
+	return nil
+}
+
 // SetOutbound 更新出站代理路由并热重载当前运行时（供应商代理即时生效）。
 func (m *omniManager) SetOutbound(o outbound.Config) error {
 	m.mu.Lock()

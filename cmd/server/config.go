@@ -18,9 +18,8 @@ import (
 )
 
 // PanelAuthConfig config.json 的 panel_auth 段：面板账号（用户名 + 密码哈希 +
-// 角色）与会话/限流参数。与网关 api_key 完全独立——配了 users 后，面板只认这里
-// 的账号（api_key 不能再打开面板）；users 为空时退回旧的 api_key 门（未配置态的
-// 过渡行为，避免把自己锁在外面）。
+// 角色）与会话/限流参数。与网关 api_key 完全独立——面板只认这里的账号；users
+// 为空时面板不可登录（须用 `-set-admin-password` 引导）。
 type PanelAuthConfig struct {
 	// SessionHours 会话有效期（小时），缺省 72；每次请求滑动续期。
 	SessionHours int `json:"session_hours"`
@@ -28,7 +27,7 @@ type PanelAuthConfig struct {
 	MaxFailures int `json:"max_failures"`
 	// LockMinutes 锁定时长（分钟），缺省 15。
 	LockMinutes int `json:"lock_minutes"`
-	// Users 账号列表（含 PBKDF2 密码哈希）。空 = 未配置（退回 api_key 门）。
+	// Users 账号列表（含 PBKDF2 密码哈希）。空 = 未配置（面板不可登录，需命令行引导）。
 	Users []panelauth.User `json:"users"`
 }
 
@@ -188,7 +187,7 @@ type Config struct {
 	} `json:"realm_routing"`
 
 	// PanelAuth 面板登录鉴权（config.json 的 panel_auth 段）。与网关 api_key
-	// 完全独立：配置了 users 后面板只认密码登录，api_key 不再能打开面板。
+	// 完全独立：面板只认密码登录；users 为空时面板不可登录（需命令行引导）。
 	PanelAuth PanelAuthConfig `json:"panel_auth"`
 
 	Upstream struct {
@@ -345,7 +344,7 @@ func Default() *Config {
 	// 首选域无号时跨域回退到 global。Prefer 缺省空（全部按 Order）。
 	c.RealmRouting.Order = []string{"cn", "global"}
 	// PanelAuth 缺省参数：会话 72h、连续失败 5 次锁 15 分钟；users 缺省空
-	//（未配置态 → 退回 api_key 门，避免升级后把管理员锁在面板外）。
+	//（未配置态 → 面板不可登录，须用 `-set-admin-password` 引导账号）。
 	c.PanelAuth.SessionHours = 72
 	c.PanelAuth.MaxFailures = 5
 	c.PanelAuth.LockMinutes = 15
@@ -417,16 +416,25 @@ func ParseConfig(raw []byte) (*Config, error) {
 	return ParseConfigInto(raw, Default())
 }
 
+// GenerateAPIKey 生成一把网关 api_key：`sk-` + 18 字节 crypto/rand 的 base64url。
+// 与 WriteDefault 首次生成同格式；面板「重新生成」复用同一口径。
+func GenerateAPIKey() (string, error) {
+	raw := make([]byte, 18)
+	if _, err := rand.Read(raw); err != nil {
+		return "", fmt.Errorf("gen api_key: %w", err)
+	}
+	return "sk-" + base64.RawURLEncoding.EncodeToString(raw), nil
+}
+
 // WriteDefault 在 path 落一份推荐配置（首次运行自动生成，双击即开免手工复制样例）。
 // 值取自 Default()（含超时/熔断/签到排程等推荐值），api_key 用 crypto/rand 随机生成：
 // 安全默认优于示例占位符（listen 绑定 0.0.0.0，空 key 会把网关裸暴露给局域网）。
 // 返回生成的 key 供启动日志透出。已存在时经 O_EXCL 原子拒绝，绝不改写用户配置。
 func WriteDefault(path string) (string, error) {
-	raw := make([]byte, 18)
-	if _, err := rand.Read(raw); err != nil {
-		return "", fmt.Errorf("gen api_key: %w", err)
+	key, err := GenerateAPIKey()
+	if err != nil {
+		return "", err
 	}
-	key := "sk-" + base64.RawURLEncoding.EncodeToString(raw)
 	c := Default()
 	c.APIKey = key
 	_ = c.normalize() // Default() 全合法，normalize 仅补齐 header/idle 超时的展示值
@@ -565,7 +573,7 @@ func (c *Config) normalizeRealmRouting() error {
 
 // normalizePanelAuth 校验面板鉴权配置：会话/限流参数回落缺省；账号集合经
 // panelauth.ValidateUsers（用户名唯一/角色合法/至少一个管理员）。空集合合法
-// （未配置态，退回 api_key 门）。
+// （未配置态：面板不可登录，需命令行引导）。
 func (c *Config) normalizePanelAuth() error {
 	if c.PanelAuth.SessionHours <= 0 {
 		c.PanelAuth.SessionHours = 72

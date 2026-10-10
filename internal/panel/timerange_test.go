@@ -51,12 +51,12 @@ func TestUsageHandlerAcceptsExplicitRange(t *testing.T) {
 		rec.Add(base.Add(time.Duration(i)*time.Hour), "cn", "u1", "glm-5.2",
 			usage.Delta{PromptTokens: 10, HasPromptTokens: true}, true)
 	}
-	p := New(Config{Version: "test", APIKey: "k", Usage: rec, Pool: pool.New("")})
+	p, tok := mustPanel(t, Config{Version: "test", Usage: rec, Pool: pool.New("")})
 
 	get := func(query string) map[string]any {
 		t.Helper()
 		req := httptest.NewRequest("GET", "/panel/api/usage"+query, nil)
-		req.Header.Set("Authorization", "Bearer k")
+		req.Header.Set("Authorization", "Bearer "+tok)
 		rr := httptest.NewRecorder()
 		p.ServeHTTP(rr, req)
 		if rr.Code != 200 {
@@ -105,10 +105,10 @@ func TestRequestLogsEmptyRangeReturnsArray(t *testing.T) {
 		Status: 200, OK: true, Outcome: reqlog.OutcomeSuccess})
 	rec.Close()
 
-	p := New(Config{Version: "test", APIKey: "k", Pool: pool.New(""), RequestLog: rec})
+	p, tok := mustPanel(t, Config{Version: "test", Pool: pool.New(""), RequestLog: rec})
 	future := strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10)
 	req := httptest.NewRequest("GET", "/panel/api/request_logs?from="+future, nil)
-	req.Header.Set("Authorization", "Bearer k")
+	req.Header.Set("Authorization", "Bearer "+tok)
 	rr := httptest.NewRecorder()
 	p.ServeHTTP(rr, req)
 	if rr.Code != 200 {

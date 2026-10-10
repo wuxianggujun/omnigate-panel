@@ -21,8 +21,8 @@ import (
 	"github.com/wuxianggujun/omnigate-panel/internal/auth"
 	"github.com/wuxianggujun/omnigate-panel/internal/livecfg"
 	"github.com/wuxianggujun/omnigate-panel/internal/outbound"
-	"github.com/wuxianggujun/omnigate-panel/internal/panelauth"
 	"github.com/wuxianggujun/omnigate-panel/internal/panel"
+	"github.com/wuxianggujun/omnigate-panel/internal/panelauth"
 	"github.com/wuxianggujun/omnigate-panel/internal/pool"
 	"github.com/wuxianggujun/omnigate-panel/internal/redisstore"
 	"github.com/wuxianggujun/omnigate-panel/internal/reqlog"
@@ -410,6 +410,28 @@ func main() {
 					c.PanelAuth.MaxFail(), c.PanelAuth.LockDuration())
 			}
 			return nil, nil
+		},
+		// 重新生成网关 api_key（管理员）：轮换防泄漏被滥用。生成新 key → 合并落盘
+		// → 热生效（live 快照 + 内置 OmniGate 复用的 api_keys）。返回新 key 供前端
+		// 展示一次；之后 /panel/api/config 仍会回显（管理员可见）。
+		RegenerateKey: func() (string, error) {
+			key, err := GenerateAPIKey()
+			if err != nil {
+				return "", err
+			}
+			wrapped, err := json.Marshal(map[string]any{"api_key": key})
+			if err != nil {
+				return "", err
+			}
+			if _, err := saveConfig(wrapped, *cfgPath, live, p, up, sch); err != nil {
+				return "", err
+			}
+			if omni.Enabled() {
+				if err := omni.SetAPIKey(key); err != nil {
+					log.Printf("WARN: [omnigate] 轮换 api_key 后热重载失败（/omni/* 将在重启后生效）: %v", err)
+				}
+			}
+			return key, nil
 		},
 	}
 	if omni.Enabled() {

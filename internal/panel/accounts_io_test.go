@@ -48,8 +48,8 @@ func TestExportAccounts(t *testing.T) {
 	writeAuthFile(t, filepath.Join(dir, "workbuddy-1001.json"), wbAuth)
 
 	omniCalls := 0
-	p := New(Config{
-		Version: "test", APIKey: "k", Pool: pool.New(""), AuthDir: dir,
+	p, tok := mustPanel(t, Config{
+		Version: "test", Pool: pool.New(""), AuthDir: dir,
 		ExportOmniAccounts: func() (json.RawMessage, error) {
 			omniCalls++
 			return json.RawMessage(`{"raccoon":[{"label":"a1"}]}`), nil
@@ -58,7 +58,7 @@ func TestExportAccounts(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/panel/api/accounts/export", nil)
-	req.Header.Set("Authorization", "Bearer k")
+	req.Header.Set("Authorization", "Bearer "+tok)
 	p.ServeHTTP(rec, req)
 	if rec.Code != 200 {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
@@ -93,8 +93,8 @@ func TestExportAccounts(t *testing.T) {
 func TestImportAccountsMultipart(t *testing.T) {
 	dir := t.TempDir()
 	var gotOmni json.RawMessage
-	p := New(Config{
-		Version: "test", APIKey: "k", Pool: pool.New(""), AuthDir: dir,
+	p, tok := mustPanel(t, Config{
+		Version: "test", Pool: pool.New(""), AuthDir: dir,
 		ImportOmniAccounts: func(raw json.RawMessage) (int, int, error) {
 			gotOmni = raw
 			return 1, 0, nil
@@ -105,7 +105,7 @@ func TestImportAccountsMultipart(t *testing.T) {
 	body, ct := multipartBody(t, "file", "bundle.json", bundle)
 	req := httptest.NewRequest("POST", "/panel/api/accounts/import", body)
 	req.Header.Set("Content-Type", ct)
-	req.Header.Set("Authorization", "Bearer k")
+	req.Header.Set("Authorization", "Bearer "+tok)
 	rec := httptest.NewRecorder()
 	p.ServeHTTP(rec, req)
 	if rec.Code != 200 {
@@ -145,12 +145,12 @@ func TestImportAccountsMultipart(t *testing.T) {
 // 导入（裸 JSON body）：顶层为数组时仅导入 WorkBuddy，且无 omnigate 闭包也不报错。
 func TestImportAccountsBareArray(t *testing.T) {
 	dir := t.TempDir()
-	p := New(Config{Version: "test", APIKey: "k", Pool: pool.New(""), AuthDir: dir})
+	p, tok := mustPanel(t, Config{Version: "test", Pool: pool.New(""), AuthDir: dir})
 
 	body := "[" + wbAuth + "]"
 	req := httptest.NewRequest("POST", "/panel/api/accounts/import", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer k")
+	req.Header.Set("Authorization", "Bearer "+tok)
 	rec := httptest.NewRecorder()
 	p.ServeHTTP(rec, req)
 	if rec.Code != 200 {

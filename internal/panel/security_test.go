@@ -8,7 +8,8 @@ import (
 )
 
 func newTestPanel() *Panel {
-	// 启用鉴权：未带 key 的请求一律 401，不进入依赖 Pool/Upstream 的 handler。
+	// 未注入面板鉴权 store（= 未配置账号）：所有 /panel/api/* 一律 401，
+	// 不进入依赖 Pool/Upstream 的 handler。
 	return New(Config{Version: "test", APIKey: "test-key"})
 }
 
@@ -204,20 +205,20 @@ func TestValidUID(t *testing.T) {
 	}
 }
 
-// 未带密钥的 API 请求必须 401；携带正确密钥则通过鉴权层（不再是 401）。
+// 未登录的 API 请求一律 401；网关 api_key 已不能打开面板（与面板鉴权彻底解耦）。
 func TestAuthLayerBehavior(t *testing.T) {
 	p := newTestPanel()
 	rec := httptest.NewRecorder()
 	p.ServeHTTP(rec, httptest.NewRequest("GET", "/panel/api/overview", nil))
 	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("no key: code=%d want 401", rec.Code)
+		t.Fatalf("no session: code=%d want 401", rec.Code)
 	}
-	// 用不存在的路由验证"带正确 key 已过鉴权"（避免触碰依赖 nil 的 handler）。
+	// 网关 api_key（哪怕就是本进程的 api_key）不再放行面板接口。
 	rec2 := httptest.NewRecorder()
-	req2 := httptest.NewRequest("GET", "/panel/api/nonexistent", nil)
+	req2 := httptest.NewRequest("GET", "/panel/api/overview", nil)
 	req2.Header.Set("Authorization", "Bearer test-key")
 	p.ServeHTTP(rec2, req2)
-	if rec2.Code == http.StatusUnauthorized {
-		t.Error("valid key must pass the auth layer")
+	if rec2.Code != http.StatusUnauthorized {
+		t.Fatalf("api_key must not open panel: code=%d want 401", rec2.Code)
 	}
 }

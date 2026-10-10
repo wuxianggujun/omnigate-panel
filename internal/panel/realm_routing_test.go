@@ -10,9 +10,9 @@ import (
 
 // 未注入闭包（非 main 装配路径）时，realm_routing 接口返回 501 而非 panic。
 func TestRealmRoutingEndpointNotAvailable(t *testing.T) {
-	p := New(Config{Version: "test", APIKey: "k"})
+	p, tok := mustPanel(t, Config{Version: "test"})
 	req := httptest.NewRequest("GET", "/panel/api/realm_routing", nil)
-	req.Header.Set("Authorization", "Bearer k")
+	req.Header.Set("Authorization", "Bearer "+tok)
 	rec := httptest.NewRecorder()
 	p.ServeHTTP(rec, req)
 	if rec.Code != http.StatusNotImplemented {
@@ -23,8 +23,8 @@ func TestRealmRoutingEndpointNotAvailable(t *testing.T) {
 // GET 透传注入的配置；POST 原样把 body 交给 SaveRealmRouting 闭包。
 func TestRealmRoutingRoundTrip(t *testing.T) {
 	var saved []byte
-	p := New(Config{
-		Version: "test", APIKey: "k",
+	p, tok := mustPanel(t, Config{
+		Version: "test",
 		LoadRealmRouting: func() (any, error) {
 			return map[string]any{
 				"order":  []string{"global", "cn"},
@@ -38,7 +38,7 @@ func TestRealmRoutingRoundTrip(t *testing.T) {
 	})
 
 	req := httptest.NewRequest("GET", "/panel/api/realm_routing", nil)
-	req.Header.Set("Authorization", "Bearer k")
+	req.Header.Set("Authorization", "Bearer "+tok)
 	rec := httptest.NewRecorder()
 	p.ServeHTTP(rec, req)
 	if rec.Code != 200 {
@@ -58,7 +58,7 @@ func TestRealmRoutingRoundTrip(t *testing.T) {
 
 	body := strings.NewReader(`{"order":["cn","global"],"prefer":{"glm-*":"cn"}}`)
 	req = httptest.NewRequest("POST", "/panel/api/realm_routing", body)
-	req.Header.Set("Authorization", "Bearer k")
+	req.Header.Set("Authorization", "Bearer "+tok)
 	req.Header.Set("Content-Type", "application/json")
 	rec = httptest.NewRecorder()
 	p.ServeHTTP(rec, req)

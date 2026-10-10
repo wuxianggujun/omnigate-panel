@@ -1,14 +1,13 @@
 // panel_auth.go 面板登录鉴权：与网关 api_key 完全独立的账号密码登录、服务端会话
 // Cookie、角色（admin/viewer）、登录失败限流与 CSRF 防护。
 //
-// 认证优先级（resolveAuth）：
-//  1. 会话 Cookie（浏览器）或 Authorization: Bearer <会话令牌>（自动化）；
-//  2. 未配置任何面板账号时，退回旧 api_key 门（未配置态的过渡行为，避免升级后
-//     把管理员锁在面板外）。一旦配置了账号，api_key 不再能打开面板。
-//  3. api_key 也为空 → 放行（与既有"空 = 不鉴权"语义一致）。
+// 认证（resolveAuth）：唯一入口是面板会话——浏览器用会话 Cookie，自动化用
+// Authorization: Bearer <会话令牌>。面板**不再**接受网关 api_key（哪怕一个面板
+// 账号都没配置）：未配置账号时所有 /panel/api/* 一律 401，须先在服务器执行
+// `omnigate-panel -set-admin-password` 引导一个账号后才能进入面板。
 //
 // CSRF：会话 Cookie 走 SameSite=Strict + 非安全方法校验 Origin/Sec-Fetch-Site
-// 同源；Bearer（旧 api_key 或会话令牌）不受 CSRF 影响（浏览器不会自动带上）。
+// 同源；Bearer（会话令牌）不受 CSRF 影响（浏览器不会自动带上）。
 package panel
 
 import (
@@ -22,7 +21,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/wuxianggujun/omnigate-panel/internal/httpauth"
 	"github.com/wuxianggujun/omnigate-panel/internal/panelauth"
 )
 
@@ -37,14 +35,10 @@ type PanelAuthSection struct {
 	Users        []panelauth.User `json:"users"`
 }
 
-// authMode 认证来源。
+// authMode 认证来源。面板只有一种：登录会话（Cookie 或 Bearer 令牌）。
 type authMode string
 
-const (
-	modeSession authMode = "session" // 登录会话（Cookie 或 Bearer 令牌）
-	modeLegacy  authMode = "legacy"  // 未配置账号时的 api_key 门
-	modeOpen    authMode = "open"    // 未配置账号且 api_key 为空
-)
+const modeSession authMode = "session"
 
 type authResult struct {
 	session panelauth.Session
@@ -63,30 +57,15 @@ func authFromContext(ctx context.Context) authResult {
 	return authResult{}
 }
 
-// resolveAuth 解析请求身份（Cookie 会话 → Bearer 令牌 → 旧 api_key 门）。
+// resolveAuth 解析请求身份：只认面板会话（Cookie 或 Bearer 令牌）。未注入 store
+// 或令牌无效时返回未认证（上层 401）——网关 api_key 不再能打开面板。
 func (p *Panel) resolveAuth(r *http.Request) authResult {
-	if p.cfg.PanelAuth != nil {
-		if tok := sessionToken(r); tok != "" {
-			if s, ok := p.cfg.PanelAuth.Authenticate(tok); ok {
-				return authResult{session: s, mode: modeSession, ok: true}
-			}
-		}
-		// 已配置账号：不再接受 api_key。
-		if p.cfg.PanelAuth.HasUsers() {
-			return authResult{}
-		}
+	if p.cfg.PanelAuth == nil {
+		return authResult{}
 	}
-	// 未配置账号（或未注入 store）：退回旧 api_key 门（api_key 为空时恒放行）。
-	key := p.apiKey()
-	if httpauth.VerifyBearer(r, key) {
-		mode := modeLegacy
-		if key == "" {
-			mode = modeOpen
-		}
-		return authResult{
-			session: panelauth.Session{Username: "api_key", Role: panelauth.RoleAdmin},
-			mode:    mode,
-			ok:      true,
+	if tok := sessionToken(r); tok != "" {
+		if s, ok := p.cfg.PanelAuth.Authenticate(tok); ok {
+			return authResult{session: s, mode: modeSession, ok: true}
 		}
 	}
 	return authResult{}
@@ -195,7 +174,7 @@ func (p *Panel) logout(w http.ResponseWriter, r *http.Request) {
 func (p *Panel) changeOwnPassword(w http.ResponseWriter, r *http.Request) {
 	ar := authFromContext(r.Context())
 	if ar.mode != modeSession {
-		// 旧门（api_key）没有"账号密码"概念，引导改用命令行/账号管理。
+		// 非会话身份（面板只有会话一种身份，此分支为防御）：改密只对登录账号开放。
 		writeErr(w, http.StatusBadRequest, "no_panel_account")
 		return
 	}

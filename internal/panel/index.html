@@ -811,7 +811,7 @@
     <div class="body">
       <label class="fld" style="margin-bottom:14px"><span class="lb">来源</span>
         <select id="addSource"></select>
-        <span class="hint">WorkBuddy 走浏览器登录；OmniGate 供应商按类型给出对应流程（raccoon=网页授权 / runable=账号密码 / openai 无需账号）。</span>
+        <span class="hint">WorkBuddy 走浏览器登录；OmniGate 供应商按类型给出对应流程（raccoon=浏览器登录 / runable=账号密码 / openai 无需账号）。</span>
       </label>
 
       <!-- WorkBuddy：浏览器登录 -->
@@ -850,7 +850,7 @@
         <div id="bundleErr" class="state err" hidden></div>
       </div>
 
-      <!-- OmniGate · raccoon：网页授权 -->
+      <!-- OmniGate · raccoon：浏览器登录（一键打开登录页 + 自动捕获，手动粘贴收进备选） -->
       <div id="addTabOgAuth" class="tab-panel" hidden>
         <div class="og-fields">
           <label>账号名（可改）<input id="authLabel" placeholder="账号名"></label>
@@ -859,16 +859,26 @@
           <button class="primary" id="btnStartOgAuth">生成授权链接并打开登录页</button>
           <span class="tag mute" id="authMode"></span>
         </div>
-        <div class="og-hint">登录后浏览器会跳到 <code>office-raccoon://auth/callback?code=...&amp;state=...</code>（不会真的打开桌面应用）；把整段地址，或只把 <code>code</code> 粘到下面提交即可。可重复添加多个账号。</div>
-        <div class="og-row" style="margin-top:6px">
-          <input id="callback" style="flex:1;min-width:280px" placeholder="office-raccoon://auth/callback?code=...&state=...">
-          <button class="primary" id="btnSubmitCb">提交回调</button>
+        <div id="ogAuthLoad" class="state" hidden style="margin-top:12px"><span class="dots">正在生成授权链接</span></div>
+        <div id="ogAuthReady" hidden>
+          <div class="state" style="margin-top:12px">在浏览器打开以下链接并登录：</div>
+          <div class="url" id="ogAuthUrl"></div>
+          <div class="state" id="ogAuthPoll"><span class="dots">等待授权完成，自动检测中</span></div>
         </div>
-        <div class="og-row" style="margin-top:6px">
-          <input id="authUrl" readonly style="flex:1;min-width:280px" placeholder="授权链接（生成后自动打开）">
-          <button id="btnCopyAuth">复制链接</button>
-          <button id="btnOpenAuth">重新打开</button>
-        </div>
+        <div id="ogAuthDone" class="state ok" hidden style="margin-top:12px"></div>
+        <details class="og-adv">
+          <summary>手动粘贴回调（备选）</summary>
+          <div class="og-hint">若浏览器没有自动跳回：登录后把地址栏里的整段 <code>office-raccoon://auth/callback?code=...&amp;state=...</code>（或只把 <code>code</code>）粘到下面提交即可。可重复添加多个账号。</div>
+          <div class="og-row" style="margin-top:6px">
+            <input id="callback" style="flex:1;min-width:280px" placeholder="office-raccoon://auth/callback?code=...&state=...">
+            <button class="primary" id="btnSubmitCb">提交回调</button>
+          </div>
+          <div class="og-row" style="margin-top:6px">
+            <input id="authUrl" readonly style="flex:1;min-width:280px" placeholder="授权链接（生成后自动打开）">
+            <button id="btnCopyAuth">复制链接</button>
+            <button id="btnOpenAuth">重新打开</button>
+          </div>
+        </details>
         <div class="og-msg" id="authMsg"></div>
       </div>
 

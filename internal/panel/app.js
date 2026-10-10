@@ -579,10 +579,11 @@ function ogRowHtml(p, a) {
   if (berr) balHtml = '<span class="tag warn" title="' + esc(berr) + '">查询失败</span>';
   else if (avail != null) balHtml = '<span class="num">' + esc(avail) + '</span>';
   else balHtml = '<span style="color:var(--ink-3)">—</span>';
-  const acts = p.type === 'raccoon'
-    ? '<button class="xs ghost" data-src="omni" data-a="ogcheckin" data-prov="' + esc(p.name) + '" data-label="' + esc(label) + '">签到</button>' +
-      '<button class="xs ghost danger" data-src="omni" data-a="ogremove" data-type="raccoon" data-prov="' + esc(p.name) + '" data-label="' + esc(label) + '">移除</button>'
-    : '<button class="xs ghost danger" data-src="omni" data-a="ogremove" data-type="' + esc(p.type || '') + '" data-prov="' + esc(p.name) + '" data-label="' + esc(label) + '">移除</button>';
+  const acts = '<button class="xs ghost" data-src="omni" data-a="ogbalance" data-prov="' + esc(p.name) + '" data-label="' + esc(label) + '" title="从上游刷新该账号积分（余额）">积分</button>' +
+    (p.type === 'raccoon'
+      ? '<button class="xs ghost" data-src="omni" data-a="ogcheckin" data-prov="' + esc(p.name) + '" data-label="' + esc(label) + '">签到</button>'
+      : '') +
+    '<button class="xs ghost danger" data-src="omni" data-a="ogremove" data-type="' + esc(p.type || '') + '" data-prov="' + esc(p.name) + '" data-label="' + esc(label) + '">移除</button>';
   return '<tr title="' + esc(p.name + ' / ' + label) + '">' +
     '<td class="mark" aria-hidden="true"><i></i></td>' +
     '<td><span class="tag mute">' + esc(p.name) + '</span><div class="id">' + esc(p.type || '') + '</div></td>' +
@@ -664,6 +665,7 @@ async function loadOverview(quiet) {
     syncAccSourceOptions(omniList);
     renderAccounts(d.accounts || [], omniList);
     renderModelLocks(d.model_locks);
+    maybeRefreshOmniBalances();
   } catch (e) { if (!quiet) toast(e.message, 'err'); }
 }
 
@@ -706,6 +708,12 @@ $('accBody').addEventListener('click', async ev => {
         const r = await api('omni/account/checkin', { method: 'POST', body: JSON.stringify({ provider: prov, label }) });
         const results = (r && r.results) || [];
         toast(results.map(x => x.label + '：' + (x.error ? ('失败 ' + x.error) : ((x.success ? '成功 ' : '未成功 ') + (x.msg || '')))).join('；') || '签到完成', 'ok');
+        await refreshOmniBalances(true);
+      } else if (a === 'ogbalance') {
+        await refreshOmniBalances(true);
+        const bi = omniBalInfo[ogBalKey(prov, label)] || {};
+        toast(bi.balance_error ? ('积分刷新失败：' + bi.balance_error)
+          : ('积分已刷新：' + (bi.available != null ? bi.available : '—')), bi.balance_error ? 'err' : 'ok');
       } else if (a === 'ogremove') {
         if (b.dataset.type && b.dataset.type !== 'raccoon') {
           // runable / openai 等账号是 omnigate.json 静态配置，须改配置后热生效。
@@ -1576,7 +1584,7 @@ function addSourceType(name) {
 function addTabsForSource(src) {
   if (src === '__wb') return [['login', '浏览器登录'], ['import', '导入 cockpit'], ['bundle', '导入账号包']];
   const t = addSourceType(src);
-  if (t === 'raccoon') return [['ogauth', '网页授权'], ['ogtoken', '粘贴 Token']];
+  if (t === 'raccoon') return [['ogauth', '浏览器登录'], ['ogtoken', '粘贴 Token']];
   if (t === 'runable') return [['ogcreds', '账号密码']];
   return [['ognone', '说明']];
 }
@@ -1628,10 +1636,20 @@ function switchAddTab(tab) {
   $('btnCopyUrl').hidden = !(wbLogin && !!loginState);
   $('btnOpenUrl').hidden = !(wbLogin && !!loginState);
   // 预填 OmniGate 账号名
-  if (tab === 'ogauth' && $('authLabel')) $('authLabel').value = ogNextLabel();
+  if (tab === 'ogauth' && $('authLabel')) { $('authLabel').value = ogNextLabel(); resetOgAuthPanel(); }
   if (tab === 'ogtoken' && $('tokLabel')) $('tokLabel').value = ogNextLabel();
   if (tab === 'ogcreds' && $('ogAcctLabel')) $('ogAcctLabel').value = ogNextLabel();
   ogMsg('authMsg', ''); ogMsg('tokenMsg', ''); ogMsg('ogCredsMsg', '');
+}
+
+// resetOgAuthPanel 把 raccoon 浏览器登录面板复位到「未开始」态（切页 / 关闭时调用）。
+function resetOgAuthPanel() {
+  stopAutoPoll();
+  if ($('ogAuthLoad')) $('ogAuthLoad').hidden = true;
+  if ($('ogAuthReady')) $('ogAuthReady').hidden = true;
+  if ($('ogAuthDone')) $('ogAuthDone').hidden = true;
+  if ($('authMode')) $('authMode').textContent = '';
+  if ($('btnStartOgAuth')) $('btnStartOgAuth').disabled = false;
 }
 function startAddLogin() {
   const realm = (document.querySelector('input[name="addRealm"]:checked') || {}).value || 'cn';
@@ -1671,7 +1689,7 @@ async function pollLogin() {
     $('addErr').textContent = e.message + '（关闭后重新添加）';
   }
 }
-function closeAdd() { stopPoll(); loginState = null; $('addVeil').classList.remove('on'); }
+function closeAdd() { stopPoll(); stopAutoPoll(); loginState = null; $('addVeil').classList.remove('on'); }
 $('btnCloseAdd').onclick = closeAdd;
 $('btnStartLogin').onclick = startAddLogin;
 $('btnOpenUrl').onclick = () => open($('addUrl').textContent, '_blank');
@@ -1746,7 +1764,7 @@ $('btnRefresh').onclick = async () => {
   b.disabled = true; b.textContent = '刷新中…';
   try {
     await api('balance_all', { method: 'POST' });
-    await refreshOmniBalances();
+    await refreshOmniBalances(true);
     await loadOverview(true);
     toast('余额已从上游刷新', 'ok');
   } catch (e) { toast('刷新失败：' + e.message, 'err'); await loadOverview(true); }
@@ -3466,9 +3484,14 @@ function ogMsg(id, text, cls) {
   el.className = 'og-msg' + (cls ? ' ' + cls : '');
 }
 
-// refreshOmniBalances 显式刷新 OmniGate 账号余额（?balance=1），缓存到 omniBalInfo，
+// refreshOmniBalances 拉取 OmniGate 账号余额（?balance=1）并缓存到 omniBalInfo，
 // 供统一账号池的行渲染（默认列表不带余额，避免每次概览轮询都打上游）。
-async function refreshOmniBalances() {
+// force=false 时按 60s 节流；返回本次是否真的拉了上游（false=被节流跳过）。
+let omniBalAt = 0;
+async function refreshOmniBalances(force) {
+  const now = Date.now();
+  if (!force && now - omniBalAt < 60000) return false;
+  omniBalAt = now;
   try {
     const d = await api('omni/accounts?balance=1');
     const data = (d && d.data) || {};
@@ -3479,6 +3502,14 @@ async function refreshOmniBalances() {
     }));
     omniBalInfo = next;
   } catch (e) { /* OmniGate 未启用或无余额能力 */ }
+  return true;
+}
+
+// maybeRefreshOmniBalances 在账号池视图内自动补一次余额（60s 节流），让 raccoon /
+// runable 的「积分」列默认就有值，而不是一直显示「—」。
+async function maybeRefreshOmniBalances() {
+  if (view !== 'accounts') return;
+  if (await refreshOmniBalances(false)) renderAccountRows();
 }
 
 /* ── 供应商配置（增删改 + 进程内热生效） ── */
@@ -3640,24 +3671,34 @@ async function authorizeOmni() {
   $('callback').value = '';
   $('authUrl').value = '';
   $('authMode').textContent = '';
+  $('ogAuthReady').hidden = true;
+  $('ogAuthDone').hidden = true;
+  $('btnStartOgAuth').disabled = true;
+  ogMsg('authMsg', '');
+  $('ogAuthLoad').hidden = false;
   const redirectBase = location.origin + '/omni/admin/raccoon/redirect';
-  ogMsg('authMsg', '正在生成授权链接…');
   try {
     const data = await apiAbs('/omni/admin/raccoon/authorize?provider=' + encodeURIComponent(provName())
       + '&label=' + encodeURIComponent($('authLabel').value)
       + '&redirect_base=' + encodeURIComponent(redirectBase));
     const url = data.authorize_url || data.url || data.auth_url || '';
     $('authUrl').value = url;
+    $('ogAuthUrl').textContent = url;
+    $('ogAuthLoad').hidden = true;
+    $('ogAuthReady').hidden = false;
     if (data.mode === 'auto') {
       $('authMode').textContent = '自动捕获';
-      ogMsg('authMsg', '已打开登录页；登录并完成验证后会自动添加账号，本窗口将自动关闭。若未自动完成，可把回调地址粘到下面提交。', 'ok');
+      $('ogAuthPoll').hidden = false;
       startAutoPoll($('authLabel').value);
     } else {
       $('authMode').textContent = '手动粘贴';
-      ogMsg('authMsg', '已生成授权链接，正在打开浏览器；登录后把回调地址粘到下面提交。', 'ok');
+      $('ogAuthPoll').hidden = true;
+      ogMsg('authMsg', '已生成授权链接；登录后请展开下方「手动粘贴回调（备选）」提交。', 'ok');
     }
     if (url) window.open(url, '_blank', 'noopener');
   } catch (e) {
+    $('ogAuthLoad').hidden = true;
+    $('btnStartOgAuth').disabled = false;
     ogMsg('authMsg', '生成授权链接失败：' + e.message, 'err');
   }
 }
@@ -3667,15 +3708,23 @@ function startAutoPoll(label) {
   let tries = 0;
   autoPollTimer = setInterval(async () => {
     tries++;
-    if (tries > 100) { stopAutoPoll(); ogMsg('authMsg', '等待超时，可手动粘贴回调，或重新发起。', 'err'); return; }
+    if (tries > 100) {
+      stopAutoPoll();
+      $('ogAuthPoll').hidden = true;
+      ogMsg('authMsg', '等待超时：可展开下方「手动粘贴回调（备选）」提交，或重新发起。', 'err');
+      return;
+    }
     try {
       const data = await apiAbs('/omni/admin/raccoon/accounts?provider=' + encodeURIComponent(provName()));
       const list = (data && data.accounts) || [];
       if (list.length > before || list.some(a => a.label === label)) {
         stopAutoPoll();
-        ogMsg('authMsg', '授权成功：' + label, 'ok');
+        $('ogAuthReady').hidden = true;
+        $('ogAuthDone').hidden = false;
+        $('ogAuthDone').textContent = '授权成功：' + label + '，账号已载入池中';
+        $('btnStartOgAuth').disabled = false;
         await loadOverview(true);
-        setTimeout(closeAdd, 900);
+        setTimeout(closeAdd, 1600);
       }
     } catch (e) { /* 继续轮询 */ }
   }, 3000);
@@ -3705,10 +3754,14 @@ async function submitOmniCallback() {
     });
     const acc = (data && data.account) || {};
     stopAutoPoll();
-    ogMsg('authMsg', '授权成功：' + (acc.name || acc.label || '账号已添加'), 'ok');
+    $('ogAuthLoad').hidden = true;
+    $('ogAuthReady').hidden = true;
+    $('ogAuthDone').hidden = false;
+    $('ogAuthDone').textContent = '授权成功：' + (acc.name || acc.label || '账号已添加') + '，账号已载入池中';
     $('callback').value = '';
+    $('btnStartOgAuth').disabled = false;
     await loadOverview(true);
-    setTimeout(closeAdd, 900);
+    setTimeout(closeAdd, 1600);
   } catch (e) {
     ogMsg('authMsg', '回调失败：' + e.message, 'err');
   }

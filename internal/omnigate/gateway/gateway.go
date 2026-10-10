@@ -631,6 +631,50 @@ func (g *Gateway) RunRunableCheckin(providerName string) {
 	}
 }
 
+// RunableAccounts lists a Runable provider's accounts with a best-effort credit
+// balance (available = 每日额度 + 每月额度). The panel account pool asks for this
+// on demand (withBalance); the plain listing stays a cheap in-memory view so the
+// 5s overview poll never hits the upstream. Accounts without a usable cookie are
+// returned without a balance rather than failing the whole listing.
+func (g *Gateway) RunableAccounts(ctx context.Context, providerName string) ([]map[string]any, error) {
+	pcfg := g.cfg.Provider(providerName)
+	if pcfg == nil || pcfg.Type != "runable" {
+		return nil, fmt.Errorf("provider %q 不是 runable 类型", providerName)
+	}
+	rp, ok := g.providers[providerName].(*runable.Provider)
+	if !ok {
+		return nil, fmt.Errorf("provider %q 不是 runable 类型", providerName)
+	}
+	out := []map[string]any{}
+	for _, acc := range g.Accounts(providerName) {
+		item := map[string]any{"label": acc.Label, "has_token": acc.Cookie != ""}
+		cookie := acc.Cookie
+		if cookie == "" && acc.Email != "" && acc.Password != "" {
+			if c, err := rp.Client().SignIn(ctx, acc.Email, acc.Password); err == nil {
+				cookie = c
+				acc.Cookie = c
+				g.st.SetCookie(providerName, acc.Label, c)
+			}
+		}
+		if cookie != "" {
+			bctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+			cr := rp.Client().FetchCredits(bctx, cookie)
+			cancel()
+			if cr.OK {
+				item["available"] = cr.Total
+				item["wallets"] = []map[string]any{
+					{"type": "monthly_credits", "displayName": "每月额度", "balance": cr.Monthly},
+					{"type": "daily_credits", "displayName": "每日额度", "balance": cr.Daily},
+				}
+			} else if cr.Error != "" {
+				item["balance_error"] = cr.Error
+			}
+		}
+		out = append(out, item)
+	}
+	return out, nil
+}
+
 // LastCheckin returns when a named check-in task last ran.
 func (g *Gateway) LastCheckin(name string) time.Time { return g.st.LastCheckinAt(name) }
 

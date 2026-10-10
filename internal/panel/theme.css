@@ -642,6 +642,12 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
 .og-msg.err { color: var(--bad); }
 .og-hint { font-size: 12px; color: var(--ink-3); margin-top: 6px; }
 .og-hint code, .og-code { font-family: var(--mono); font-size: 12px; background: var(--surface-2); border: 1px solid var(--line-soft); padding: 1px 5px; border-radius: 5px; }
+/* .og-adv 备选流程折叠（raccoon 浏览器登录的手动回调兜底），默认收起不抢注意力。 */
+.og-adv { margin-top: 12px; border-top: 1px dashed var(--line-soft); padding-top: 10px; }
+.og-adv > summary { cursor: pointer; font-size: 12px; color: var(--ink-3); list-style: none; user-select: none; }
+.og-adv > summary::-webkit-details-marker { display: none; }
+.og-adv > summary::before { content: "▸ "; }
+.og-adv[open] > summary::before { content: "▾ "; }
 .og-pre { white-space: pre-wrap; word-break: break-all; background: var(--surface-2); border: 1px solid var(--line-soft); border-radius: 8px; padding: 10px; font-family: var(--mono); font-size: 12px; color: var(--ink-2); margin-top: 8px; }
 
 /* ── 面板鉴权（登录 / 角色）────────────────────────────────────────────

@@ -360,7 +360,8 @@ func (m *omniManager) Accounts(ctx context.Context, withBalance bool) (any, erro
 			}
 		}
 		pa := omniProviderAccounts{Name: name, Type: typ, Accounts: []map[string]any{}}
-		if typ == "raccoon" && withBalance {
+		switch {
+		case withBalance && typ == "raccoon":
 			rows, err := rt.gw.RaccoonAccounts(ctx, name)
 			if err != nil {
 				return nil, err
@@ -369,7 +370,18 @@ func (m *omniManager) Accounts(ctx context.Context, withBalance bool) (any, erro
 				enrichOmniAccount(r, meta)
 			}
 			pa.Accounts = rows
-		} else {
+		case withBalance && typ == "runable":
+			// runable 是积分（credits）制：withBalance 时实时查上游余额，
+			// 与 raccoon 对齐——账号池的「积分」列由此填充。
+			rows, err := rt.gw.RunableAccounts(ctx, name)
+			if err != nil {
+				return nil, err
+			}
+			for _, r := range rows {
+				enrichOmniAccount(r, meta)
+			}
+			pa.Accounts = rows
+		default:
 			for _, a := range rt.gw.Accounts(name) {
 				item := map[string]any{"label": a.Label, "has_token": a.Cookie != ""}
 				enrichOmniAccount(item, meta)

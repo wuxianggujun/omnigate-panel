@@ -654,31 +654,66 @@ function renderModelLocks(rows) {
   }
 }
 
+// setStat / markStat 设置顶部统计数字，并把「口径」写进卡片 tooltip —— OmniGate 账号
+// 与 WorkBuddy 混在同一张池子表，但「禁用 / 暂停 / 积分」只有 WorkBuddy 有，必须说清。
+function setStat(id, val, title) {
+  const el = $(id);
+  if (!el) return;
+  el.textContent = val;
+  markStat(el, title);
+}
+function markStat(el, title) {
+  if (!el || !title) return;
+  const box = el.closest ? el.closest('.stat') : null;
+  if (box) box.title = title;
+}
+// ogCooling 报告某个 OmniGate 账号是否处于上游限流冷却中。
+function ogCooling(a) {
+  const until = a && a.cooling_until ? parseAPITime(a.cooling_until) : 0;
+  return until > Date.now();
+}
+// ogUsable 报告某个 OmniGate 账号是否「已授权且可用」（未冷却、会话未失效）。
+function ogUsable(a) {
+  if (!a || !a.has_token) return false;
+  if (ogCooling(a)) return false;
+  const v = a.session_verified_at ? parseAPITime(a.session_verified_at) : 0;
+  const e = a.session_expired_at ? parseAPITime(a.session_expired_at) : 0;
+  return !(e && e >= v);
+}
+
 async function loadOverview(quiet) {
   try {
     const d = await api('overview');
     overviewData = d;
-    $('sTotal').textContent = d.total;
-    $('sHealthy').textContent = d.healthy;
-    $('sCooling').textContent = d.cooling;
-    $('sDisabled').textContent = d.disabled;
+    // OmniGate 账号和 WorkBuddy 并排显示在同一张池子表里，顶部统计必须一起算，
+    // 否则「加了账号但总数还是 WorkBuddy 的 23」，很容易让人以为账号没加进去。
+    const omniList = await loadOmniAccounts();
+    const ogAccts = [];
+    (omniList || []).forEach(p => (p.accounts || []).forEach(a => ogAccts.push(a)));
+    const ogTotal = ogAccts.length;
+    const ogAvail = ogAccts.filter(ogUsable).length;
+    const ogCooling = ogAccts.filter(ogCooling).length;
+    const wbTotal = d.total || 0, wbHealthy = d.healthy || 0;
+    const allTotal = wbTotal + ogTotal, allAvail = wbHealthy + ogAvail;
+    setStat('sTotal', allTotal, 'WorkBuddy ' + wbTotal + ' + OmniGate ' + ogTotal);
+    setStat('sHealthy', allAvail, 'WorkBuddy ' + wbHealthy + ' + OmniGate ' + ogAvail);
+    setStat('sCooling', (d.cooling || 0) + ogCooling, 'WorkBuddy ' + (d.cooling || 0) + ' + OmniGate ' + ogCooling);
+    setStat('sDisabled', d.disabled, '仅 WorkBuddy（OmniGate 账号无「禁用」）');
     // 暂停选号单列（issue #125）：它只关选号、照常签到保活，与禁用是两种状态。
-    if ($('sPaused')) $('sPaused').textContent = d.paused == null ? '-' : d.paused;
+    if ($('sPaused')) { $('sPaused').textContent = d.paused == null ? '-' : d.paused; markStat($('sPaused'), '仅 WorkBuddy'); }
     const remSum = (d.accounts || []).reduce((a, s) => a + (s.credits || 0), 0);
-  const totSum = (d.accounts || []).reduce((a, s) => a + (s.credits_total || 0), 0);
-  $('sCredits').textContent = totSum > 0 ? remSum + ' / ' + totSum : remSum;
+    const totSum = (d.accounts || []).reduce((a, s) => a + (s.credits_total || 0), 0);
+    if ($('sCredits')) { $('sCredits').textContent = totSum > 0 ? remSum + ' / ' + totSum : remSum; markStat($('sCredits'), '仅 WorkBuddy 积分（OmniGate 积分按账号单列）'); }
     $('sSticky').textContent = d.sticky_sessions;
     $('navSub').textContent = 'v' + d.version;
     $('navVer').textContent = 'v' + d.version;
     $('navRedis').textContent = d.redis_mode === 'upstash' ? 'Redis 镜像' : '本地内存';
-    $('navState').textContent = d.healthy > 0 ? '服务正常' : (d.total ? '无可用账号' : '待添加账号');
+    $('navState').textContent = allAvail > 0 ? '服务正常' : (allTotal ? '无可用账号' : '待添加账号');
     const p = $('navPulse');
-    p.className = 'pulse' + (d.healthy > 0 ? '' : (d.total ? ' warn' : ' bad'));
-    const omniList = await loadOmniAccounts();
-    const ogCount = omniList.reduce((a, p) => a + ((p.accounts || []).length), 0);
+    p.className = 'pulse' + (allAvail > 0 ? '' : (allTotal ? ' warn' : ' bad'));
     $('accNote').textContent = [
       d.in_flight_full ? d.in_flight_full + ' 个账号在途占满' : '',
-      ogCount ? 'OmniGate ' + ogCount + ' 个账号' : '',
+      'WorkBuddy ' + wbTotal + ' · OmniGate ' + ogTotal,
     ].filter(Boolean).join(' · ');
     const up = Math.floor(d.uptime_sec);
     $('subMeta').textContent = '运行 ' + (up >= 86400 ? Math.floor(up / 86400) + ' 天 ' : '') + Math.floor(up % 86400 / 3600) + ' 时 ' + Math.floor(up % 3600 / 60) + ' 分';

@@ -1231,9 +1231,10 @@ if ($('btnReqReload')) $('btnReqReload').onclick = loadRequestLogs;
 // 加一个默认收窄的区间会让打开页面时看到的条数凭空变少。
 if ($('reqRange')) trangeBind('reqRange', loadRequestLogs, '0');
 
-/* ── 运行日志（面板环形缓冲：task / sys / chat）─────────────────────────
+/* ── 运行日志（面板环形缓冲：task / sys）─────────────────────────────────
    数据源 GET /panel/api/logs → {entries:[{ts,ch,text}]}（时间升序，最旧在前）。
-   本页按频道 / 关键词筛选，渲染时最新在上；自动刷新跟随全局 5s 轮询
+   逐请求的聊天表格行不再入环（见 ring.go），本页只展示任务 / 系统运行日志；
+   按频道 / 关键词筛选，渲染时最新在上；自动刷新跟随全局 5s 轮询
    （refreshVisible），关掉「自动刷新」即只按需拉取。 */
 let rlEntries = [];
 function rlClock(ts) {

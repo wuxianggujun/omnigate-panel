@@ -463,8 +463,10 @@ func main() {
 	// 成长任务队列每日自动执行（与「执行全部待办」同管线）：Sequential 族零点解锁后
 	// 无需手动扫描；hook 返回即启动（异步执行），已在跑时内部跳过。
 	sch.SetGrowthHook(pn.RunGrowthQueueOnce)
+	// 面板「运行日志」只收标准日志（任务 / 系统：签到 / 保活 / 调度等）。
+	// 聊天表格行是逐请求流水，属于「请求记录」页（从归档读取）——不再镜像进
+	// 环形缓冲，否则每个请求一行会把运行日志淹没、签到记录被迅速挤出。
 	log.SetOutput(io.MultiWriter(os.Stderr, pn.Logs()))
-	server.SetChatLogOutput(io.MultiWriter(os.Stdout, pn.Logs()))
 
 	h := server.NewHandler(server.Config{
 		Pool:         p,

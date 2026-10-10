@@ -33,12 +33,13 @@ var chatSeq atomic.Int64
 // 测试包经 TestMain 置 false 关闭 stdout 噪音，需要断言行输出的测试用 withChatLog 临时开启（R5）。
 var chatLogEnabled = true
 
-// chatLogOut 聊天表格日志的输出目标。生产默认 os.Stdout；main 在启用管理面板时
-// 经 SetChatLogOutput 注入 MultiWriter，把每行镜像进 /panel/api/logs 的环形缓冲，
-// stdout 行为不变。需在开始服务前调用一次（无并发竞争窗口）。
+// chatLogOut 聊天表格日志的输出目标，默认 os.Stdout。聊天表格行是逐请求流水，
+// 归「请求记录」页（从归档读取）；「运行日志」环形缓冲只收标准日志，故生产不再
+// 注入 MultiWriter。SetChatLogOutput 供测试重定向 stdout 噪音使用，需在开始服务
+// 前调用一次（无并发竞争窗口）。
 var chatLogOut io.Writer = os.Stdout
 
-// SetChatLogOutput 替换聊天表格日志输出目标（仅 main 启动期调用一次）。
+// SetChatLogOutput 替换聊天表格日志输出目标（测试用；生产默认 stdout）。
 func SetChatLogOutput(w io.Writer) { chatLogOut = w }
 
 // chatStat 单个 chat 请求的日志统计；handler 挂 defer，请求出口后落一行。

@@ -1,9 +1,10 @@
 // ring.go 固定容量的结构化日志环形缓冲（并发安全，实现 io.Writer）。
-// main 把 log 包输出与 chat 表格日志经 MultiWriter 镜像进来，面板
-// /panel/api/logs 读取快照；超出容量的旧行按 FIFO 淘汰。
+// main 把标准日志（任务 / 系统：签到 / 保活 / 调度等）经 MultiWriter 镜像进来，
+// 面板 /panel/api/logs 读取快照；超出容量的旧行按 FIFO 淘汰。
 //
-// 每行入环时按前缀规则归类频道（chat=对话请求表格行 / task=任务动作 /
-// sys=系统与其它），面板日志视图按频道筛选——对话流量大时任务结果不被冲掉。
+// 每行入环时按前缀规则归类频道（task=任务动作 / sys=系统与其它），面板
+// 「运行日志」页按频道筛选。逐请求的聊天表格行（chat）属于「请求记录」页
+// （从归档读取），不再镜像进本缓冲——否则每个请求一行会淹没运行日志。
 package panel
 
 import (
@@ -52,16 +53,10 @@ func classifyLine(line string) string {
 }
 
 // Ring 日志环形缓冲。
-//
-// 对话流水（chat）每请求一行，量级远大于任务（task）/ 系统（sys）日志。若三者
-// 共用一个 FIFO，一次对话突发就能把签到 / 保活记录整段挤出去——「运行日志」页
-// 再也看不到它们。因此给 chat 单独设一个上限（总容量的一半）：chat 超限只淘汰
-// 最旧的 chat 行，任务 / 系统条目始终保有自己的空间。
 type Ring struct {
 	mu      sync.Mutex
 	entries []LogEntry
 	cap     int
-	chatCap int
 }
 
 // NewRing 构建容量为 capacity 的日志环（非正值回退 500）。
@@ -69,11 +64,10 @@ func NewRing(capacity int) *Ring {
 	if capacity <= 0 {
 		capacity = 500
 	}
-	return &Ring{cap: capacity, chatCap: capacity / 2}
+	return &Ring{cap: capacity}
 }
 
-// Write 按 \n 切分入环（实现 io.Writer）。空行丢弃；超容量淘汰最旧行，
-// chat 行另受 chatCap 约束（见 Ring 文档）。
+// Write 按 \n 切分入环（实现 io.Writer）。空行丢弃；超容量淘汰最旧行。
 func (r *Ring) Write(p []byte) (int, error) {
 	now := time.Now()
 	r.mu.Lock()
@@ -83,42 +77,12 @@ func (r *Ring) Write(p []byte) (int, error) {
 			continue
 		}
 		text := tsPrefixRe.ReplaceAllString(line, "")
-		ch := classifyLine(text)
-		r.entries = append(r.entries, LogEntry{TS: now, Ch: ch, Text: text})
+		r.entries = append(r.entries, LogEntry{TS: now, Ch: classifyLine(text), Text: text})
 		if overflow := len(r.entries) - r.cap; overflow > 0 {
 			r.entries = r.entries[overflow:]
 		}
-		if ch == ChChat && r.chatCap > 0 {
-			if n := countChannel(r.entries, ChChat) - r.chatCap; n > 0 {
-				r.entries = dropOldestChannel(r.entries, ChChat, n)
-			}
-		}
 	}
 	return len(p), nil
-}
-
-// countChannel 统计缓冲内某频道的条目数。
-func countChannel(entries []LogEntry, ch string) int {
-	n := 0
-	for _, e := range entries {
-		if e.Ch == ch {
-			n++
-		}
-	}
-	return n
-}
-
-// dropOldestChannel 就地删除某频道最旧的 n 条（保持其余条目相对顺序）。
-func dropOldestChannel(entries []LogEntry, ch string, n int) []LogEntry {
-	out := entries[:0]
-	for _, e := range entries {
-		if n > 0 && e.Ch == ch {
-			n--
-			continue
-		}
-		out = append(out, e)
-	}
-	return out
 }
 
 // Snapshot 按写入顺序返回缓冲内全部条目（拷贝，调用方可安全持有）。

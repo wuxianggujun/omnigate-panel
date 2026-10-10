@@ -17,6 +17,7 @@ import (
 
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/openai"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/provider"
+	"github.com/wuxianggujun/omnigate-panel/internal/outbound"
 )
 
 // Provider is an OpenAI-compatible upstream.
@@ -58,6 +59,20 @@ func (p *Provider) SetProxy(u *url.URL) {
 		tr.Proxy = http.ProxyURL(u)
 		tr.CloseIdleConnections()
 	}
+}
+
+// SetProxySelector routes this provider's outbound requests through the proxy pool
+// selected per request by sel (nil = direct). Unlike SetProxy it adds
+// connection-level failover (retry the next proxy on a connection error).
+func (p *Provider) SetProxySelector(sel outbound.Selector) {
+	if p == nil || p.http == nil {
+		return
+	}
+	base, ok := p.http.Transport.(*http.Transport)
+	if !ok {
+		return
+	}
+	p.http.Transport = outbound.WrapTransport(base, sel)
 }
 
 // Type returns the provider type.

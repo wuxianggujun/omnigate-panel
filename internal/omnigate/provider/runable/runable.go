@@ -18,6 +18,7 @@ import (
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/openai"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/provider"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/util"
+	"github.com/wuxianggujun/omnigate-panel/internal/outbound"
 )
 
 const userAgent = "Mozilla/5.0 (compatible; omnigate/1.0)"
@@ -54,6 +55,20 @@ func (c *Client) SetProxy(u *url.URL) {
 		tr.Proxy = http.ProxyURL(u)
 		tr.CloseIdleConnections()
 	}
+}
+
+// SetProxySelector routes this client's outbound requests through the proxy pool
+// selected per request by sel (nil = direct). Unlike SetProxy it adds
+// connection-level failover (retry the next proxy on a connection error).
+func (c *Client) SetProxySelector(sel outbound.Selector) {
+	if c == nil || c.http == nil {
+		return
+	}
+	base, ok := c.http.Transport.(*http.Transport)
+	if !ok {
+		return
+	}
+	c.http.Transport = outbound.WrapTransport(base, sel)
 }
 
 // UpstreamError carries an HTTP failure from the upstream.

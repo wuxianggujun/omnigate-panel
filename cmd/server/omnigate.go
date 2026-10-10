@@ -57,6 +57,10 @@ type omniManager struct {
 	// "omnigate:<provider>" 解析成代理 URL，在 build 时注入各供应商。
 	outbound outbound.Config
 
+	// obRT 是 outbound 的运行时（持有代理池的后台刷新 + 探活）。随 outbound
+	// 变更重建；nil 表示当前没有代理池。
+	obRT *outbound.Runtime
+
 	// reqlog 与 WorkBuddy 网关共用同一份请求记录器（面板「请求记录」页），
 	// 让 OmniGate 的 raccoon/runable 请求也同表可见；clientInfo 报告是否记录
 	// 调用来源（客户端 IP / UA），复用 logging.request_client_info 开关。
@@ -71,12 +75,13 @@ type omniManager struct {
 // newOmniManager 按 cfg.OmnigateConfig 装配 OmniGate。配置文件缺失/解析失败时
 // 返回未启用的 manager（不报错，面板其余功能照常）。requestLog / usageRec 为共享
 // 记录器（可为 nil）；clientInfo 报告是否记录调用来源（可为 nil）。
-func newOmniManager(cfg *Config, requestLog *reqlog.Recorder, usageRec *usage.Recorder, clientInfo func() bool) *omniManager {
+func newOmniManager(cfg *Config, requestLog *reqlog.Recorder, usageRec *usage.Recorder, clientInfo func() bool, obRT *outbound.Runtime) *omniManager {
 	m := &omniManager{
 		path:       cfg.OmnigateConfig,
 		apiKey:     cfg.APIKey,
 		logger:     omnilogx.New(300),
 		outbound:   cfg.Outbound,
+		obRT:       obRT,
 		reqlog:     requestLog,
 		usageRec:   usageRec,
 		clientInfo: clientInfo,
@@ -122,7 +127,7 @@ func (m *omniManager) build(cfg *omniconfig.Config) (*omniRuntime, error) {
 	if len(cfg.APIKeys) == 0 && m.apiKey != "" {
 		cfg.APIKeys = []string{m.apiKey}
 	}
-	gw, err := omnigateway.New(cfg, m.st, m.logger, omnigateway.WithProxyResolver(m.proxyFor))
+	gw, err := omnigateway.New(cfg, m.st, m.logger, omnigateway.WithProxyResolver(m.proxyFor), omnigateway.WithPoolResolver(m.poolFor))
 	if err != nil {
 		return nil, err
 	}
@@ -133,13 +138,28 @@ func (m *omniManager) build(cfg *omniconfig.Config) (*omniRuntime, error) {
 	srv.SetRequestLog(m.reqlog, m.clientInfo)
 	// 用量记录：OmniGate 请求的 token 也计入与 WorkBuddy 同一份用量记录器。
 	srv.SetUsageRecorder(m.usageRec)
+	// 代理池状态：让 /omni/healthz 能看到各池的存活/候选数。
+	srv.SetPoolStatus(func() any { return m.PoolStatuses() })
 	return &omniRuntime{cfg: cfg, gw: gw, sched: sched, srv: srv}, nil
 }
 
 // proxyFor 把某供应商解析成出站代理（来自面板 outbound 路由的
 // "omnigate:<provider>"）。未配置返回 nil（直连）。
 func (m *omniManager) proxyFor(providerName string) *url.URL {
-	return m.outbound.For(outbound.OmniTarget(providerName))
+	return m.obRT.SingleURL(outbound.OmniTarget(providerName))
+}
+
+// poolFor 把某供应商解析成出站代理池（同上目标名）。未配置返回 nil。
+func (m *omniManager) poolFor(providerName string) outbound.Selector {
+	return m.obRT.Pool(outbound.OmniTarget(providerName))
+}
+
+// PoolStatuses 返回各代理池的可观测快照（供健康检查/面板）。
+func (m *omniManager) PoolStatuses() []outbound.PoolStatus {
+	if m.obRT == nil {
+		return nil
+	}
+	return m.obRT.PoolStatuses()
 }
 
 // SetAPIKey 更新 OmniGate 复用的网关 api_key 并热重载（面板「重新生成」密钥后
@@ -178,6 +198,7 @@ func (m *omniManager) SetAPIKey(key string) error {
 }
 
 // SetOutbound 更新出站代理路由并热重载当前运行时（供应商代理即时生效）。
+// 代理池运行时的热替换由调用方（saveConfig）负责，这里只重建网关。
 func (m *omniManager) SetOutbound(o outbound.Config) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -193,9 +214,9 @@ func (m *omniManager) SetOutbound(o outbound.Config) error {
 	if err != nil {
 		return err
 	}
-	old := m.cur.Swap(newRT)
-	if old != nil {
-		old.sched.Stop()
+	prev := m.cur.Swap(newRT)
+	if prev != nil {
+		prev.sched.Stop()
 	}
 	log.Printf("[omnigate] 出站代理路由已热重载（%d 条路由）", len(o.Routes))
 	return nil

@@ -24,12 +24,30 @@ const TargetWorkbuddy = "workbuddy"
 // OmniTarget 返回内置 OmniGate 某供应商的出站目标名。
 func OmniTarget(provider string) string { return "omnigate:" + provider }
 
-// Proxy 一个命名出站代理。
+// Proxy 一个命名出站代理。它有两种形态：
+//
+//	单代理：URL（可内嵌或单独给 Username/Password）
+//	代理池：Pool（显式列表）+ PoolURL（远程 API，定期拉取），二者可同时用
+//
+// 只要 Pool 或 PoolURL 非空就按「池」处理（URL 被忽略）。
 type Proxy struct {
-	Name     string `json:"name"`
-	URL      string `json:"url"`
+	Name string `json:"name"`
+	URL  string `json:"url,omitempty"`
+
+	// 代理池
+	Pool       []string `json:"pool,omitempty"`        // 显式代理列表（host:port 或完整 URL）
+	PoolURL    string   `json:"pool_url,omitempty"`    // 远程代理池 API（定期拉取）
+	PoolScheme string   `json:"pool_scheme,omitempty"` // 池内 host:port 的协议，默认 http
+	RefreshSec int      `json:"refresh_sec,omitempty"` // 池刷新间隔秒，默认 300
+	ProbeURL   string   `json:"probe_url,omitempty"`   // 探活目标，默认 gstatic/generate_204
+
 	Username string `json:"username,omitempty"`
 	Password string `json:"password,omitempty"`
+}
+
+// IsPool 报告该代理是否按代理池处理（显式列表或远程 API 任一非空）。
+func (p Proxy) IsPool() bool {
+	return len(p.Pool) > 0 || strings.TrimSpace(p.PoolURL) != ""
 }
 
 // Config 代理定义 + 目标路由。
@@ -44,22 +62,13 @@ func (c *Config) Normalize() error {
 	seen := map[string]bool{}
 	for i := range c.Proxies {
 		p := &c.Proxies[i]
-		p.Name = strings.TrimSpace(p.Name)
-		p.URL = strings.TrimSpace(p.URL)
-		p.Username = strings.TrimSpace(p.Username)
-		if p.Name == "" {
-			return fmt.Errorf("outbound.proxies[%d].name 不能为空", i)
+		if err := p.normalize(); err != nil {
+			return fmt.Errorf("outbound.proxies[%d]: %w", i, err)
 		}
 		if seen[p.Name] {
 			return fmt.Errorf("outbound.proxies: 代理名 %q 重复", p.Name)
 		}
 		seen[p.Name] = true
-		if p.URL == "" {
-			return fmt.Errorf("outbound.proxies[%q].url 不能为空", p.Name)
-		}
-		if _, err := p.parse(); err != nil {
-			return fmt.Errorf("outbound.proxies[%q]: %w", p.Name, err)
-		}
 	}
 	for target, name := range c.Routes {
 		name = strings.TrimSpace(name)
@@ -73,6 +82,104 @@ func (c *Config) Normalize() error {
 		}
 	}
 	return nil
+}
+
+// normalize 校验并归一化单个代理（去空白、补默认值、校验协议）。
+func (p *Proxy) normalize() error {
+	p.Name = strings.TrimSpace(p.Name)
+	p.URL = strings.TrimSpace(p.URL)
+	p.Username = strings.TrimSpace(p.Username)
+	p.PoolURL = strings.TrimSpace(p.PoolURL)
+	p.PoolScheme = strings.ToLower(strings.TrimSpace(p.PoolScheme))
+	p.ProbeURL = strings.TrimSpace(p.ProbeURL)
+	if p.Name == "" {
+		return fmt.Errorf("name 不能为空")
+	}
+
+	if p.IsPool() {
+		if p.PoolScheme == "" {
+			p.PoolScheme = "http"
+		}
+		switch p.PoolScheme {
+		case "http", "https", "socks5", "socks5h":
+		default:
+			return fmt.Errorf("pool_scheme 不支持 %q（支持 http/https/socks5/socks5h）", p.PoolScheme)
+		}
+		out := make([]string, 0, len(p.Pool))
+		for j, e := range p.Pool {
+			ne, err := normalizeEntry(p.PoolScheme, e)
+			if err != nil {
+				return fmt.Errorf("pool[%d]: %w", j, err)
+			}
+			out = append(out, ne)
+		}
+		p.Pool = out
+		if p.PoolURL != "" {
+			u, err := url.Parse(p.PoolURL)
+			if err != nil {
+				return fmt.Errorf("pool_url 解析失败: %w", err)
+			}
+			if u.Scheme != "http" && u.Scheme != "https" {
+				return fmt.Errorf("pool_url 仅支持 http/https")
+			}
+			if u.Host == "" {
+				return fmt.Errorf("pool_url 缺少 host")
+			}
+		}
+		if p.RefreshSec == 0 {
+			p.RefreshSec = 300
+		}
+		if p.RefreshSec < 30 {
+			p.RefreshSec = 30
+		}
+		if p.RefreshSec > 86400 {
+			p.RefreshSec = 86400
+		}
+		if p.ProbeURL == "" {
+			p.ProbeURL = DefaultPoolProbeURL
+		}
+		if u, err := url.Parse(p.ProbeURL); err != nil || u.Host == "" {
+			return fmt.Errorf("probe_url 非法: %q", p.ProbeURL)
+		}
+		return nil
+	}
+
+	// 单代理
+	p.Pool = nil
+	if p.URL == "" {
+		return fmt.Errorf("url 不能为空（或填 pool/pool_url 建代理池）")
+	}
+	if _, err := p.parse(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// normalizeEntry 把一条池内代理归一化成完整 URL（缺 scheme 时按 scheme 补）。
+func normalizeEntry(scheme, raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", fmt.Errorf("空代理地址")
+	}
+	if !strings.Contains(raw, "://") {
+		if scheme == "" {
+			scheme = "http"
+		}
+		raw = scheme + "://" + raw
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("解析失败: %w", err)
+	}
+	if u.Host == "" {
+		return "", fmt.Errorf("缺少 host: %q", raw)
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "http", "https", "socks5", "socks5h":
+	default:
+		return "", fmt.Errorf("不支持协议 %q", u.Scheme)
+	}
+	return raw, nil
 }
 
 // parse 把 Proxy 归一化成 *url.URL（补 scheme、合并认证）。

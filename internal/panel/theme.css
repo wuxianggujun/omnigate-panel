@@ -641,6 +641,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
 .og-msg.ok { color: var(--ok); }
 .og-msg.err { color: var(--bad); }
 .og-hint { font-size: 12px; color: var(--ink-3); margin-top: 6px; }
+.tag { display: inline-block; font-size: 11px; line-height: 1.5; padding: 0 6px; border-radius: 999px; background: var(--surface-2); border: 1px solid var(--line); color: var(--ink-2); }
 .og-hint code, .og-code { font-family: var(--mono); font-size: 12px; background: var(--surface-2); border: 1px solid var(--line-soft); padding: 1px 5px; border-radius: 5px; }
 /* .og-adv 备选流程折叠（raccoon 浏览器登录的手动回调兜底），默认收起不抢注意力。 */
 .og-adv { margin-top: 12px; border-top: 1px dashed var(--line-soft); padding-top: 10px; }

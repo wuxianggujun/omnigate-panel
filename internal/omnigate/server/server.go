@@ -42,6 +42,9 @@ type Server struct {
 	// usage 与 WorkBuddy 面板「用量」页共用同一份逐请求用量记录器：OmniGate 的
 	// raccoon/runable 请求也计入，让「所有 AI 请求」在一处可见。nil = 不计入。
 	usage *usage.Recorder
+
+	// poolStatus 返回各出站代理池的运行时快照（供 /healthz 观测）。nil = 不展示。
+	poolStatus func() any
 }
 
 // New builds a Server.
@@ -71,6 +74,11 @@ func (s *Server) SetRequestLog(rec *reqlog.Recorder, clientInfo func() bool) {
 // nil = OmniGate 请求不计入用量。构造后、开始服务前调用一次即可。
 func (s *Server) SetUsageRecorder(rec *usage.Recorder) {
 	s.usage = rec
+}
+
+// SetPoolStatus 注入出站代理池状态提供者（供 /healthz 观测）。nil = 不展示。
+func (s *Server) SetPoolStatus(fn func() any) {
+	s.poolStatus = fn
 }
 
 // ServeHTTP implements http.Handler.
@@ -560,6 +568,11 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	info["uptime_seconds"] = int(time.Since(s.started).Seconds())
 	info["recent"] = s.gw.Logger().Recent()
 	info["addresses"] = localIPs()
+	if s.poolStatus != nil {
+		if st := s.poolStatus(); st != nil {
+			info["proxy_pools"] = st
+		}
+	}
 	body, _ := json.Marshal(info)
 	writeJSON(w, 200, body)
 }

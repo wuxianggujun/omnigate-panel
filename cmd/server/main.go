@@ -158,7 +158,12 @@ func main() {
 
 	// 出站代理（config.json 的 outbound 段）：面板上游目标 "workbuddy" 启动即
 	// 生效（nil = 直连）。保存配置时 saveConfig 会热更新同一 Transport。
-	up.SetProxy(cfg.Outbound.ProxyFunc(outbound.TargetWorkbuddy))
+	// obRT 是代理池的运行时（后台刷新 + 探活），面板上游与 OmniGate 共用一份。
+	obRT := outbound.NewRuntime(cfg.Outbound, func(f string, a ...any) {
+		log.Printf("[outbound] "+f, a...)
+	})
+	defer obRT.Close()
+	up.SetProxy(obRT.ProxyFunc(outbound.TargetWorkbuddy))
 
 	// 积分保底的「收费」兜底判据：接上游模型目录的积分倍率表。本地实测台账无观测
 	// 时用它判收费——否则「没学过」恒等于「放行」，高价新模型会把触底号一笔打穿
@@ -291,7 +296,7 @@ func main() {
 
 	// 内置 OmniGate 引擎（Runable / 浣熊 / 任意 OpenAI 兼容上游）：先装配，
 	// 好把供应商配置读写器注入面板（保存即热重载，无需重启进程）。
-	omni := newOmniManager(cfg, requestLog, rec, func() bool { return live.Load().RecordClientInfo })
+	omni := newOmniManager(cfg, requestLog, rec, func() bool { return live.Load().RecordClientInfo }, obRT)
 	if omni.Enabled() {
 		defer omni.Stop()
 	}
@@ -323,7 +328,7 @@ func main() {
 			return Load(*cfgPath)
 		},
 		SaveConfig: func(raw []byte) ([]string, error) {
-			return saveConfig(raw, *cfgPath, live, p, up, sch)
+			return saveConfig(raw, *cfgPath, live, p, up, sch, obRT)
 		},
 		// 出站代理配置（config.json 的 outbound 段）读写：面板 OmniGate 页
 		// 「出站代理」卡片用。保存后热应用到面板上游 + 内置 OmniGate 供应商。
@@ -339,7 +344,7 @@ func main() {
 			wrapped = append(wrapped, `{"outbound":`...)
 			wrapped = append(wrapped, raw...)
 			wrapped = append(wrapped, '}')
-			if _, err := saveConfig(wrapped, *cfgPath, live, p, up, sch); err != nil {
+			if _, err := saveConfig(wrapped, *cfgPath, live, p, up, sch, obRT); err != nil {
 				return nil, err
 			}
 			if omni.Enabled() {
@@ -366,7 +371,7 @@ func main() {
 			wrapped = append(wrapped, `{"realm_routing":`...)
 			wrapped = append(wrapped, raw...)
 			wrapped = append(wrapped, '}')
-			if _, err := saveConfig(wrapped, *cfgPath, live, p, up, sch); err != nil {
+			if _, err := saveConfig(wrapped, *cfgPath, live, p, up, sch, obRT); err != nil {
 				return nil, err
 			}
 			// 热生效：重读配置、重建规则（global 逃生门时移除 global）。
@@ -401,7 +406,7 @@ func main() {
 			if err != nil {
 				return nil, err
 			}
-			if _, err := saveConfig(wrapped, *cfgPath, live, p, up, sch); err != nil {
+			if _, err := saveConfig(wrapped, *cfgPath, live, p, up, sch, obRT); err != nil {
 				return nil, err
 			}
 			// 热重建鉴权运行时（内存与磁盘对齐）。
@@ -423,7 +428,7 @@ func main() {
 			if err != nil {
 				return "", err
 			}
-			if _, err := saveConfig(wrapped, *cfgPath, live, p, up, sch); err != nil {
+			if _, err := saveConfig(wrapped, *cfgPath, live, p, up, sch, obRT); err != nil {
 				return "", err
 			}
 			if omni.Enabled() {
@@ -652,7 +657,7 @@ func mountRoot(h http.Handler, omni http.Handler) http.Handler {
 // 落盘用"先写 tmp 再 rename"原子替换，且优先保留磁盘上的原始 JSON 结构（只改
 // 面板表单覆盖到的键），避免把用户手写的注释性字段/未知键洗掉——这里直接整体
 // 序列化校验后的配置，未知键在 json.Unmarshal 时已丢失，故先合并原始 map。
-func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up *upstream.Client, sch *scheduler.Scheduler) ([]string, error) {
+func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up *upstream.Client, sch *scheduler.Scheduler, obRT *outbound.Runtime) ([]string, error) {
 	// 1) 解析原始 JSON 为 map（保留用户手写的未知键），再叠加面板提交的键。
 	oldRaw, err := os.ReadFile(path)
 	if err != nil {
@@ -738,8 +743,14 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 		!newCfg.Schedule.GrowthEnabled)
 	sch.SetBalanceInterval(newCfg.BalanceRefreshInterval)
 	sch.SetIncludeDisabledInTasks(newCfg.Schedule.IncludeDisabledInTasks)
-	// 出站代理（outbound）：热更新面板上游 Transport 的代理（清空闲池即时生效）。
-	up.SetProxy(newCfg.Outbound.ProxyFunc(outbound.TargetWorkbuddy))
+	// 出站代理（outbound）：热更新代理池运行时 + 面板上游 Transport 的代理
+	// （清空闲池即时生效）。
+	if obRT != nil {
+		obRT.Reload(newCfg.Outbound)
+		up.SetProxy(obRT.ProxyFunc(outbound.TargetWorkbuddy))
+	} else {
+		up.SetProxy(newCfg.Outbound.ProxyFunc(outbound.TargetWorkbuddy))
+	}
 
 	return restartRequiredFields(newCfg), nil
 }

@@ -3990,6 +3990,10 @@ function obTargets() {
   return list;
 }
 
+function obIsPool(p) {
+  return !!(p && ((Array.isArray(p.pool) && p.pool.length) || (p.pool_url && String(p.pool_url).trim())));
+}
+
 function renderOutbound() {
   const cnt = $('obCnt'); if (cnt) cnt.textContent = obState.proxies.length + ' 个代理';
   const tb = $('obProxies');
@@ -3999,9 +4003,18 @@ function renderOutbound() {
   } else {
     tb.innerHTML = obState.proxies.map((p, i) => {
       const auth = p.username ? esc(p.username) + (p.password ? ' / ******' : '') : '—';
+      let addr;
+      if (obIsPool(p)) {
+        const bits = [];
+        if (Array.isArray(p.pool) && p.pool.length) bits.push(p.pool.length + ' 个');
+        if (p.pool_url) bits.push('API');
+        addr = '<span class="tag">代理池</span> ' + esc(bits.join(' + '));
+      } else {
+        addr = '<span class="num">' + esc(p.url || '') + '</span>';
+      }
       return '<tr>' +
         '<td>' + esc(p.name) + '</td>' +
-        '<td><span class="num">' + esc(p.url) + '</span></td>' +
+        '<td>' + addr + '</td>' +
         '<td>' + auth + '</td>' +
         '<td>' +
           '<button data-obact="edit" data-i="' + i + '">编辑</button>' +
@@ -4030,6 +4043,11 @@ function obShowForm(i) {
   $('obUrl').value = p.url || '';
   $('obUser').value = p.username || '';
   $('obPass').value = p.password || '';
+  $('obPool').value = Array.isArray(p.pool) ? p.pool.join('\n') : '';
+  $('obPoolUrl').value = p.pool_url || '';
+  $('obPoolScheme').value = p.pool_scheme || 'http';
+  $('obRefresh').value = p.refresh_sec || '';
+  $('obProbe').value = p.probe_url || '';
   ogMsg('obFormMsg', '');
   $('obForm').style.display = 'block';
 }
@@ -4039,13 +4057,30 @@ function obCancelForm() { $('obForm').style.display = 'none'; ogMsg('obFormMsg',
 function obFormSave() {
   const name = $('obName').value.trim();
   const url = $('obUrl').value.trim();
+  const pool = $('obPool').value.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+  const poolUrl = $('obPoolUrl').value.trim();
+  const isPool = pool.length > 0 || poolUrl !== '';
   if (!name) { ogMsg('obFormMsg', '请填写名称', 'err'); return; }
-  if (!url) { ogMsg('obFormMsg', '请填写地址', 'err'); return; }
+  if (!isPool && !url) { ogMsg('obFormMsg', '请填「地址」，或填「代理列表 / 池 API 地址」建代理池', 'err'); return; }
   if (obState.proxies.some((p, idx) => p.name === name && idx !== obEditIdx)) {
     ogMsg('obFormMsg', '代理名「' + name + '」已存在', 'err');
     return;
   }
-  const entry = { name, url, username: $('obUser').value.trim(), password: $('obPass').value };
+  const entry = { name };
+  if (isPool) {
+    if (pool.length) entry.pool = pool;
+    if (poolUrl) entry.pool_url = poolUrl;
+    entry.pool_scheme = $('obPoolScheme').value || 'http';
+    const rs = parseInt($('obRefresh').value, 10);
+    if (rs > 0) entry.refresh_sec = rs;
+    const probe = $('obProbe').value.trim();
+    if (probe) entry.probe_url = probe;
+  } else {
+    entry.url = url;
+  }
+  const user = $('obUser').value.trim();
+  if (user) entry.username = user;
+  if ($('obPass').value) entry.password = $('obPass').value;
   if (obEditIdx >= 0) {
     const oldName = (obState.proxies[obEditIdx] || {}).name;
     obState.proxies[obEditIdx] = entry;
@@ -4103,7 +4138,16 @@ async function loadOutbound() {
 
 async function saveOutbound() {
   const proxies = obState.proxies.map(p => {
-    const e = { name: p.name, url: p.url };
+    const e = { name: p.name };
+    if (obIsPool(p)) {
+      if (Array.isArray(p.pool) && p.pool.length) e.pool = p.pool;
+      if (p.pool_url) e.pool_url = p.pool_url;
+      if (p.pool_scheme) e.pool_scheme = p.pool_scheme;
+      if (p.refresh_sec) e.refresh_sec = p.refresh_sec;
+      if (p.probe_url) e.probe_url = p.probe_url;
+    } else {
+      e.url = p.url || '';
+    }
     if (p.username) e.username = p.username;
     if (p.password) e.password = p.password;
     return e;

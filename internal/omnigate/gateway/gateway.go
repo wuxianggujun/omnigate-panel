@@ -23,6 +23,7 @@ import (
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/state"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/toolcall"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/util"
+	"github.com/wuxianggujun/omnigate-panel/internal/outbound"
 	"github.com/wuxianggujun/omnigate-panel/internal/reqlog"
 )
 
@@ -50,6 +51,11 @@ type Gateway struct {
 	// proxyFor resolves a per-provider outbound proxy (nil = direct). Installed
 	// via WithProxyResolver; consulted once per provider at construction.
 	proxyFor func(providerName string) *url.URL
+
+	// poolFor resolves a per-provider outbound proxy pool (nil = none).
+	// Installed via WithPoolResolver; takes precedence over proxyFor when a
+	// provider routes to a pool (rotation + failover).
+	poolFor func(providerName string) outbound.Selector
 
 	// cool 账号级限流冷却台账（进程内）。见 cooldown.go。
 	cool *cooldownLedger
@@ -98,6 +104,14 @@ func WithProxyResolver(fn func(providerName string) *url.URL) Option {
 	return func(g *Gateway) { g.proxyFor = fn }
 }
 
+// WithPoolResolver installs a per-provider outbound proxy *pool* resolver. It is
+// consulted once per provider while building the provider map; returning nil
+// means "no pool" (fall back to WithProxyResolver / direct). Providers that
+// support proxying implement SetProxySelector.
+func WithPoolResolver(fn func(providerName string) outbound.Selector) Option {
+	return func(g *Gateway) { g.poolFor = fn }
+}
+
 // New builds a Gateway from config and state.
 func New(cfg *config.Config, st *state.State, log *logx.Logger, opts ...Option) (*Gateway, error) {
 	g := &Gateway{
@@ -128,7 +142,17 @@ func New(cfg *config.Config, st *state.State, log *logx.Logger, opts ...Option) 
 		default:
 			return nil, fmt.Errorf("provider %q: unknown type %q", p.Name, p.Type)
 		}
-		// Per-provider outbound proxy (panel config outbound.routes).
+		// Per-provider outbound proxy (panel config outbound.routes). A proxy
+		// pool takes precedence over a single proxy when both resolve.
+		if g.poolFor != nil {
+			if sel := g.poolFor(p.Name); sel != nil {
+				if ps, ok := prov.(interface {
+					SetProxySelector(outbound.Selector)
+				}); ok {
+					ps.SetProxySelector(sel)
+				}
+			}
+		}
 		if g.proxyFor != nil {
 			if u := g.proxyFor(p.Name); u != nil {
 				if ps, ok := prov.(interface{ SetProxy(*url.URL) }); ok {

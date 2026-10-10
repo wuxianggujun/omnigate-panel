@@ -23,6 +23,7 @@ import (
 
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/openai"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/provider"
+	"github.com/wuxianggujun/omnigate-panel/internal/outbound"
 )
 
 // Default upstream bases, matching the values hard-coded in the original APK.
@@ -116,6 +117,20 @@ func (c *Client) SetProxy(u *url.URL) {
 		tr.Proxy = http.ProxyURL(u)
 		tr.CloseIdleConnections()
 	}
+}
+
+// SetProxySelector routes this client's outbound requests through the proxy pool
+// selected per request by sel (nil = direct). Unlike SetProxy it adds
+// connection-level failover (retry the next proxy on a connection error).
+func (c *Client) SetProxySelector(sel outbound.Selector) {
+	if c == nil || c.http == nil {
+		return
+	}
+	base, ok := c.http.Transport.(*http.Transport)
+	if !ok {
+		return
+	}
+	c.http.Transport = outbound.WrapTransport(base, sel)
 }
 
 // BuildAuthorizeURL returns the browser URL the user opens to log in.

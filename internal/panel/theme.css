@@ -278,6 +278,16 @@ label.fld > .hint { display: block; font-size: 11.5px; color: var(--ink-3); marg
 .usage-total em { color: var(--ink-2); }
 .usage-latency { color: var(--warn); background: var(--warn-soft); border-color: color-mix(in srgb, var(--warn) 18%, transparent); }
 .usage-rate { color: var(--ok); background: var(--ok-soft); border-color: color-mix(in srgb, var(--ok) 18%, transparent); }
+/* 用量页「未计入」提示（客户端中断）：上游 token 确实消耗了，但末帧 usage 到不了，
+   本窗口只能按 0 计。用告警色显式标注，避免被读成「没消耗」或与 NewAPI 对不上账时
+   查无头绪。 */
+.usgap {
+  margin: 0; padding: 7px 10px;
+  border: 1px solid color-mix(in srgb, var(--warn) 24%, var(--line));
+  border-radius: 6px; background: var(--warn-soft);
+  font-size: 12px; line-height: 1.5; color: var(--ink-2);
+}
+.usgap b { color: var(--warn); font-variant-numeric: tabular-nums; }
 .cred { min-width: 84px; }
 .cred .n { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 13px; white-space: nowrap; }
 .cred .n .of { color: var(--ink-3); font-size: 11px; }

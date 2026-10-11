@@ -42,9 +42,9 @@ const (
 )
 
 // fileVersion 是 usage.json 的当前格式版本。版本 2 增加积分观测字段，版本 3
-// 增加模型生效倍率分区，版本 4 增加前缀缓存命中/未命中累计；
-// 旧版本缺失字段按零值加载，旧数据不会丢弃。
-const fileVersion = 4
+// 增加模型生效倍率分区，版本 4 增加前缀缓存命中/未命中累计，版本 5 增加客户端
+// 中断计数；旧版本缺失字段按零值加载，旧数据不会丢弃。
+const fileVersion = 5
 
 // bucket 一个 (时间片, realm, uid, model, rate) 的累计量。
 // JSON 字段名刻意取短，因为桶数量会随时间增长。
@@ -68,6 +68,7 @@ type bucket struct {
 	CRT   int64   `json:"ct,omitempty"` // 同时具备 credit 与 token 的 Token 合计
 	CH    int64   `json:"ch,omitempty"` // 前缀缓存命中 token 累计（上游回该维度才累计）
 	CM    int64   `json:"cm,omitempty"` // 前缀缓存未命中 token 累计
+	INT   int64   `json:"int,omitempty"` // 客户端中断的尝试数（Err 的子集，token 未计）
 }
 
 // file 落盘结构。
@@ -156,6 +157,11 @@ type Delta struct {
 	HasLatency       bool
 	TokensPerSecond  float64
 	HasTPS           bool
+	// Interrupted 本次尝试是「客户端中断」（写失败 / 上下文取消）：上游确实已经
+	// 产生了 token 并扣了积分，但末帧 usage 永远到不了，本次只能按 0 计。
+	// 与「上游报错 / 传输失败」区分开——只有这类差额是**已知存在却没记上**的，
+	// 用量页据此解释「与 NewAPI 等前端对不上账」的原因（它们会本地估算补记）。
+	Interrupted bool
 }
 
 // Add 记录一次请求尝试。
@@ -186,6 +192,11 @@ func (r *Recorder) Add(now time.Time, realm, uid, model string, d Delta, ok bool
 	b.Req++
 	if !ok {
 		b.Err++
+	}
+	// 客户端中断单列：它是 Err 的子集，但语义不同——上游 token 已消耗，
+	// 只是 usage 拿不到，用量页需要把它和「上游报错」分开提示。
+	if d.Interrupted {
+		b.INT++
 	}
 	if d.HasPromptTokens {
 		b.PT += d.PromptTokens
@@ -275,6 +286,7 @@ func (r *Recorder) Rollup(now time.Time) {
 			dst.CRT += src.CRT
 			dst.CH += src.CH
 			dst.CM += src.CM
+			dst.INT += src.INT
 		}
 		delete(r.buckets, m.from)
 	}
@@ -350,6 +362,10 @@ func (r *Recorder) Save() { r.flush(true) }
 type Agg struct {
 	Requests           int64   `json:"requests"`
 	Errors             int64   `json:"errors"`
+	// Interrupted 客户端中断的尝试数（Errors 的子集）：上游 token 已消耗但末帧
+	// usage 不可得，本窗口只能按 0 计入 PT/CT/CR。单列出来是为了让「面板与
+	// NewAPI 等前端数字对不上」可核对——它们会按请求体本地估算补记这部分。
+	Interrupted        int64   `json:"interrupted_requests,omitempty"`
 	PromptTokens       int64   `json:"prompt_tokens"`
 	CompletionTok      int64   `json:"completion_tokens"`
 	TotalTokens        int64   `json:"total_tokens"`
@@ -377,6 +393,7 @@ type aggAcc struct {
 func (g *aggAcc) add(b *bucket) {
 	g.Requests += b.Req
 	g.Errors += b.Err
+	g.Interrupted += b.INT
 	g.PromptTokens += b.PT
 	g.CompletionTok += b.CT
 	g.TotalTokens += b.TT

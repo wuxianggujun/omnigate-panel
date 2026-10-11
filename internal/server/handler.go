@@ -824,6 +824,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				HasLatency:       delta.HasLatencyMs,
 				TokensPerSecond:  delta.TokensPerSecond,
 				HasTPS:           delta.HasTokensPerSecond,
+				// 客户端中断：上游 token 已消耗但末帧 usage 拿不到，用量页单独提示。
+				Interrupted: st.outcome == reqlog.OutcomeInterrupted,
 			}, delta.HasTotalTokens || delta.HasCompletionTokens || delta.HasPromptTokens)
 		}
 	}

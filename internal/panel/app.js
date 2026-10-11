@@ -2791,6 +2791,9 @@ function usRow(name, sub, a, mid, withPerf) {
     (mid || '') +
     '<td class="num">' + fmtTok(a.requests) + '</td>' +
     '<td class="num">' + (a.errors ? '<span style="color:var(--warn)">' + fmtTok(a.errors) + '</span>' : '—') + '</td>' +
+    '<td class="num">' + (a.interrupted_requests
+      ? '<span style="color:var(--warn)" title="客户端中断：上游已消耗但末帧 usage 未到，未计入 Token">' + fmtTok(a.interrupted_requests) + '</span>'
+      : '—') + '</td>' +
     '<td class="num">' + fmtTok(a.prompt_tokens) + '</td>' +
     '<td class="num">' + fmtTok(a.completion_tokens) + '</td>' +
     '<td class="num">' + fmtTok(a.total_tokens) +
@@ -2806,9 +2809,9 @@ function usRow(name, sub, a, mid, withPerf) {
    账号 / 模型 / 域三张表此前各自占一个 box，页面纵向拉得很长且表头结构几乎一样。
    现在合成一个 box：表头由维度定义生成，行渲染复用 usRow，切换零请求。 */
 const US_DIMS = {
-  account: { key: 'by_account', title: '账号', withRealm: true, withPerf: true, span: 10 },
-  model: { key: 'by_model', title: '模型', withRealm: false, withPerf: false, span: 7 },
-  realm: { key: 'by_realm', title: 'realm', withRealm: false, withPerf: false, span: 7 },
+  account: { key: 'by_account', title: '账号', withRealm: true, withPerf: true, span: 11 },
+  model: { key: 'by_model', title: '模型', withRealm: false, withPerf: false, span: 8 },
+  realm: { key: 'by_realm', title: 'realm', withRealm: false, withPerf: false, span: 8 },
 };
 
 // usSortRows 按当前排序字段降序（默认合计 Token，最大者最相关）。
@@ -2827,7 +2830,7 @@ function usDimHead(dim) {
   const m = US_DIMS[dim] || US_DIMS.account;
   return '<tr><th class="mark" aria-hidden="true"></th><th>' + esc(m.title) + '</th>' +
     (m.withRealm ? '<th>域</th>' : '') +
-    '<th class="num">请求</th><th class="num">失败</th>' +
+    '<th class="num">请求</th><th class="num">失败</th><th class="num">中断</th>' +
     '<th class="num">Prompt</th><th class="num">Completion</th><th class="num">合计</th>' +
     (m.withPerf ? '<th class="num">均延迟</th><th class="num">均速率</th>' : '') +
     '</tr>';
@@ -2935,6 +2938,9 @@ function renderUsage(d) {
   const ct = Number(t.completion_tokens || 0);
   const reqs = Number(t.requests || 0);
   const errs = Number(t.errors || 0);
+  // 客户端中断的尝试数（errors 的子集）：上游 token 已消耗，但末帧 usage 到不了，
+  // 本窗口只能按 0 计——它是「面板与 NewAPI 等前端对不上账」的唯一系统性来源。
+  const intr = Number(t.interrupted_requests || 0);
   const okRate = reqs ? (reqs - errs) / reqs * 100 : null;
   // 构成条要的是合法 CSS 宽度，usPct 在无样本时返回 "—"，不能直接拼进 style。
   const pctW = (part) => total ? Math.max(0, Math.min(100, Number(part || 0) / total * 100)).toFixed(2) + '%' : '0%';
@@ -2950,9 +2956,24 @@ function renderUsage(d) {
     usKpi(fmtTok(pt), 'prompt', 'c-soft', '占比 ' + usPct(pt, total)) +
     usKpi(fmtTok(ct), 'completion', 'c-ok', '占比 ' + usPct(ct, total)) +
     usKpi(String(errs), '失败尝试', errs ? 'c-warn' : 'c-mute',
-      okRate == null ? '—' : (errs ? '成功率 ' + okRate.toFixed(1) + '%' : '成功率 100%')) +
+      (okRate == null ? '—' : (errs ? '成功率 ' + okRate.toFixed(1) + '%' : '成功率 100%')) +
+      (intr ? ' · 中断 ' + fmtTok(intr) + ' 次' : '')) +
     usKpi(fmtMs(t.avg_latency_ms), '平均延迟', 'c-soft',
       t.avg_tokens_per_second ? '吐字 ' + fmtRate(t.avg_tokens_per_second) : '无速率样本');
+
+  // 「客户端中断」是唯一一类**已知消耗却没记上**的请求：上游照常生成并扣了积分，
+  // 只是末帧 usage 没到（客户端先跑了），本窗口只能按 0 计。不解释清楚，用户拿面板
+  // 去对 NewAPI 的账会永远差一截、且查无头绪。只在真有这种请求时才占地方。
+  const gapWrap = $('usGapWrap');
+  if (gapWrap) {
+    gapWrap.hidden = !intr;
+    if (intr) {
+      $('usGap').innerHTML = '⚠ 本窗口有 <b>' + fmtTok(intr) + '</b> 次尝试未采到上游 token 用量' +
+        '（客户端中断）：上游实际已消耗 token / 积分，但末帧 usage 未到达，故未计入上表。' +
+        '与 NewAPI 等前端对账时，差额基本就是这部分——它们拿不到 usage 会按请求体本地估算补记。' +
+        '逐条可在「请求记录」把结果筛成「中断」查看。';
+    }
+  }
 
   // 卡片、明细表与时序图全部按所选窗口统计（切窗口数字随之变化）；
   // 「全部历史」含 90 天前折叠出的日桶。这里标注当前口径与数据起点。

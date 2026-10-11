@@ -353,3 +353,49 @@ func TestCacheTokensPersistRoundtrip(t *testing.T) {
 		t.Fatalf("恢复后 cache_hit_rate=%v want 75", snap.CreditByModel[0].CacheHitRate)
 	}
 }
+
+// TestInterruptedAttemptsCountedWithoutTokens：客户端中断的尝试（上游已消耗但
+// 末帧 usage 未到）要计入请求数与中断数，但**不贡献任何 token**——用量页据此
+// 解释「与 NewAPI 等前端对不上账」的差额来源，所以既不能漏计、也不能伪造成 token。
+func TestInterruptedAttemptsCountedWithoutTokens(t *testing.T) {
+	dir := t.TempDir()
+	r := New(dir + "/usage.json")
+	base := time.Date(2026, 10, 1, 10, 0, 0, 0, time.Local)
+	// 一次正常成功：1000 prompt / 20 completion。
+	r.Add(base, "cn", "u1", "m", Delta{
+		PromptTokens: 1000, HasPromptTokens: true,
+		CompletionTokens: 20, HasCompletion: true,
+		TotalTokens: 1020, HasTotal: true,
+	}, true)
+	// 一次客户端中断：空 delta + Interrupted（上游其实已经消耗了 token）。
+	r.Add(base.Add(time.Minute), "cn", "u1", "m", Delta{Interrupted: true}, false)
+
+	snap := r.Snapshot(0, nil)
+	tt := snap.Totals
+	if tt.Requests != 2 || tt.Errors != 1 || tt.Interrupted != 1 {
+		t.Fatalf("totals req=%d err=%d intr=%d, want 2/1/1", tt.Requests, tt.Errors, tt.Interrupted)
+	}
+	if tt.PromptTokens != 1000 || tt.CompletionTok != 20 || tt.TotalTokens != 1020 {
+		t.Fatalf("中断尝试不得贡献 token: %+v", tt)
+	}
+	// 按账号维度同样可下钻（面板「用量明细」的「中断」列）。
+	var found bool
+	for _, row := range snap.ByAccount {
+		if row.Key == "u1" {
+			found = true
+			if row.Interrupted != 1 {
+				t.Fatalf("by_account 中断=%d want 1", row.Interrupted)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("by_account 缺 u1: %+v", snap.ByAccount)
+	}
+
+	// 落盘往返：v5 的 int 字段必须无损恢复（否则重启后提示会消失）。
+	r.Save()
+	snap2 := New(dir + "/usage.json").Snapshot(0, nil)
+	if snap2.Totals.Interrupted != 1 || snap2.Totals.PromptTokens != 1000 {
+		t.Fatalf("恢复后 intr=%d pt=%d, want 1/1000", snap2.Totals.Interrupted, snap2.Totals.PromptTokens)
+	}
+}

@@ -247,6 +247,8 @@ func (s *Server) recordUsage(meta *gateway.ReqMeta, ev reqlog.Event) {
 		HasCacheTokens:   ev.CacheHitTokens > 0 || ev.CacheMissTokens > 0,
 		LatencyMs:        ev.DurationMs,
 		HasLatency:       true,
+		// 客户端中断：上游 token 已消耗但 usage 拿不到，用量页单独提示。
+		Interrupted: ev.Outcome == reqlog.OutcomeInterrupted,
 	}
 	// 生成速率：与 WorkBuddy 侧 tokensPerSecond 同口径——扣除 TTFB 后剩余窗口
 	// 不足 200ms 视为「生成时长不可测」，退回端到端耗时（见 internal/server）。

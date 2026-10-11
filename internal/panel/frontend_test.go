@@ -1074,3 +1074,45 @@ process.stdout.write(JSON.stringify({
 		t.Fatalf("run log formatting=%s\nwant %s", strings.TrimSpace(string(out)), want)
 	}
 }
+
+// TestUsagePageSurfacesInterruptedRequests 回归：客户端中断的请求（上游已消耗 token
+// 但末帧 usage 永远到不了）必须在用量页被显式标注。
+//
+// 为什么需要：面板用量只按「采到的 usage」累加，而 NewAPI 等前端拿不到 usage 时会按
+// 请求体本地估算补记，两边天然对不上账。用户曾据此怀疑面板漏记——这个标注一旦被
+// 顺手删掉，差额又会变成查无头绪的悬案，所以在这里钉死。
+func TestUsagePageSurfacesInterruptedRequests(t *testing.T) {
+	htmlBytes, err := os.ReadFile("index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(htmlBytes)
+	for _, needle := range []string{`id="usGapWrap"`, `id="usGap"`} {
+		if !strings.Contains(html, needle) {
+			t.Errorf("index.html 用量页缺少「未计入 token」提示容器: %q", needle)
+		}
+	}
+
+	jsBytes, err := os.ReadFile("app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	js := string(jsBytes)
+	for _, needle := range []string{
+		"interrupted_requests", // totals / by_* 的中断计数
+		"$('usGapWrap')",       // 用量页提示的接线
+		`<th class="num">中断</th>`,
+	} {
+		if !strings.Contains(js, needle) {
+			t.Errorf("app.js 缺少中断口径接线: %q", needle)
+		}
+	}
+
+	cssBytes, err := os.ReadFile("theme.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(cssBytes), ".usgap") {
+		t.Error("theme.css 缺少 .usgap 提示样式")
+	}
+}

@@ -103,6 +103,10 @@ type ChatRequest struct {
 	Store bool
 	// Metadata is echoed back verbatim in the response ("metadata").
 	Metadata map[string]any
+	// DroppedTools 是入站 tools 里没能映射成 chat 函数、被丢弃的条目数（type 非
+	// function，或缺 name）。非零 = 模型看不见这些工具，只能干聊——调用方必须
+	// 记一行日志：这类「工具静默消失」此前只能靠用户报障才发现。
+	DroppedTools int
 }
 
 // RequestToChat translates a Responses API request body into a chat/completions
@@ -187,8 +191,9 @@ func RequestToChat(raw []byte, store *Store) (*ChatRequest, error) {
 	if req.ParallelToolCalls != nil {
 		out["parallel_tool_calls"] = *req.ParallelToolCalls
 	}
-	if tools := toolsToChat(req.Tools); tools != nil {
-		out["tools"] = tools
+	chatTools, droppedTools := toolsToChat(req.Tools)
+	if chatTools != nil {
+		out["tools"] = chatTools
 	}
 	if tc := toolChoiceToChat(req.ToolChoice); tc != nil {
 		out["tool_choice"] = tc
@@ -208,13 +213,14 @@ func RequestToChat(raw []byte, store *Store) (*ChatRequest, error) {
 	}
 
 	return &ChatRequest{
-		Body:       body,
-		Stream:     req.Stream,
-		Model:      req.Model,
-		Messages:   msgs,
-		PreviousID: req.PreviousResponseID,
-		Store:      req.Store == nil || *req.Store, // OpenAI defaults store to true
-		Metadata:   meta,
+		Body:         body,
+		Stream:       req.Stream,
+		Model:        req.Model,
+		Messages:     msgs,
+		PreviousID:   req.PreviousResponseID,
+		Store:        req.Store == nil || *req.Store, // OpenAI defaults store to true
+		Metadata:     meta,
+		DroppedTools: droppedTools,
 	}, nil
 }
 
@@ -371,13 +377,17 @@ func contentToChat(raw json.RawMessage) (any, error) {
 // upstream only treats an entry as callable when it carries parameters, so a
 // client that omits it (legal in some SDKs, required by the spec) would
 // otherwise get tools that are silently invisible to the model.
-func toolsToChat(tools []tool) []map[string]any {
+//
+// The second return is the number of dropped definitions; callers log it.
+func toolsToChat(tools []tool) ([]map[string]any, int) {
 	if len(tools) == 0 {
-		return nil
+		return nil, 0
 	}
 	out := make([]map[string]any, 0, len(tools))
+	dropped := 0
 	for _, t := range tools {
 		if t.Type != "" && t.Type != "function" {
+			dropped++
 			continue
 		}
 		name, desc, params, strict := t.Name, t.Description, t.Parameters, t.Strict
@@ -385,6 +395,7 @@ func toolsToChat(tools []tool) []map[string]any {
 			name, desc, params, strict = t.Function.Name, t.Function.Description, t.Function.Parameters, t.Function.Strict
 		}
 		if name == "" {
+			dropped++
 			continue
 		}
 		fn := map[string]any{"name": name}
@@ -401,9 +412,9 @@ func toolsToChat(tools []tool) []map[string]any {
 		out = append(out, map[string]any{"type": "function", "function": fn})
 	}
 	if len(out) == 0 {
-		return nil
+		return nil, dropped
 	}
-	return out
+	return out, dropped
 }
 
 // toolChoiceToChat translates tool_choice into the chat form: a string passes

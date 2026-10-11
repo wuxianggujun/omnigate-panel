@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"io"
+	"log"
 	"net/http"
 
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/openai"
@@ -26,6 +27,10 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeJSON(w, 400, openai.ErrorJSON("invalid_json", err.Error()))
 		return
+	}
+	if cr.DroppedTools > 0 {
+		// 同 WorkBuddy 侧：工具被静默丢弃会让模型只能干聊，必须留痕。
+		log.Printf("WARN: [omnigate] /v1/responses: dropped %d tool definition(s) in translation (only function tools carrying a name are supported)", cr.DroppedTools)
 	}
 	var req openai.ChatRequest
 	if err := json.Unmarshal(cr.Body, &req); err != nil {

@@ -15,6 +15,7 @@ package server
 import (
 	"bytes"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 
@@ -32,6 +33,11 @@ func (h *Handler) responses(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
+	}
+	if cr.DroppedTools > 0 {
+		// 工具被静默丢弃 = 上游收不到 tools、模型只能干聊，是「会话里永远没有
+		// 工具调用」的头号成因。留一行日志，别让用户报障成为唯一的发现途径。
+		log.Printf("WARN: [server] /v1/responses: dropped %d tool definition(s) in translation (only function tools carrying a name are supported)", cr.DroppedTools)
 	}
 
 	// 进程内投递：把转换后的 chat 请求交给既有 chatCompletions，复用全部逻辑。

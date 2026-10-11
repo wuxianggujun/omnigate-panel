@@ -404,6 +404,9 @@ func TestToolsToChatAcceptsChatNestedShape(t *testing.T) {
 	if names[0] != "nested" || names[1] != "flat" || names[2] != "no_params" {
 		t.Fatalf("tool names=%v", names)
 	}
+	if cr.DroppedTools != 0 {
+		t.Errorf("DroppedTools=%d want 0（三种形态都应被接受）", cr.DroppedTools)
+	}
 	// 嵌套形态的 description/parameters 必须原样带过去。
 	fn0 := tools[0].(map[string]any)["function"].(map[string]any)
 	if fn0["description"] != "d" {
@@ -416,6 +419,29 @@ func TestToolsToChatAcceptsChatNestedShape(t *testing.T) {
 	fn2 := tools[2].(map[string]any)["function"].(map[string]any)
 	if params2, _ := fn2["parameters"].(map[string]any); params2["type"] != "object" {
 		t.Errorf("缺省 parameters=%v (want object schema)", fn2["parameters"])
+	}
+}
+
+// TestRequestToChatReportsDroppedTools 非 function / 缺 name 的工具会被丢弃，计数
+// 必须如实回报（调用方据此打日志）——静默丢弃正是「工具永远不触发」的成因。
+func TestRequestToChatReportsDroppedTools(t *testing.T) {
+	cr, err := RequestToChat([]byte(`{"model":"m","input":"hi","tools":[
+		{"type":"function","name":"ok","parameters":{"type":"object"}},
+		{"type":"web_search_preview"},
+		{"type":"function"}
+	]}`), nil)
+	if err != nil {
+		t.Fatalf("translate: %v", err)
+	}
+	if cr.DroppedTools != 2 {
+		t.Fatalf("DroppedTools=%d want 2", cr.DroppedTools)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(cr.Body, &got); err != nil {
+		t.Fatalf("chat not json: %v", err)
+	}
+	if tools, _ := got["tools"].([]any); len(tools) != 1 {
+		t.Fatalf("tools=%v want only the function tool", got["tools"])
 	}
 }
 

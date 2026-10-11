@@ -120,6 +120,9 @@ type chatResult struct {
 	// sawData 表示本次流至少产生过一个「有效帧」（正文 / 思考 / 工具调用）。
 	// 全 false = 上游 200 但空流，按失败观测（与非流式空响应同语义）。
 	sawData bool
+	// sample 是上游「产生不了任何有效帧」的原始片段（非 SSE 的 JSON 体 / 无法识别
+	// 的帧）。只在 0 帧失败时用于日志与错误信息，让上游的真实说法不再被静默吞掉。
+	sample []byte
 }
 
 // Option configures the Gateway at construction time.
@@ -572,10 +575,12 @@ func (g *Gateway) HandleChat(ctx context.Context, req *openai.ChatRequest, w htt
 		}
 		if !res.sawData {
 			// 上游 200 但空流（0 有效帧）：不是成功。写 error 帧兜底，并用 502 观测
-			// （与非流式空响应同语义，与 WorkBuddy 侧 empty stream 一致）。
-			g.log.Error("对话失败 %s: 上游空流（200+0 帧）", displayModel)
+			// （与非流式空响应同语义，与 WorkBuddy 侧 empty stream 一致）。上游原文
+			// 一并带出：这类失败最常见的成因是上游用 200 回了一个非 SSE 的 JSON 错误体
+			// （限流 / 审核 / 参数错），只报 "empty" 会把真实原因彻底吞掉。
+			g.log.Error("对话失败 %s: 上游空流（200+0 帧）%s", displayModel, sampleSuffix(res.sample))
 			markStreamFailure(ctx, reqlog.OutcomeStreamError, http.StatusBadGateway)
-			fmt.Fprintf(ew, "data: %s\n\n", openai.ErrorJSON("upstream_error", "empty upstream stream"))
+			fmt.Fprintf(ew, "data: %s\n\n", openai.ErrorJSON("upstream_error", "empty upstream stream"+sampleSuffix(res.sample)))
 			_ = openai.EmitFinish(ew, id, displayModel, created, "stop")
 			_ = openai.Done(ew)
 			flush()
@@ -610,9 +615,10 @@ func (g *Gateway) HandleChat(ctx context.Context, req *openai.ChatRequest, w htt
 		return
 	}
 	if !res.sawData {
-		// 上游 200 但空响应（0 有效帧）：不是成功（与流式空流同语义）。
-		g.log.Error("对话失败 %s: 上游空响应", displayModel)
-		writeJSON(w, 502, openai.ErrorJSON("upstream_error", "empty upstream response"))
+		// 上游 200 但空响应（0 有效帧）：不是成功（与流式空流同语义）。上游原文一并
+		// 带出，原因见流式分支的同名注释。
+		g.log.Error("对话失败 %s: 上游空响应%s", displayModel, sampleSuffix(res.sample))
+		writeJSON(w, 502, openai.ErrorJSON("upstream_error", "empty upstream response"+sampleSuffix(res.sample)))
 		return
 	}
 	if m := ReqMetaFrom(ctx); m != nil {
@@ -650,6 +656,23 @@ func markStreamFailure(ctx context.Context, outcome string, status int) {
 	if status != 0 {
 		m.Status = status
 	}
+}
+
+// sampleSuffix renders an upstream "produced no usable frame" sample for a
+// failure message: whitespace is flattened so the text stays readable both in a
+// log line and inside a JSON error body, and it is truncated.
+func sampleSuffix(sample []byte) string {
+	if len(sample) == 0 {
+		return ""
+	}
+	s := strings.Join(strings.Fields(string(sample)), " ")
+	if len(s) > 300 {
+		s = s[:300] + "…"
+	}
+	if s == "" {
+		return ""
+	}
+	return " · 上游原文: " + s
 }
 
 // errWriter 记录首个写失败。SSE 逐帧写入时客户端可能中途断连，写失败本身不改变
@@ -816,6 +839,11 @@ func (g *Gateway) runChat(ctx context.Context, provName string, prov provider.Pr
 	})
 	if err != nil {
 		return nil, err
+	}
+	// 上游「无有效帧」时的原文样本（诊断用；实现 provider.Sampler 的流才有）。
+	// 放在 drain 之后：样本是边读边攒的。
+	if sp, ok := stream.(provider.Sampler); ok {
+		res.sample = sp.UpstreamSample()
 	}
 	if res.errText != "" {
 		return nil, fmt.Errorf("%s", res.errText)

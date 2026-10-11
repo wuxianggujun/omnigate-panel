@@ -174,15 +174,48 @@ type AccountModelLister interface {
 	ListModelsWithAccount(ctx context.Context, acc *Account) ([]openai.Model, error)
 }
 
+// MaxSample bounds how many upstream bytes a stream keeps for diagnostics.
+const MaxSample = 600
+
+// Sampler is implemented by streams that can report a bounded sample of the
+// upstream bytes that produced no usable event: non-SSE junk lines (a JSON error
+// body sent with HTTP 200) plus frames we could not interpret (empty deltas, an
+// unknown field shape). The gateway reads it only when a 200 stream yielded 0
+// valid frames, so the upstream's real message is surfaced instead of vanishing
+// behind a bare "empty upstream stream".
+type Sampler interface {
+	UpstreamSample() []byte
+}
+
 // SSEScanner reads Server-Sent Events and returns the concatenated data payload
 // of each event. Comment lines and non-data fields are ignored.
 type SSEScanner struct {
 	r *bufio.Reader
+	// junk 保存「不是 SSE 字段」的原始行（最多 MaxSample 字节）。上游用 200 回一个
+	// 普通 JSON 错误体时，这些行是全空 data 流里唯一的线索，此前被静默丢掉。
+	junk []byte
 }
 
 // NewSSEScanner wraps r.
 func NewSSEScanner(r io.Reader) *SSEScanner {
 	return &SSEScanner{r: bufio.NewReaderSize(r, 64*1024)}
+}
+
+// Junk returns a bounded sample of the non-SSE lines seen so far (diagnostics).
+func (s *SSEScanner) Junk() []byte { return s.junk }
+
+// note appends one raw line to the junk sample, capped at MaxSample bytes.
+func (s *SSEScanner) note(line string) {
+	if len(s.junk) >= MaxSample {
+		return
+	}
+	s.junk = append(s.junk, line...)
+	if len(s.junk) < MaxSample {
+		s.junk = append(s.junk, '\n')
+	}
+	if len(s.junk) > MaxSample {
+		s.junk = s.junk[:MaxSample]
+	}
 }
 
 // Next returns the next event's data payload, or io.EOF when the stream ends.
@@ -208,7 +241,11 @@ func (s *SSEScanner) Next() (string, error) {
 			v := strings.TrimPrefix(line[5:], " ")
 			data = append(data, v)
 		default:
-			// event:, id:, retry: — ignored
+			// event: / id: / retry: 是合法 SSE 字段；其余（典型：非 SSE 的 JSON
+			// 错误体）记进 junk 供诊断——否则 0 帧失败时毫无线索。
+			if !strings.HasPrefix(line, "event:") && !strings.HasPrefix(line, "id:") && !strings.HasPrefix(line, "retry:") {
+				s.note(line)
+			}
 		}
 		if err != nil {
 			if len(data) > 0 {

@@ -24,6 +24,11 @@ type OpenAIStream struct {
 	// pendingFinish buffers the finish_reason until the stream ends, so a
 	// trailing usage chunk is not lost (upstreams send finish then usage).
 	pendingFinish *string
+
+	// unusable 保存「解析成功但产生不了任何事件」的帧原文（最多 MaxSample 字节）：
+	// 例如上游只发空 delta，或把思考放在我们不认识的字段里。整条流因此 0 帧时，
+	// 这是唯一能说明上游到底发了什么的线索。
+	unusable []byte
 }
 
 // NewOpenAIStream wraps an OpenAI-compatible SSE response body.
@@ -33,6 +38,33 @@ func NewOpenAIStream(rc io.ReadCloser) *OpenAIStream {
 
 // Close releases the underlying body.
 func (s *OpenAIStream) Close() error { return s.rc.Close() }
+
+// UpstreamSample returns a bounded sample of the upstream bytes that produced no
+// usable event: non-SSE junk lines (a JSON error body sent with HTTP 200) plus
+// frames we could not interpret (empty deltas, unknown field shapes). It
+// implements provider.Sampler; the gateway reads it only when the stream yielded
+// 0 valid frames, so the upstream's real message is not silently lost.
+func (s *OpenAIStream) UpstreamSample() []byte {
+	junk := s.sc.Junk()
+	out := make([]byte, 0, len(junk)+len(s.unusable))
+	out = append(out, junk...)
+	out = append(out, s.unusable...)
+	return out
+}
+
+// noteFrame appends one raw frame to the unusable sample, capped at MaxSample.
+func (s *OpenAIStream) noteFrame(frame string) {
+	if len(s.unusable) >= MaxSample {
+		return
+	}
+	s.unusable = append(s.unusable, frame...)
+	if len(s.unusable) < MaxSample {
+		s.unusable = append(s.unusable, '\n')
+	}
+	if len(s.unusable) > MaxSample {
+		s.unusable = s.unusable[:MaxSample]
+	}
+}
 
 type openAIToolCallDelta struct {
 	Index    int    `json:"index"`
@@ -137,6 +169,8 @@ func (s *OpenAIStream) Recv() (Event, error) {
 			s.usage = ch.Usage.toUsage()
 		}
 		if len(ch.Choices) == 0 {
+			// 没有 choices、也没有 usage/error：不是认识的帧，记下来供诊断。
+			s.noteFrame(data)
 			continue
 		}
 		c0 := ch.Choices[0]
@@ -160,6 +194,12 @@ func (s *OpenAIStream) Recv() (Event, error) {
 				return Event{Type: EventToolCalls, ToolCalls: c}, nil
 			}
 			continue
+		}
+		if len(c0.Delta.ToolCalls) == 0 {
+			// 有 choices，但既没有正文/思考、也没有工具调用和 finish：这一帧什么都
+			// 产生不了（典型：思考放在我们不认识的字段里）。记下来，整条流 0 帧时
+			// 才查得清原因。
+			s.noteFrame(data)
 		}
 	}
 }

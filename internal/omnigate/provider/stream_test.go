@@ -155,3 +155,58 @@ func TestOpenAIStreamErrorFrameNoMessage(t *testing.T) {
 		t.Fatalf("event = %+v, want non-empty error", e)
 	}
 }
+
+// TestUpstreamSampleNonSSEBody 上游用 200 回了一个非 SSE 的 JSON 错误体：原文必须
+// 留在样本里。0 帧失败时才查得清原因——此前这些行被 SSEScanner 静默丢掉，
+// 只报 "empty upstream response"，限流/审核/参数错的真实原因就没了。
+func TestUpstreamSampleNonSSEBody(t *testing.T) {
+	s := NewOpenAIStream(io.NopCloser(strings.NewReader(
+		`{"code":200003,"message":"authorization_verify_error"}`)))
+	for {
+		if _, err := s.Recv(); err != nil {
+			break
+		}
+	}
+	if got := string(s.UpstreamSample()); !strings.Contains(got, "200003") {
+		t.Fatalf("sample = %q, want the non-SSE body", got)
+	}
+}
+
+// TestUpstreamSampleUnusableFrames 帧能解析、但产生不了任何事件（空 delta，或思考
+// 放在我们不认识的字段里）：帧原文同样要留样本，否则这类 0 帧失败毫无线索。
+func TestUpstreamSampleUnusableFrames(t *testing.T) {
+	s := NewOpenAIStream(sseScript(
+		`{"id":"c1","choices":[{"index":0,"delta":{"reasoning":"思考在不认识的字段里"}}]}`,
+		`[DONE]`,
+	))
+	events := 0
+	for {
+		if _, err := s.Recv(); err != nil {
+			break
+		}
+		events++
+	}
+	if events != 0 {
+		t.Fatalf("events = %d, want 0 (this frame shape is unusable)", events)
+	}
+	if got := string(s.UpstreamSample()); !strings.Contains(got, "reasoning") {
+		t.Fatalf("sample = %q, want the unusable frame", got)
+	}
+}
+
+// TestUpstreamSampleBounded 样本必须封顶：上游狂发垃圾帧不能把内存吃满。
+func TestUpstreamSampleBounded(t *testing.T) {
+	frames := make([]string, 0, 50)
+	for i := 0; i < 50; i++ {
+		frames = append(frames, strings.Repeat("x", 100))
+	}
+	s := NewOpenAIStream(sseScript(frames...))
+	for {
+		if _, err := s.Recv(); err != nil {
+			break
+		}
+	}
+	if n := len(s.UpstreamSample()); n > 2*MaxSample {
+		t.Fatalf("sample size = %d, want <= %d", n, 2*MaxSample)
+	}
+}

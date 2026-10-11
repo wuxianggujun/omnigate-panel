@@ -77,6 +77,10 @@ type Gateway struct {
 
 	// sess 会话健康台账（进程内，目前用于 runable 会话过期预警）。见 session.go。
 	sess *sessionHealth
+
+	// credits 余额快照缓存（进程内，不落盘），供「快过期积分优先」选号与面板角标。
+	// 见 credits.go。
+	credits *creditCache
 }
 
 // raccoonPending remembers an in-flight browser authorization.
@@ -187,6 +191,7 @@ func New(cfg *config.Config, st *state.State, log *logx.Logger, opts ...Option) 
 		traePend:   map[string]traePending{},
 		cool:       newCooldownLedger(),
 		sess:       newSessionHealth(),
+		credits:    newCreditCache(),
 	}
 	for _, o := range opts {
 		o(g)
@@ -942,6 +947,8 @@ func (g *Gateway) openStream(ctx context.Context, provName string, prov provider
 		start = 0
 	}
 	now := time.Now()
+	// 快过期积分优先（P4）：先用现有余额快照排序，缺失/过期时后台单飞刷新。
+	g.ensureCredits(provName)
 	var lastErr error
 	// 分两趟：第一趟跳过冷却中的账号（避免对刚被限流的账号连打）；若第一趟跳过了
 	// 一些账号且都没试成，第二趟只补试这些被跳过的——冷却只是「优先绕开」，不该把
@@ -953,6 +960,9 @@ func (g *Gateway) openStream(ctx context.Context, provName string, prov provider
 			for k := 0; k < n; k++ {
 				order = append(order, (start+k)%n)
 			}
+			// 快过期积分优先：把窗口内有快过期批次的账号提到最前（层内按最早到期、
+			// 金额排序），其余保持轮询顺序。无快照时原样返回 = 旧行为。
+			order = g.prioritizeExpiring(provName, accts, order, now)
 		} else {
 			if len(skipped) == 0 {
 				break
@@ -1143,6 +1153,8 @@ func (g *Gateway) RunableCheckin(ctx context.Context, providerName, label string
 		oc := RunableCheckinOutcome{Label: acc.Label, Success: true, Message: "会话有效"}
 		if cr := rp.Client().FetchCredits(ctx, cookie); cr.OK {
 			oc.Message = fmt.Sprintf("会话有效，积分 %d（日 %d + 月 %d）", cr.Total, cr.Daily, cr.Monthly)
+			// 保活顺带刷新快过期优先选号的余额快照。
+			g.noteCredits(providerName, acc.Label, cr.Total, runableWallets(cr))
 		} else if cr.Error != "" {
 			oc.Message = "会话有效（读取积分失败：" + cr.Error + "）"
 		}
@@ -1207,6 +1219,8 @@ func (g *Gateway) RunableAccounts(ctx context.Context, providerName string) ([]m
 					{"type": "monthly_credits", "displayName": "每月额度", "balance": cr.Monthly},
 					{"type": "daily_credits", "displayName": "每日额度", "balance": cr.Daily},
 				}
+				// 顺带把余额喂给快过期优先选号的缓存。
+				g.noteCredits(providerName, acc.Label, cr.Total, runableWallets(cr))
 			} else if cr.Error != "" {
 				item["balance_error"] = cr.Error
 			}

@@ -1231,3 +1231,68 @@ process.stdout.write(JSON.stringify({
 		t.Fatalf("gateway key card=%s\nwant %s", out, want)
 	}
 }
+
+// TestAppJSCreditRoutingForm 钉住「积分快过期优先」表单 ↔ credit_routing 的映射。
+//
+// 这个映射有两个容易搞错的点：① 留空必须**删除字段**（回落后端默认值），否则会把
+// 面板打开时的空串写成 0/""，配置里凭空多出一堆无意义字段；② enabled 必须恒写，
+// 否则用户勾掉「启用」后保存，字段消失 → 后端按「缺省启用」处理，等于关不掉。
+func TestAppJSCreditRoutingForm(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; credit routing form test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const start = src.indexOf('function collectCreditRouting');
+const end = src.indexOf('async function saveOmniConfig');
+if (start < 0 || end < 0 || end < start) throw new Error('credit routing region not found');
+const fields = {};
+const ctx = {
+  JSON, Math, Array, Object, String, Number, isNaN,
+  $: id => fields[id],
+};
+vm.createContext(ctx);
+vm.runInContext(src.slice(start, end) + '\nthis.collectCreditRouting = collectCreditRouting;', ctx);
+function run(init, vals) {
+  ctx.omniCfg = init;
+  for (const k of Object.keys(fields)) delete fields[k];
+  Object.assign(fields, vals);
+  ctx.collectCreditRouting();
+  return ctx.omniCfg.credit_routing;
+}
+process.stdout.write(JSON.stringify({
+  filled: run({}, {
+    crEnabled: { checked: true },
+    crWindow: { value: ' 24h ' },
+    crMin: { value: '3' },
+    crRefresh: { value: '5m' },
+  }),
+  blanked: run({ credit_routing: { expiring_soon: '1h', min_expiring: 9, refresh_interval: '1m' } }, {
+    crEnabled: { checked: false },
+    crWindow: { value: '' },
+    crMin: { value: '' },
+    crRefresh: { value: '' },
+  }),
+  // 卡片没渲染出来（元素全缺）时绝不能把 enabled 翻成 false
+  missing: run({ credit_routing: { enabled: true, expiring_soon: '1h' } }, {}),
+}));`
+	f, err := os.CreateTemp(t.TempDir(), "credit-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("credit routing form node test failed: %v\n%s", err, out)
+	}
+	const want = `{"filled":{"enabled":true,"expiring_soon":"24h","min_expiring":3,"refresh_interval":"5m"},` +
+		`"blanked":{"enabled":false},"missing":{"enabled":true,"expiring_soon":"1h"}}`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("credit routing form=%s\nwant %s", out, want)
+	}
+}

@@ -846,6 +846,19 @@ function ogRowHtml(p, a) {
   }
   const exp = a.expires_at
     ? '<div class="hint" style="font-size:11px;color:var(--ink-3)">至 ' + esc(a.expires_at) + '</div>' : '';
+  // 快过期积分角标：credits_expiring 由网关按「快过期窗口」算好（raccoon/runable 的
+  // 每日/每月积分会作废，不用就归零）。>0 即表示该号已进入「快过期优先层」——选号会
+  // 优先落到它身上；不显示出来就没人看得出优先层在工作。与 WorkBuddy 行同口径。
+  const ogExpMs = a.credits_earliest_expiry ? parseAPITime(a.credits_earliest_expiry) : 0;
+  const ogExpLeft = ogExpMs ? Math.round((ogExpMs - Date.now()) / 1000) : 0;
+  let ogExpTag = '';
+  if (a.credits_expiring > 0) {
+    const t = '窗口内有 ' + a.credits_expiring + ' 分即将过期'
+      + (ogExpLeft > 0 ? '（' + dur(ogExpLeft) + '后到期）' : '')
+      + '；已进入快过期优先层（选号优先落到它身上，积分不用就归零）';
+    ogExpTag = ' <span class="tag hot" title="' + esc(t) + '">快过期 ' + a.credits_expiring
+      + (ogExpLeft > 0 ? ' · ' + dur(ogExpLeft) : '') + '</span>';
+  }
   const bi = omniBalInfo[ogBalKey(p.name, label)] || {};
   const avail = bi.available != null ? bi.available : a.available;
   const berr = bi.balance_error || a.balance_error;
@@ -862,7 +875,7 @@ function ogRowHtml(p, a) {
     '<td class="mark" aria-hidden="true"><i></i></td>' +
     '<td><span class="tag mute">' + esc(p.name) + '</span><div class="id">' + esc(p.type || '') + '</div></td>' +
     '<td class="who"><div class="nm">' + esc(title) + '</div><div class="id">' + esc(label) + (a.user_id ? ' · ' + esc(String(a.user_id).slice(0, 14)) : '') + '</div></td>' +
-    '<td>' + status + coolTag + sessTag + exp + '</td>' +
+    '<td>' + status + coolTag + sessTag + ogExpTag + exp + '</td>' +
     '<td class="cred"><div class="n">' + balHtml + '</div></td>' +
     '<td class="num" style="color:var(--ink-3)">—</td>' +
     '<td class="num" style="color:var(--ink-3)">—</td>' +
@@ -4193,6 +4206,12 @@ async function loadOmniConfig() {
     $('cfgDefaultModel').value = omniCfg.default_model || '';
     $('cfgMode').value = omniCfg.mode || 'text';
     $('cfgReasoning').checked = !!omniCfg.reasoning;
+    // 积分快过期优先（credit_routing）：缺省启用（enabled 缺失/false 之外的都算启用）。
+    const cr = (omniCfg.credit_routing && typeof omniCfg.credit_routing === 'object') ? omniCfg.credit_routing : {};
+    if ($('crEnabled')) $('crEnabled').checked = cr.enabled !== false;
+    if ($('crWindow')) $('crWindow').value = cr.expiring_soon || '';
+    if ($('crMin')) $('crMin').value = (cr.min_expiring != null && cr.min_expiring !== '') ? cr.min_expiring : '';
+    if ($('crRefresh')) $('crRefresh').value = cr.refresh_interval || '';
     renderProvEditor();
     renderKeyEditor();
     ogMsg('cfgMsg', '已加载 ' + omniCfg.providers.length + ' 个供应商', 'ok');
@@ -4413,9 +4432,36 @@ function addKey() {
   renderKeyEditor();
 }
 
+// collectCreditRouting 从表单读回「积分快过期优先」设置（写进 omniCfg.credit_routing）。
+// 留空 = 删除该字段（回落后端默认值）；enabled 恒写，便于在面板里显式关掉。
+function collectCreditRouting() {
+  if (!omniCfg) return;
+  const cr = (omniCfg.credit_routing && typeof omniCfg.credit_routing === 'object')
+    ? omniCfg.credit_routing : {};
+  // 元素缺失时保持原值：否则「卡片没渲染出来」会被静默当成「用户要关闭/清空」。
+  // 只有「元素存在且留空」才删除字段（回落后端默认值）。
+  const en = $('crEnabled');
+  if (en) cr.enabled = !!en.checked;
+  const durField = (id, key) => {
+    const el = $(id);
+    if (!el) return;
+    const v = el.value.trim();
+    if (v) cr[key] = v; else delete cr[key];
+  };
+  durField('crWindow', 'expiring_soon');
+  const minEl = $('crMin');
+  if (minEl) {
+    const v = minEl.value.trim();
+    if (v) cr.min_expiring = Number(v) || 0; else delete cr.min_expiring;
+  }
+  durField('crRefresh', 'refresh_interval');
+  if (Object.keys(cr).length) omniCfg.credit_routing = cr;
+}
+
 async function saveOmniConfig(msgId) {
   const mid = msgId || 'cfgMsg';
   if (!omniCfg) { ogMsg(mid, '配置尚未加载', 'err'); return; }
+  collectCreditRouting();
   const body = normalizeOmniForSave(omniCfg);
   body.default_provider = $('cfgDefaultProvider').value;
   body.default_model = $('cfgDefaultModel').value.trim();
@@ -5043,6 +5089,8 @@ async function saveOutbound() {
   // 网关密钥卡（按供应商收窄的客户端密钥）
   on('btnAddKey', addKey);
   on('btnSaveCfgKeys', () => saveOmniConfig('keyMsg'));
+  // 积分快过期优先（raccoon / runable 的每日·每月积分会作废）
+  on('btnSaveCfgCredit', () => saveOmniConfig('crMsg'));
   const ke = $('keyEditor');
   if (ke) { ke.addEventListener('input', onKeyInput); ke.addEventListener('change', onKeyInput); ke.addEventListener('click', onKeyClick); }
   // 账号授权（OmniGate）：raccoon 网页授权 / 粘贴 Token；runable 浏览器登录（粘贴 Cookie）

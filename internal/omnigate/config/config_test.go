@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 )
 
 // api_keys 必须同时接受裸串（历史写法）与对象（收窄写法），且序列化时未命名未收窄的
@@ -94,5 +95,53 @@ func TestAPIKeysRejectEmptyKey(t *testing.T) {
 	}
 	if err := c.Normalize(); err == nil {
 		t.Fatal("want error for empty api key")
+	}
+}
+
+// 积分快过期优先（credit_routing）的缺省与解析：缺省启用、窗口/门槛/刷新间隔回落默认；
+// 显式 false 才关闭；时长字段写错要在加载时被拒（而不是静默回落）。
+func TestCreditRoutingDefaultsAndParse(t *testing.T) {
+	c := &Config{Providers: []ProviderConfig{{Name: "raccoon", Type: "raccoon"}}}
+	if err := c.Normalize(); err != nil {
+		t.Fatal(err)
+	}
+	if !c.CreditRoutingEnabled() {
+		t.Error("缺省应启用快过期优先")
+	}
+	if c.CreditExpiringSoon() != 168*time.Hour {
+		t.Errorf("缺省窗口=%v want 168h", c.CreditExpiringSoon())
+	}
+	if c.CreditMinExpiring() != 5 {
+		t.Errorf("缺省门槛=%d want 5", c.CreditMinExpiring())
+	}
+	if c.CreditRefreshInterval() != 10*time.Minute {
+		t.Errorf("缺省刷新间隔=%v want 10m", c.CreditRefreshInterval())
+	}
+
+	off := false
+	c.CreditRouting = &CreditRouting{
+		Enabled:         &off,
+		ExpiringSoon:    "24h",
+		MinExpiring:     3,
+		RefreshInterval: "5m",
+	}
+	if err := c.Normalize(); err != nil {
+		t.Fatal(err)
+	}
+	if c.CreditRoutingEnabled() {
+		t.Error("显式 false 应关闭")
+	}
+	if c.CreditExpiringSoon() != 24*time.Hour || c.CreditMinExpiring() != 3 || c.CreditRefreshInterval() != 5*time.Minute {
+		t.Errorf("解析结果错误: %v / %d / %v", c.CreditExpiringSoon(), c.CreditMinExpiring(), c.CreditRefreshInterval())
+	}
+
+	// 非法的时长必须 fail fast：静默回落默认值会让人以为配置生效了。
+	c.CreditRouting = &CreditRouting{ExpiringSoon: "7d"}
+	if err := c.Normalize(); err == nil {
+		t.Error("无法解析的 expiring_soon 应报错")
+	}
+	c.CreditRouting = &CreditRouting{RefreshInterval: "soon"}
+	if err := c.Normalize(); err == nil {
+		t.Error("无法解析的 refresh_interval 应报错")
 	}
 }

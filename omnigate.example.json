@@ -9,6 +9,12 @@
   "mode": "text",
   "reasoning": false,
   "api_keys": [],
+  "credit_routing": {
+    "enabled": true,
+    "expiring_soon": "168h",
+    "min_expiring": 5,
+    "refresh_interval": "10m"
+  },
   "providers": [
     {
       "name": "raccoon",

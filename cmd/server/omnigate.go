@@ -507,6 +507,15 @@ func (m *omniManager) Accounts(ctx context.Context, withBalance bool) (any, erro
 					r["session_error"] = lastErr
 				}
 			}
+			// 快过期积分：窗口内仍有快过期批次的账号，面板显示「快过期 N」角标
+			// （与 WorkBuddy 行同口径）。数据来自网关的余额快照缓存——它由
+			// 选号路径的 stale-while-revalidate 刷新与余额查询共同填充。
+			if exp, earliest, ok := rt.gw.CreditExpiring(name, label); ok && exp > 0 {
+				r["credits_expiring"] = exp
+				if !earliest.IsZero() {
+					r["credits_earliest_expiry"] = earliest.Format(time.RFC3339)
+				}
+			}
 		}
 		out = append(out, pa)
 	}

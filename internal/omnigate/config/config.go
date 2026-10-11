@@ -23,6 +23,8 @@ type Config struct {
 	APIKeys         APIKeyList       `json:"api_keys"`
 	Providers       []ProviderConfig `json:"providers"`
 	Checkin         CheckinConfig    `json:"checkin"`
+	// CreditRouting 控制「快过期积分优先」选号（见下方类型注释）。缺省启用。
+	CreditRouting *CreditRouting `json:"credit_routing,omitempty"`
 
 	// PanelKey 是面板自己那把网关密钥（= config.json 的 api_key），由 cmd/server 在
 	// 构建运行时注入。它**恒为全量**且**绝不落盘**（json:"-"）：
@@ -210,6 +212,81 @@ func (t CheckinTask) Interval(def time.Duration) time.Duration {
 	return time.Duration(t.IntervalMinutes) * time.Minute
 }
 
+// CreditRouting 控制 OmniGate 侧的「快过期积分优先」选号（与 WorkBuddy 池的
+// pool.prefer_expiring / expiring_soon / expiringMinCredits 同口径，但作用于
+// OmniGate 各供应商账号）。
+//
+// 为什么需要它：raccoon / runable 的积分是「每日积分（当天清零）+ 每月会员积分
+// （当月清零）」这类会作废的批次——不用就归零。网关原先只做 ActiveIndex 轮询 +
+// 失败才换号，会把请求钉死在某个账号上，快过期积分白白过期。开启后，窗口内仍有
+// 快过期批次的账号会被优先选中（stale-while-revalidate 的余额快照驱动）。
+type CreditRouting struct {
+	// Enabled 显式关闭（false）时不启用；缺省（字段缺失或 null）= 启用。
+	Enabled *bool `json:"enabled,omitempty"`
+	// ExpiringSoon 快过期窗口（Go duration，如 "168h"）。缺省 168h；留空/非法/<=0
+	// 回落默认值（与 pool.expiring_soon 同风格）。
+	ExpiringSoon string `json:"expiring_soon,omitempty"`
+	// MinExpiring 进入优先层所需的最小快过期积分：低于该值不参与偏好（避免为了
+	// 几分钱换号）。缺省 5；<=0 回落默认值。
+	MinExpiring int64 `json:"min_expiring,omitempty"`
+	// RefreshInterval 余额快照的后台刷新间隔（Go duration，如 "10m"）。缺省 10m；
+	// 留空/非法/<=0 回落默认值。
+	RefreshInterval string `json:"refresh_interval,omitempty"`
+}
+
+// 快过期选号的默认参数（缺省值与 WorkBuddy 池一致）。
+const (
+	defaultCreditExpiringSoon    = 168 * time.Hour
+	defaultCreditMinExpiring     = int64(5)
+	defaultCreditRefreshInterval = 10 * time.Minute
+)
+
+// CreditRoutingEnabled 报告是否启用「快过期积分优先」（缺省启用）。
+func (c *Config) CreditRoutingEnabled() bool {
+	return c.CreditRouting == nil || c.CreditRouting.Enabled == nil || *c.CreditRouting.Enabled
+}
+
+// CreditExpiringSoon 返回快过期窗口（缺省 168h）。
+func (c *Config) CreditExpiringSoon() time.Duration {
+	if c.CreditRouting != nil {
+		if d := parseDuration(c.CreditRouting.ExpiringSoon); d > 0 {
+			return d
+		}
+	}
+	return defaultCreditExpiringSoon
+}
+
+// CreditMinExpiring 返回进入优先层的最小快过期积分（缺省 5）。
+func (c *Config) CreditMinExpiring() int64 {
+	if c.CreditRouting != nil && c.CreditRouting.MinExpiring > 0 {
+		return c.CreditRouting.MinExpiring
+	}
+	return defaultCreditMinExpiring
+}
+
+// CreditRefreshInterval 返回余额快照刷新间隔（缺省 10m）。
+func (c *Config) CreditRefreshInterval() time.Duration {
+	if c.CreditRouting != nil {
+		if d := parseDuration(c.CreditRouting.RefreshInterval); d > 0 {
+			return d
+		}
+	}
+	return defaultCreditRefreshInterval
+}
+
+// parseDuration 解析 Go duration；空串/非法返回 0（调用方按 0 回落默认值）。
+func parseDuration(s string) time.Duration {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return 0
+	}
+	return d
+}
+
 // Load reads and validates a config file.
 func Load(path string) (*Config, error) {
 	b, err := os.ReadFile(path)
@@ -310,6 +387,19 @@ func (c *Config) validate() error {
 		for _, name := range k.Providers {
 			if !seen[name] {
 				return fmt.Errorf("api_keys[%s]: 未知 provider %q", keyLabel(k), name)
+			}
+		}
+	}
+	// 快过期选号的时长字段：写了但解析不了，静默回落默认值会让人以为配置生效了，
+	// 不如在加载/保存时直接拒绝（与 pool.expiring_soon 的宽容风格不同——那里是
+	// 主配置、这里新引入，fail fast 更不容易踩坑）。
+	if c.CreditRouting != nil {
+		for _, f := range []struct{ name, val string }{
+			{"expiring_soon", c.CreditRouting.ExpiringSoon},
+			{"refresh_interval", c.CreditRouting.RefreshInterval},
+		} {
+			if strings.TrimSpace(f.val) != "" && parseDuration(f.val) <= 0 {
+				return fmt.Errorf("credit_routing.%s: 无法解析为时长（如 \"168h\" / \"10m\"）: %q", f.name, f.val)
 			}
 		}
 	}

@@ -41,6 +41,15 @@ Runable、办公小浣熊（Raccoon）以及任意 OpenAI 兼容上游统一成�
   `{"key":"sk-xxx","name":"raccoon 专用","providers":["raccoon"]}` = 只放行 `raccoon`。
   面板自己那把密钥（`config.json` 的 `api_key`）**恒为全量且不落进 `omnigate.json`**，所以在密钥卡里
   删光密钥也不会把面板锁死；`api_keys` 为空且未注入面板密钥时网关仍按「本就开放」处理（行为不变）。
+- **积分快过期优先**（`omnigate.json` 的 `credit_routing`，面板「上游供应商」页有专门的卡片，缺省启用）：
+  raccoon 的「每日积分」当天清零、「每月会员积分」当月清零，runable 的日 / 月额度同理——**不用就归零**。
+  网关原先只做 `ActiveIndex` 轮询 + 失败才换号，会把请求钉死在某个账号上；开启后，窗口
+  （`expiring_soon`，缺省 `168h`）内仍有快过期积分的账号会被**优先派单**（层内按最早到期、金额排序），
+  其余保持轮询顺序。余额快照在**选号时后台单飞刷新**（`refresh_interval`，缺省 `10m`；
+  stale-while-revalidate，绝不阻塞请求），没有快照时退化为原有轮询（零回归）。上游只给钱包金额、
+  不给逐笔到期时间戳，故到期时刻按「本地零点 / 下月 1 日」推导；低于 `min_expiring`（缺省 `5`）
+  的快过期量不参与，避免为几分散号。账号池页对应账号会显示「快过期 N」角标。
+  形如 `"credit_routing": {"enabled": true, "expiring_soon": "168h", "min_expiring": 5, "refresh_interval": "10m"}`。
 - OmniGate 使用**独立配置文件** `omnigate.json`（示例见 `omnigate.example.json`），与面板的
   `config.json` 互不干扰；面板 `config.json` 里的 `omnigate_config` 指向它（缺省 `./omnigate.json`）。
   文件不存在时自动跳过，面板其余功能照常运行。

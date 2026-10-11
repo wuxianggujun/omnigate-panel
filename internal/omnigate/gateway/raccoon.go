@@ -274,6 +274,8 @@ func (g *Gateway) RaccoonAccounts(ctx context.Context, providerName string) ([]m
 				item["available"] = bal.Available
 				item["wallets"] = bal.Wallets
 				item["subscription"] = bal.Subscription
+				// 顺带把余额喂给快过期优先选号的缓存。
+				g.noteCredits(providerName, acc.Label, bal.Available, raccoonWallets(bal))
 			}
 		}
 		out = append(out, item)

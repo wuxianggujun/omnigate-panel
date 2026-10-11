@@ -763,6 +763,25 @@
 
       <div class="box">
         <header>
+          <h3>积分快过期优先 <span class="hint">raccoon / runable 的每日·每月积分会作废，优先烧快过期的</span></h3>
+        </header>
+        <div class="pad">
+          <div class="og-hint" style="margin-top:0">raccoon 的「每日积分」当天清零、「每月会员积分」当月清零；runable 的日 / 月额度同理——<strong>不用就归零</strong>。开启后，网关会给窗口内仍有快过期积分的账号<strong>优先派单</strong>（先烧快过期的，再烧长期积分），并按「快照刷新间隔」后台刷新余额快照。<br>余额快照只在<strong>选号时后台刷新</strong>（不阻塞请求，缺快照时退化为原有轮询）。上游只给钱包金额、不给逐笔到期时间戳，故到期时刻按「本地零点 / 下月 1 日」推导：窗口开大 → 命中账号变多、偏好被稀释；最小积分用来避免为了几分钱换号。缺省启用。</div>
+          <div class="grid3" style="margin-top:12px">
+            <label class="switch"><span class="lb">启用</span><input type="checkbox" id="crEnabled"></label>
+            <label class="fld"><span class="lb">快过期窗口</span><input id="crWindow" placeholder="168h（缺省）"></label>
+            <label class="fld"><span class="lb">最小快过期积分</span><input id="crMin" placeholder="5（缺省）" inputmode="numeric"></label>
+            <label class="fld"><span class="lb">快照刷新间隔</span><input id="crRefresh" placeholder="10m（缺省）"></label>
+          </div>
+          <div class="og-row" style="margin-top:10px">
+            <button class="primary" id="btnSaveCfgCredit">保存并生效</button>
+            <span class="og-msg" id="crMsg"></span>
+          </div>
+        </div>
+      </div>
+
+      <div class="box">
+        <header>
           <h3>上游模型目录 <span class="hint" id="modelCnt"></span></h3>
           <span class="grow"></span>
           <button class="xs" id="btnLoadModels">刷新模型</button>

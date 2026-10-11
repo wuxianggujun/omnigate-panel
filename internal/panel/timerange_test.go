@@ -46,7 +46,7 @@ func TestParseTimeParam(t *testing.T) {
 // 且响应回显 window_from/window_to 供面板确认口径。
 func TestUsageHandlerAcceptsExplicitRange(t *testing.T) {
 	rec := usage.New("")
-	base := time.Now().Truncate(time.Hour).Add(-5 * time.Hour)
+	base := usage.TruncateHour(time.Now()).Add(-5 * time.Hour)
 	for i := 0; i < 6; i++ {
 		rec.Add(base.Add(time.Duration(i)*time.Hour), "cn", "u1", "glm-5.2",
 			usage.Delta{PromptTokens: 10, HasPromptTokens: true}, true)

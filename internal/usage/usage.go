@@ -503,16 +503,36 @@ type Snapshot struct {
 
 // Window 用量统计窗口。三种口径按优先级解析（见 bounds）：
 //   - From/To 任一非零 → 显式区间 [From, To]（To 零值 = 不设上界）
-//   - 否则 Hours>0     → 滚动窗口：当前整点往回 Hours-1 小时
+//   - 否则 Hours>0     → 滚动窗口：当前整点往回 Hours-1 小时（共 Hours 个整点桶）
 //   - 否则             → 全部历史
 //
 // 为什么显式区间用「桶起点落在 [From, To] 内」判定而不是求交集：小时桶的粒度
 // 就是一小时，用户选到 14:00 时把 14:00 这一小时的桶算进来符合直觉；同时这也
 // 让 Hours 口径与历史行为逐位一致（原实现就是 ts.Before(from) 即跳过）。
+//
+// Hours 口径的桶数契约（**故意如此，别再"顺手修"**）：
+//   - 左边界锚在**本地整点**（TruncateHour），窗口里恰好 Hours 个整点桶；最新那个
+//     是当前还没走完的小时，所以实际覆盖时长 ∈ (Hours-1, Hours] 小时。
+//   - 不做 Hours+1 个桶（"近 24 小时"配 25 个桶读起来别扭），也不做未对齐的
+//     [now-Hours, now]：桶起点会落在整点之间，用量侧与余额侧就差小半桶，对账立刻
+//     变成假警报（见 panel.creditsHistory 的同口径要求）。小时粒度下"N 个桶"才是
+//     "N 小时"的自然读法。
 type Window struct {
 	Hours int
 	From  time.Time
 	To    time.Time
+}
+
+// TruncateHour 把时间截到**本地整点**（当天的 hh:00:00，保留原时区）。
+//
+// 不能用 time.Truncate(time.Hour)：那是按"零时刻（1 年 1 月 1 日 00:00 UTC）以来的
+// 绝对时长"截断，得到的是 **UTC 整点**；而小时桶的键（bucketTime）是按 time.Local
+// 解析出来的**本地整点**。整小时时区（本部署 TZ=Asia/Shanghai）下两者恰好重合，
+// 所以线上一直看不出问题；但换成 +05:30 / +05:45 这类时区，窗口左边界就落到半点，
+// 第一个桶被整段排除——"近 N 小时"实际只覆盖 N-1 个桶。这里显式按本地整点对齐。
+func TruncateHour(t time.Time) time.Time {
+	y, m, d := t.Date()
+	return time.Date(y, m, d, t.Hour(), 0, 0, 0, t.Location())
 }
 
 // bounds 解析出实际生效的 [from, to]；零值表示该侧不设界。
@@ -527,7 +547,7 @@ func (w Window) bounds() (time.Time, time.Time) {
 	if h > 24*60 {
 		h = 24 * 60
 	}
-	return time.Now().Truncate(time.Hour).Add(-time.Duration(h-1) * time.Hour), time.Time{}
+	return TruncateHour(time.Now()).Add(-time.Duration(h-1) * time.Hour), time.Time{}
 }
 
 // bucketTime 把桶 scope 解析成本地时间；脏 scope 返回 false（不进任何口径）。

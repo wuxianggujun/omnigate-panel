@@ -12,6 +12,7 @@ import (
 	"github.com/wuxianggujun/omnigate-panel/internal/credithist"
 	"github.com/wuxianggujun/omnigate-panel/internal/panelauth"
 	"github.com/wuxianggujun/omnigate-panel/internal/pool"
+	"github.com/wuxianggujun/omnigate-panel/internal/usage"
 )
 
 // reconFixture 造一个两账号的池 + 一份「像真的一样」的余额历史：每 10 分钟一个采样点、
@@ -202,7 +203,7 @@ func TestCreditsHistoryDisabled(t *testing.T) {
 // 采样晚于锚点（刚上线几分钟）→ 0：此时用量侧任何桶都算满、余额侧却缺半截，宁可不给数字。
 func TestAlignedHours(t *testing.T) {
 	now := time.Date(2026, 10, 11, 18, 34, 0, 0, time.Local)
-	anchor := now.Truncate(time.Hour) // 18:00
+	anchor := usage.TruncateHour(now) // 18:00
 	snap := func(from time.Time) []credithist.Account {
 		return []credithist.Account{{UID: "u", OK: true, From: from.Format(time.RFC3339)}}
 	}

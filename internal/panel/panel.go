@@ -1077,7 +1077,7 @@ func (p *Panel) creditsHistory(w http.ResponseWriter, r *http.Request) {
 		if hours <= 0 || hours > maxHours {
 			hours = maxHours
 		}
-		window = now.Sub(now.Truncate(time.Hour).Add(-time.Duration(hours-1) * time.Hour))
+		window = now.Sub(usage.TruncateHour(now).Add(-time.Duration(hours-1) * time.Hour))
 	}
 	if window <= 0 || window > credithist.Retention {
 		// 超保留期：窗口收敛到保留期。显式区间（from/to）的 hours 是按原窗口算出来的，
@@ -1102,7 +1102,7 @@ func (p *Panel) creditsHistory(w http.ResponseWriter, r *http.Request) {
 		if n := alignedHours(snap, now); n < hours {
 			hours = n
 			if n >= 1 {
-				window = now.Sub(now.Truncate(time.Hour).Add(-time.Duration(n-1) * time.Hour))
+				window = now.Sub(usage.TruncateHour(now).Add(-time.Duration(n-1) * time.Hour))
 				snap = p.cfg.History.Snapshot(window, creditHistoryPoints, allow, now)
 			}
 		}
@@ -1126,9 +1126,12 @@ func (p *Panel) creditsHistory(w http.ResponseWriter, r *http.Request) {
 // 的对账容差同口径）：采样是 5 分钟粒度、历史起点又常落在桶中间，不留余量的话每遇到
 // 桶边界没采样就白丢一整桶——刚上线时窗口会一直卡在 1 小时。
 // 返回 0 表示连一个整点桶都覆盖不了（刚上线几分钟的状态）。
+//
+// 锚点必须与 usage 的窗口左边界同源（usage.TruncateHour，本地整点）：一边用 UTC 整点、
+// 一边用本地整点的话，非整小时时区下会数错桶。
 func alignedHours(snap []credithist.Account, now time.Time) int {
 	const slack = 20 * time.Minute
-	anchor := now.Truncate(time.Hour)
+	anchor := usage.TruncateHour(now)
 	var newest time.Time
 	for _, a := range snap {
 		if a.From == "" {

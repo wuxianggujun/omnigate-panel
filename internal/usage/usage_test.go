@@ -207,7 +207,7 @@ func TestSnapshotWindowFilter(t *testing.T) {
 // （桶起点落在 [From, To] 内即命中），且 From/To 会回显给面板确认口径。
 func TestSnapshotExplicitWindow(t *testing.T) {
 	r := New("")
-	base := time.Now().Truncate(time.Hour).Add(-5 * time.Hour)
+	base := TruncateHour(time.Now()).Add(-5 * time.Hour)
 	for i := 0; i < 6; i++ {
 		r.Add(base.Add(time.Duration(i)*time.Hour), "cn", "u", "m",
 			Delta{PromptTokens: 10, HasPromptTokens: true}, true)
@@ -259,7 +259,7 @@ func TestWindowBounds(t *testing.T) {
 	}
 	// 只有 Hours：起点 = 当前整点往回 Hours-1 小时。
 	f, to := Window{Hours: 24}.bounds()
-	want := time.Now().Truncate(time.Hour).Add(-23 * time.Hour)
+	want := TruncateHour(time.Now()).Add(-23 * time.Hour)
 	if !f.Equal(want) || !to.IsZero() {
 		t.Fatalf("24h bounds = %v/%v, want %v/零值", f, to, want)
 	}
@@ -269,9 +269,29 @@ func TestWindowBounds(t *testing.T) {
 	}
 	// 上限 60 天。
 	f60, _ := Window{Hours: 100000}.bounds()
-	want60 := time.Now().Truncate(time.Hour).Add(-(24*60 - 1) * time.Hour)
+	want60 := TruncateHour(time.Now()).Add(-(24*60 - 1) * time.Hour)
 	if !f60.Equal(want60) {
 		t.Fatalf("超限 Hours 未被夹到 60 天: %v want %v", f60, want60)
+	}
+}
+
+// 窗口左边界必须落在**本地整点**上：小时桶的键是按 time.Local 解析的，窗口若按
+// UTC 整点对齐，非整小时时区（+05:30 / +05:45）下第一个桶会被整段排除，"近 N 小时"
+// 就只覆盖 N-1 个桶。整小时时区下两者恰好重合，所以线上一直没暴露。
+func TestTruncateHourAlignsToLocalHour(t *testing.T) {
+	kolkata := time.FixedZone("IST", 5*3600+1800) // +05:30
+	in := time.Date(2026, 10, 11, 14, 37, 12, 0, kolkata)
+	got := TruncateHour(in)
+	want := time.Date(2026, 10, 11, 14, 0, 0, 0, kolkata)
+	if !got.Equal(want) {
+		t.Fatalf("TruncateHour(%v) = %v, want %v", in, got, want)
+	}
+	if got.Location() != kolkata {
+		t.Fatalf("TruncateHour 应保留原时区，得到 %v", got.Location())
+	}
+	// 测试前提：UTC 截断在半小时时区会落到本地 :30——正是要避开的那个坑。
+	if utc := in.Truncate(time.Hour); utc.Equal(got) {
+		t.Fatalf("time.Truncate 竟然与本地整点对齐（%v），测试前提不成立", utc)
 	}
 }
 

@@ -323,15 +323,20 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
   width: 560px; max-width: 100%; max-height: 86vh; display: flex; flex-direction: column;
   box-shadow: 0 24px 64px -24px rgba(0,0,0,.6);
 }
-.dlg header { padding: 17px 20px 13px; border-bottom: 1px solid var(--line-soft); }
+.dlg header { padding: 17px 20px 13px; border-bottom: 1px solid var(--line-soft); position: relative; }
 .dlg header h3 { font-size: 15px; font-weight: 620; }
 .dlg header .hint { color: var(--ink-3); font-size: 12.5px; margin-top: 5px; }
+/* 带 ✕ 的弹层头：右侧留出按钮位，避免标题/说明被压到按钮下面。 */
+.dlg header .dlg-x { position: absolute; top: 10px; right: 10px; width: 30px; height: 30px; border-radius: 8px; border: 1px solid transparent; background: transparent; color: var(--ink-3); font: 500 13px/1 var(--sans); cursor: pointer; }
+.dlg header .dlg-x:hover { background: var(--surface-2); border-color: var(--line); color: var(--ink); }
+.dlg header:has(.dlg-x), .dlg header.has-x { padding-right: 48px; }
 .dlg .body { padding: 18px 20px; overflow: auto; }
 .dlg footer { padding: 13px 20px; border-top: 1px solid var(--line-soft); display: flex; gap: 10px; }
 .dlg footer .grow { flex: 1; }
 .dlg .tabs { display: inline-flex; gap: 2px; background: var(--surface-2); border-radius: 9px; padding: 3px; margin-left: 10px; vertical-align: middle; }
 .dlg .tabs .tab { padding: 4px 14px; border-radius: 7px; border: none; background: transparent; color: var(--ink-3); font: 550 12.5px var(--sans); cursor: pointer; }
 .dlg .tabs .tab.on { background: var(--surface); color: var(--ink); box-shadow: 0 1px 3px rgba(0,0,0,.25); }
+#authTabs { margin-left: 0; margin-top: 8px; }
 .tab-panel + .tab-panel { border-top: 1px solid var(--line-soft); margin: 0 -20px; padding: 14px 20px 0; }
 .url {
   background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px;

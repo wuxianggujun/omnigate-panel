@@ -974,33 +974,42 @@
   </div>
 </div>
 
-<!-- 未配置登录账号（panel_auth.users 为空）：面板无法登录，须命令行引导。 -->
-<div class="veil" id="setupVeil" data-lock="1">
+<!-- 未配置登录账号（panel_auth.users 为空）：面板无法登录，须命令行引导。
+     面板本身是公开只读的，所以这个门也必须能关掉（✕ / 点空白处 / Esc）。 -->
+<div class="veil" id="setupVeil">
   <div class="dlg" style="width:460px">
-    <header>
+    <header class="has-x">
       <h3>面板尚未配置登录账号</h3>
+      <button class="dlg-x" id="btnCloseSetup" title="关闭（也可以点空白处或按 Esc）" aria-label="关闭">✕</button>
       <div class="hint">面板现在<b>默认只读</b>：不登录也能查看（凭证只显示前缀与长度）。要修改配置 / 运维账号，需要先在服务器执行
         <code>omnigate-panel -set-admin-password</code> 创建一个面板账号，然后刷新本页登录。
         （配置账号后，<code>api_key</code> 不能打开面板。）</div>
     </header>
     <footer>
+      <button id="btnGuestBrowseSetup" title="不登录，只读浏览面板">访客只读浏览</button>
       <span class="grow"></span>
       <button class="primary" id="btnSetupReload">我已配置，刷新</button>
     </footer>
   </div>
 </div>
 
-<!-- 登录 / 注册（配置了面板账号后） -->
-<div class="veil" id="loginVeil" data-lock="1">
-  <div class="dlg" style="width:420px">
-    <header>
+<!-- 登录 / 注册（配置了面板账号后）。未登录时面板本身是公开只读的，所以这个门
+     必须能关掉：✕ / 点空白处 / Esc / 「访客只读浏览」都能退出，回到只读视图。 -->
+<div class="veil" id="loginVeil">
+  <div class="dlg" style="width:440px">
+    <header class="has-x">
       <h3 id="authTitle">登录面板</h3>
+      <div class="tabs" id="authTabs" hidden>
+        <button class="tab on" data-auth-mode="login">登录</button>
+        <button class="tab" data-auth-mode="register">注册</button>
+      </div>
+      <button class="dlg-x" id="btnCloseLogin" title="关闭（也可以点空白处或按 Esc）" aria-label="关闭">✕</button>
       <div class="hint" id="authHint">面板账号与网关 api_key 相互独立。<b>未登录时面板为只读</b>（可看账号数/健康度等汇总与模型目录，凭证与账号明细不可见）；登录后才能添加/运维自己的账号。</div>
     </header>
     <div class="body">
       <form id="loginForm">
         <label class="fld"><span class="lb">账号</span>
-          <input id="loginUser" autocomplete="username" placeholder="账号"></label>
+          <input id="loginUser" list="loginUsers" autocomplete="username" placeholder="账号"></label>
         <label class="fld" style="margin-top:8px"><span class="lb">密码</span>
           <input id="loginPass" type="password" autocomplete="current-password" placeholder="密码"></label>
         <label class="fld" id="loginPass2Wrap" style="margin-top:8px;display:none"><span class="lb">确认密码</span>
@@ -1009,12 +1018,13 @@
       <div class="state err" id="loginErr" hidden style="margin-top:10px">账号或密码不正确。</div>
     </div>
     <footer>
-      <a href="#" id="btnToggleAuth" hidden style="font-size:12px;text-decoration:underline">没有账号？注册</a>
+      <button id="btnGuestBrowse" title="不登录，只读浏览面板">访客只读浏览</button>
       <span class="grow"></span>
       <button class="primary" id="btnLogin">登录</button>
     </footer>
   </div>
 </div>
+<datalist id="loginUsers"></datalist>
 
 <div id="toasts"></div>
 

@@ -355,6 +355,7 @@ function showAuthGate() {
 }
 function openLogin() {
   if (authMode !== 'register') setAuthMode('login');
+  fillRememberedUsers();
   $('loginVeil').classList.add('on');
   setTimeout(() => $('loginUser').focus(), 60);
 }
@@ -362,25 +363,59 @@ function openSetup() { $('setupVeil').classList.add('on'); }
 function closeGates() { $('loginVeil').classList.remove('on'); $('setupVeil').classList.remove('on'); }
 $('btnSetupReload').onclick = () => location.reload();
 
-/* setAuthMode 在「登录 / 注册」两种形态间切换（同一个弹窗、同一套字段）。 */
+/* 未登录时面板是公开只读的，所以「登录门 / 未配置账号引导」两个弹层都必须能关掉，
+   否则访客会被卡在弹窗里出不去。三种退出方式：✕ 按钮、点遮罩空白处、Esc。
+   （点 .dlg 内部不会命中 target===veil，所以不会误关。） */
+['loginVeil', 'setupVeil'].forEach(id => {
+  const v = $(id);
+  if (v) v.addEventListener('click', e => { if (e.target === v) closeGates(); });
+});
+document.addEventListener('keydown', e => {
+  if (e.key !== 'Escape') return;
+  if (['loginVeil', 'setupVeil'].some(id => $(id) && $(id).classList.contains('on'))) closeGates();
+});
+['btnCloseLogin', 'btnCloseSetup', 'btnGuestBrowse', 'btnGuestBrowseSetup'].forEach(id => {
+  if ($(id)) $(id).onclick = closeGates;
+});
+
+/* 本机记住用过的面板账号名（只存 localStorage，不上报）：登录框给一个下拉备选，
+   方便一台机器上切换多个面板账号。 */
+const LS_USERS = 'wb2api.users';
+function rememberedUsers() {
+  try {
+    const a = JSON.parse(localStorage.getItem(LS_USERS) || '[]');
+    return Array.isArray(a) ? a.filter(x => typeof x === 'string' && x) : [];
+  } catch (e) { return []; }
+}
+function rememberUser(name) {
+  if (!name) return;
+  const list = rememberedUsers().filter(x => x !== name);
+  list.unshift(name);
+  try { localStorage.setItem(LS_USERS, JSON.stringify(list.slice(0, 8))); } catch (e) { /* 隐私模式等忽略 */ }
+}
+function fillRememberedUsers() {
+  const dl = $('loginUsers');
+  if (!dl) return;
+  dl.innerHTML = rememberedUsers().map(u => '<option value="' + esc(u) + '"></option>').join('');
+}
+
+/* setAuthMode 在「登录 / 注册」两种形态间切换（同一个弹窗、同一套字段）。
+   未开放自助注册时隐藏标签行并强制回到登录。 */
 function setAuthMode(mode) {
   authMode = mode === 'register' ? 'register' : 'login';
+  if (authMode === 'register' && !authState.allowRegistration) authMode = 'login';
   const reg = authMode === 'register';
   if ($('authTitle')) $('authTitle').textContent = reg ? '注册面板账号' : '登录面板';
   if ($('btnLogin')) $('btnLogin').textContent = reg ? '注册并登录' : '登录';
   if ($('loginPass2Wrap')) $('loginPass2Wrap').style.display = reg ? '' : 'none';
   if ($('loginPass')) $('loginPass').setAttribute('autocomplete', reg ? 'new-password' : 'current-password');
-  const t = $('btnToggleAuth');
-  if (t) {
-    t.hidden = reg ? false : !authState.allowRegistration;
-    t.textContent = reg ? '已有账号？登录' : '没有账号？注册';
-  }
+  if ($('authTabs')) $('authTabs').hidden = !authState.allowRegistration;
+  document.querySelectorAll('#authTabs .tab').forEach(b => b.classList.toggle('on', b.dataset.authMode === authMode));
   if ($('loginErr')) $('loginErr').hidden = true;
 }
-if ($('btnToggleAuth')) $('btnToggleAuth').onclick = e => {
-  e.preventDefault();
-  setAuthMode(authMode === 'register' ? 'login' : 'register');
-};
+document.querySelectorAll('#authTabs .tab').forEach(b => {
+  b.onclick = () => setAuthMode(b.dataset.authMode);
+});
 
 /* 账号登录 / 自助注册（同一表单，按 authMode 分流）。 */
 async function doLogin() {
@@ -401,6 +436,7 @@ async function doLogin() {
       await api('session', { method: 'POST', body: JSON.stringify({ username: u, password: p }) });
     }
     $('loginErr').hidden = true;
+    rememberUser(u);
     $('loginPass').value = '';
     $('loginPass2').value = '';
     closeGates();
@@ -458,8 +494,7 @@ function applyRole() {
     li.hidden = authState.authenticated;
     li.textContent = authState.allowRegistration ? '登录 / 注册' : '登录';
   }
-  const t = $('btnToggleAuth');
-  if (t) t.hidden = authMode === 'register' ? false : !authState.allowRegistration;
+  if ($('authTabs')) $('authTabs').hidden = !authState.allowRegistration;
   // 普通用户看不到平台配置页：若当前停在这些页，退回账号池。
   if (role === 'user' && ['providers', 'outbound', 'config'].indexOf(view) >= 0) go('accounts');
 }

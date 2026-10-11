@@ -291,6 +291,20 @@ label.fld > .hint { display: block; font-size: 11.5px; color: var(--ink-3); marg
 .cred { min-width: 84px; }
 .cred .n { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 13px; white-space: nowrap; }
 .cred .n .of { color: var(--ink-3); font-size: 11px; }
+/* 近 24h 余额净变化（账号行与「积分对账」共用）：负 = 消耗/过期，用中性色（消耗是
+   常态，不值得告警）；正 = 入账，用好色。真正异常的是「Δ 余额与计费用量对不上」，
+   那个差值在 .gap 里用告警色单独标。 */
+.dlt { font-family: var(--mono); font-size: 11px; font-variant-numeric: tabular-nums; }
+.dlt.dn { color: var(--ink-3); }
+.dlt.up { color: var(--ok); }
+.gap { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.gap.warn { color: var(--warn); font-weight: 600; }
+/* 余额曲线：窗口内 min→max 归一化的迷你柱。带快过期积分的采样点用琥珀色——那是
+   「掉的是不是快过期那批」最直接的证据。 */
+.bars { display: inline-flex; align-items: flex-end; gap: 1px; height: 20px; min-width: 54px; }
+.bars i { width: 3px; min-height: 1px; background: var(--accent); opacity: .45; border-radius: 1px 1px 0 0; }
+.bars i.e { background: var(--warn); opacity: .85; }
+.bars i.now { opacity: 1; }
 .bar { height: 3px; background: var(--line); border-radius: 2px; margin-top: 5px; overflow: hidden; max-width: 88px; }
 .bar i { display: block; height: 100%; background: var(--accent); border-radius: 2px; }
 .tag {

@@ -405,7 +405,8 @@ func (p *Panel) overviewBody(accounts []pool.Status) map[string]any {
 	}
 	// credits_net 余额快照历史的近 24h 净变化（负 = 掉了）：账号行据此直接标
 	// 「近24h −48」，与「积分构成」页的实时逐包查询互补——这里只读本地历史，
-	// 零上游开销，因此可以随每次轮询一起给。只对本次可见的账号返回（多租户）。
+	// 零上游开销，因此可以随每次轮询一起给。只对本次可见的账号返回（多租户），
+	// 且只含「算得出净变化」的账号——样本不足（刚重启）时宁可不给键，也不能给 0。
 	if p.cfg.History != nil {
 		// 只保留本次可见账号：user 不该看到别人的号有没有在掉分。
 		visibleUID := make(map[string]bool, len(accounts))
@@ -415,7 +416,11 @@ func (p *Panel) overviewBody(accounts []pool.Status) map[string]any {
 		net := map[string]credithist.Account{}
 		for _, a := range p.cfg.History.Snapshot(credithist.DefaultWindow, 0,
 			func(uid string) bool { return visibleUID[uid] }, time.Now()) {
-			net[a.UID] = a
+			// 只放「算得出净变化」的账号：样本不足时前端一律不显示（显示 0 会被读成
+			// 「没消耗」，而真相是「不知道」）。
+			if a.OK {
+				net[a.UID] = a
+			}
 		}
 		body["credits_net"] = net
 		body["credits_net_window_sec"] = int64(credithist.DefaultWindow.Seconds())

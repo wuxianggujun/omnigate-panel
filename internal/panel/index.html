@@ -382,6 +382,29 @@
           </table>
         </div>
       </div>
+
+      <div class="box" id="usReconBox">
+        <header>
+          <h3>积分对账</h3>
+          <span class="note" id="usReconNote">—</span>
+          <span class="grow"></span>
+          <span class="note">余额变化来自本地余额快照历史（仅 WorkBuddy 账号）</span>
+        </header>
+        <div class="kpis k4" id="usReconStats"></div>
+        <div class="pad" id="usReconHintWrap" hidden>
+          <p class="usgap" id="usReconHint">—</p>
+        </div>
+        <div class="tbl-wrap">
+          <table class="acc zebra">
+            <thead><tr>
+              <th class="mark"></th><th>账号</th><th>域</th>
+              <th class="num">当前余额</th><th class="num" id="usReconDeltaHead">近 24h Δ</th>
+              <th class="num">计费用量</th><th class="num">差额</th><th>余额曲线</th>
+            </tr></thead>
+            <tbody id="usReconBody"></tbody>
+          </table>
+        </div>
+      </div>
     </section>
 
     <!-- 配置 -->

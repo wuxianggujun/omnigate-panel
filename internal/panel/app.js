@@ -7,6 +7,9 @@ let authState = { authenticated: false, configured: false, mode: '', username: '
 let theme = localStorage.getItem(LS_THEME) || 'auto';   // auto | light | dark
 let view = 'accounts';
 let overviewData = null, cfgLoaded = null;
+/* creditHistData：余额快照历史（/panel/api/credits/history），用量页「积分对账」用。
+   与 usageData 同窗口拉取，逐账号对账：计费用量 + Δ余额 ≈ 0。 */
+let creditHistData = null;
 let loginState = null, loginTimer = null;
 let refTimer = null;
 /* 视图级筛选状态（模块级声明放在文件顶部，避免顶层 go() 早于声明执行时踩 TDZ）。 */
@@ -746,6 +749,23 @@ function wbRowHtml(s, maxCred) {
       credTip += '\n实测单价（credits/1K）：\n' + costs.map(c =>
         '  ' + c.model + '：' + (c.cost_per_1k <= 0 ? '免费' : c.cost_per_1k)).join('\n');
     }
+    // 近 24h 余额净变化（overview.credits_net，服务端按余额快照历史算；负 = 掉了）。
+    // 池里的 credits 只是当前值，回答不了「这个号昨天到现在消耗了多少」——这个数字
+    // 才是。差额（Δ 余额与计费用量对不上，多半是积分过期）在用量页「积分对账」展开。
+    const netRec = (overviewData && overviewData.credits_net) ? overviewData.credits_net[s.uid] : null;
+    let netHtml = '';
+    if (!unlimited && netRec && netRec.ok) {
+      const nh = Math.max(1, Math.round((netRec.span_sec || 0) / 3600));
+      const ns = netRec.net > 0 ? '+' : '';
+      const nTip = '近 ' + nh + 'h 余额 ' + ns + netRec.net
+        + (netRec.net < 0 ? '（消耗/过期）' : (netRec.net > 0 ? '（入账）' : '（无变化）'))
+        + '；' + (netRec.samples || 0) + ' 个采样点，取自余额刷新（5 分钟一次）';
+      credTip += '\n' + nTip;
+      if (netRec.net !== 0) {
+        netHtml = ' <span class="dlt ' + (netRec.net > 0 ? 'up' : 'dn') + '" title="' + esc(nTip) + '">'
+          + ns + netRec.net + '</span>';
+      }
+    }
     const frozen = s.disabled || cool > 0;
     const tu = s.token_usage || {};
     const req = tu.request_count || 0;
@@ -759,7 +779,7 @@ function wbRowHtml(s, maxCred) {
       '<td><span class="tag mute">WorkBuddy</span></td>' +
       '<td class="who"><div class="nm">' + (s.nickname ? esc(s.nickname) : '<span style="color:var(--ink-3)">未命名</span>') + (s.realm === 'global' ? ' <span class="realm-tag">国际版</span>' : '') + (s.enterprise ? ' <span class="realm-tag">企业版</span>' : '') + '</div><div class="id">' + esc(short) + '</div></td>' +
       '<td>' + tag + note + rateLimits + '</td>' +
-      '<td class="cred" title="' + esc(credTip) + '"><div class="n">' + cred + '</div><div class="bar"><i style="width:' + pct + '%"></i></div></td>' +
+      '<td class="cred" title="' + esc(credTip) + '"><div class="n">' + cred + netHtml + '</div><div class="bar"><i style="width:' + pct + '%"></i></div></td>' +
       '<td class="num">' + (s.success_count || 0) + ' <span style="color:var(--ink-3)">/</span> <span style="color:var(--bad)">' + (s.err_total || 0) + '</span></td>' +
       '<td class="num">' + (s.in_flight || 0) + '</td>' +
       '<td class="num usage-cell" title="' + esc(usageTitle) + '"><span class="usage-line" aria-label="' + esc(usageTitle) + '">' +
@@ -3022,6 +3042,139 @@ function renderUsage(d) {
   renderUsageChart(usageData.series || []);
 }
 
+/* barsHtml 余额曲线：把窗口内的采样序列画成迷你柱。
+ *
+ * 高度按**窗口内 min→max 归一化**，不是按绝对余额——余额从 1300 掉到 1004 时，
+ * 按绝对值画出来是一排等高的柱子，什么都看不出来；按 min→max 画，掉的形状立刻
+ * 显形。带快过期积分的采样点用琥珀色，这是「掉的是不是快过期那批」最直接的证据。 */
+function barsHtml(series) {
+  if (!series || series.length < 2) return '<span style="color:var(--ink-3)">—</span>';
+  const cs = series.map(s => Number(s.c || 0));
+  const min = Math.min.apply(null, cs);
+  const max = Math.max.apply(null, cs);
+  const span = max - min;
+  const tip = '余额曲线：' + min + ' → ' + max + '（窗口内 ' + series.length + ' 个采样点）'
+    + (span === 0 ? '；余额无变化' : '');
+  const bars = series.map((s, i) => {
+    const h = span > 0 ? 4 + Math.round((Number(s.c || 0) - min) / span * 16) : 10;
+    const cls = (Number(s.e || 0) > 0 ? 'e' : '') + (i === series.length - 1 ? ' now' : '');
+    return '<i' + (cls ? ' class="' + cls + '"' : '') + ' style="height:' + h + 'px"></i>';
+  }).join('');
+  return '<span class="bars" title="' + esc(tip) + '">' + bars + '</span>';
+}
+
+/* renderRecon 渲染「积分对账」：把余额快照历史的净变化与 usage 的计费用量并排放。
+ *
+ * 口径（这是这张卡存在的全部理由）：
+ *   Δ余额    = credits(窗口末) - credits(窗口首)   ← 余额快照历史（仅 WorkBuddy 账号）
+ *   计费用量 = Σ usage.credit                      ← 上游 usage.credit 累计
+ *   差额     = 计费用量 + Δ余额                     ← 正常应 ≈ 0
+ * 差额 > 0 说明余额掉得比记录的用量还多——最典型的来源就是**积分过期**（到期批次
+ * 没被消耗就归零），其次是上游口径差异；差额 < 0 说明窗口内有入账（签到奖励/充值）。
+ * 这既是「快过期积分到底有没有被烧掉」的直接答案，也是面板与 NewAPI 对账的落点。 */
+function renderRecon(hist) {
+  const box = $('usReconBox');
+  if (!box) return;
+  if (!hist || !hist.accounts) { box.hidden = true; return; }
+  box.hidden = false;
+
+  const byUID = {};
+  ((overviewData && overviewData.accounts) || []).forEach(a => { byUID[a.uid] = a; });
+  const credited = {};
+  ((usageData || {}).credit_by_account || []).forEach(r => { credited[r.key] = r; });
+
+  const rows = [];
+  let creditedTotal = 0, netTotal = 0, covered = 0, expiringTotal = 0;
+  hist.accounts.forEach(h => {
+    const meta = byUID[h.uid] || {};
+    const cr = credited[h.uid];
+    const use = cr ? Number(cr.credits || 0) : 0;
+    rows.push({ h, meta, use, diff: use + (h.ok ? Number(h.net || 0) : 0) });
+    if (h.ok) { netTotal += Number(h.net || 0); covered++; }
+    creditedTotal += use;
+    expiringTotal += Number(meta.credits_expiring || 0);
+  });
+  const diffTotal = creditedTotal + netTotal;
+  // 掉得最多的排前面：这张表的用途是「谁在掉分、掉的和用量对不对得上」。
+  rows.sort((a, b) => Math.abs(Number(b.h.net || 0)) - Math.abs(Number(a.h.net || 0)));
+
+  const winH = Math.max(1, Math.round((hist.window_sec || 0) / 3600));
+  const clampH = Math.max(1, Math.round((hist.retention_sec || 0) / 3600));
+  // 请求窗口比保留期长（如「全部历史」）：余额侧只能覆盖保留期那一段，如实标注。
+  const clamped = (hist.window_sec || 0) > (hist.retention_sec || 0);
+  const effH = clamped ? clampH : winH;
+  const head = $('usReconDeltaHead');
+  if (head) head.textContent = '近 ' + effH + 'h Δ';
+
+  const diffOk = Math.abs(diffTotal) <= 0.5;
+  $('usReconStats').innerHTML =
+    usKpi(fmtCredit(creditedTotal), '计费用量', 'c-accent', 'Σ 上游 usage.credit（本窗口）') +
+    usKpi(fmtCredit(netTotal), '余额净变化', netTotal < 0 ? 'c-warn' : 'c-ok', 'Δ 余额合计（负 = 掉了）') +
+    usKpi((diffTotal > 0 ? '+' : '') + fmtCredit(diffTotal), '差额', diffOk ? 'c-ok' : 'c-warn',
+      '计费用量 + 余额净变化，正常 ≈ 0') +
+    usKpi(String(covered), '覆盖账号', 'c-mute', covered + ' / ' + hist.accounts.length + ' 个有足够历史');
+
+  const hintWrap = $('usReconHintWrap');
+  if (hintWrap) {
+    let msg;
+    if (diffOk) {
+      msg = '✓ 对得上：本窗口计费用量合计 <b>' + fmtCredit(creditedTotal) + '</b>，余额净变化 <b>'
+        + fmtCredit(netTotal) + '</b>，差额在 ±0.5 以内。';
+    } else if (diffTotal > 0) {
+      msg = '⚠ 余额比计费用量多掉了 <b>' + fmtCredit(diffTotal) + '</b> 分：多半是<b>积分过期</b>'
+        + '（到期批次没被消耗就归零），其次是上游口径差异（本地扣减是 int64(credit+0.5)，'
+        + '单次不足 0.5 分的请求不扣，靠 5 分钟一次的上游快照纠回）。'
+        + (expiringTotal > 0 ? '当前池内仍有 <b>' + expiringTotal + '</b> 分处于快过期窗口。' : '');
+    } else {
+      msg = '本窗口有 <b>' + fmtCredit(-diffTotal) + '</b> 分入账（签到奖励 / 充值），'
+        + '所以余额掉得比计费用量少——不是记账漏了。';
+    }
+    if (clamped) {
+      msg += '（余额快照历史只保留 ' + clampH + 'h，窗口更长时只对得上这一段；'
+        + '用量侧的窗口更宽，故两侧覆盖区间不同。）';
+    }
+    if (covered < hist.accounts.length) {
+      msg += '（' + (hist.accounts.length - covered) + ' 个账号样本不足，未计入余额合计。）';
+    }
+    $('usReconHint').innerHTML = msg;
+    hintWrap.hidden = false;
+  }
+
+  $('usReconNote').textContent = '近 ' + effH + 'h · ' + covered + ' 个账号有足够历史 · 每 5 分钟一次采样';
+  $('usReconBody').innerHTML = rows.map(r => {
+    const h = r.h, meta = r.meta;
+    const nick = meta.nickname ? esc(meta.nickname) : '<span style="color:var(--ink-3)">未命名</span>';
+    const exp = Number(meta.credits_expiring || 0) > 0
+      ? ' <span class="tag hot">快过期 ' + meta.credits_expiring + '</span>' : '';
+    const realm = meta.realm === 'global' ? '国际' : (meta.realm === 'cn' ? '国内' : '—');
+    const bal = meta.credits == null ? '—' : fmtCredit(meta.credits);
+    const netTxt = h.ok ? ((h.net > 0 ? '+' : '') + fmtCredit(h.net)) : '—';
+    const netCls = h.ok ? (h.net > 0 ? 'up' : 'dn') : '';
+    const spanH = Math.max(1, Math.round((h.span_sec || 0) / 3600));
+    const netTip = h.ok
+      ? '实际覆盖近 ' + spanH + 'h（' + String(h.from || '').replace('T', ' ').slice(0, 16)
+        + ' → ' + String(h.to || '').replace('T', ' ').slice(0, 16) + '），' + h.samples + ' 个采样点'
+      : '样本不足（需至少 10 分钟覆盖），暂时算不出净变化';
+    const diffTxt = h.ok ? fmtCredit(r.diff) : '—';
+    const diffCls = h.ok && Math.abs(r.diff) > 0.5 ? 'gap warn' : 'gap';
+    const diffTip = h.ok
+      ? '计费用量 ' + fmtCredit(r.use) + ' + 余额变化 ' + fmtCredit(h.net) + ' = ' + fmtCredit(r.diff)
+        + (Math.abs(r.diff) > 0.5 ? '（对不上：多半是积分过期或窗口内入账）' : '（对得上）')
+      : '缺余额变化，无法对账';
+    const short = h.uid.length > 16 ? h.uid.slice(0, 16) + '…' : h.uid;
+    return '<tr>' +
+      '<td class="mark" aria-hidden="true"></td>' +
+      '<td class="who"><div class="nm">' + nick + exp + '</div><div class="id">' + esc(short) + '</div></td>' +
+      '<td>' + realm + '</td>' +
+      '<td class="num">' + bal + '</td>' +
+      '<td class="num"><span class="dlt ' + netCls + '" title="' + esc(netTip) + '">' + netTxt + '</span></td>' +
+      '<td class="num">' + (r.use ? fmtCredit(r.use) : '—') + '</td>' +
+      '<td class="num"><span class="' + diffCls + '" title="' + esc(diffTip) + '">' + diffTxt + '</span></td>' +
+      '<td>' + barsHtml(h.series) + '</td>' +
+      '</tr>';
+  }).join('') || '<tr><td colspan="8" class="empty">暂无余额历史（服务刚启动，或窗口内还没有采样）</td></tr>';
+}
+
 // 维度切换 / 排序控件。
 if ($('usDimTabs')) $('usDimTabs').addEventListener('click', ev => {
   const b = ev.target.closest('button[data-dim]');
@@ -3249,11 +3402,20 @@ async function loadUsage() {
   const q = trangeQuery('usRange', true);
   try {
     await warmUsageModelRates();
-    const d = await api('usage?' + q.toString());
+    // 余额快照历史与用量同窗口并行拉取：对账卡片必须用**同一段区间**的两侧数据，
+    // 否则「Δ余额 vs 计费用量」会系统性错位。历史接口失败（未启用/501）不阻塞
+    // 用量本身，卡片隐藏即可。
+    const [d, hist] = await Promise.all([
+      api('usage?' + q.toString()),
+      api('credits/history?' + q.toString()).catch(() => null),
+    ]);
+    creditHistData = hist;
     renderUsage(d);
+    renderRecon(hist);
   } catch (e) {
     // 失败时三块都要清干净：只改图表会留下上一次窗口的数字，看起来像"刷新成功"。
     usageData = null;
+    creditHistData = null;
     $('usChart').innerHTML = '<div class="us-empty">读取用量失败：' + esc(e.message) + '</div>';
     $('usChartNote').textContent = '—';
     $('usStats').innerHTML = '';
@@ -3267,6 +3429,7 @@ async function loadUsage() {
     $('usCreditTabs').innerHTML = usTabsHtml([['account', '按账号'], ['model', '按模型']], usCreditDim, null);
     $('usDimBody').innerHTML = '<tr><td colspan="10" class="empty">读取用量失败</td></tr>';
     $('usCreditBody').innerHTML = '<tr><td colspan="7" class="empty">读取用量失败</td></tr>';
+    if ($('usReconBox')) $('usReconBox').hidden = true;
   }
 }
 

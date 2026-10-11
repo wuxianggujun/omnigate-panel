@@ -128,6 +128,7 @@ func (p *Provider) StreamChat(ctx context.Context, acc *provider.Account, in pro
 	if in.ReasoningEffort != "" {
 		body["reasoning_effort"] = in.ReasoningEffort
 	}
+	provider.ApplySampling(body, in)
 	raw, err := json.Marshal(body)
 	if err != nil {
 		return nil, err

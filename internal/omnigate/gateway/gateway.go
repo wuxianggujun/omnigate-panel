@@ -750,6 +750,18 @@ func (g *Gateway) runChat(ctx context.Context, provName string, prov provider.Pr
 	in.Incognito = incognito
 	in.Mode = g.cfg.Mode
 	in.ReasoningEffort = req.ReasoningEffort
+	// 标准采样/结构控制字段：不转发就等于静默丢弃（ChatRequest 解析时就没字段）。
+	in.Temperature = req.Temperature
+	in.TopP = req.TopP
+	in.MaxTokens = req.MaxTokens
+	if in.MaxTokens == nil {
+		in.MaxTokens = req.MaxCompletionTokens // OpenAI 的新别名
+	}
+	in.Stop = req.Stop
+	in.ParallelToolCalls = req.ParallelToolCalls
+	in.ToolChoice = req.ToolChoice
+	in.ResponseFormat = req.ResponseFormat
+	in.User = req.User
 	if hasTools {
 		in.Messages = req.Messages
 		in.Tools = req.Tools

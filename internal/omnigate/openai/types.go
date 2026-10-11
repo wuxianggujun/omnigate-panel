@@ -79,6 +79,9 @@ type ToolDef struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description,omitempty"`
 	Parameters  json.RawMessage `json:"parameters,omitempty"`
+	// Strict 请求上游严格按 schema 生成参数（OpenAI structured function calling）。
+	// 此前没有字段，客户端传了会被静默丢掉。
+	Strict *bool `json:"strict,omitempty"`
 }
 
 // Tool is a tool definition in a chat request.
@@ -108,6 +111,20 @@ type ChatRequest struct {
 	// StreamOptions gates the trailing usage chunk (see StreamOptions). Usage is
 	// still captured for the request log regardless of this flag.
 	StreamOptions *StreamOptions `json:"stream_options,omitempty"`
+
+	// 以下标准采样/结构控制字段此前**没有字段**：请求体里带了也会在解析这一步被
+	// 静默丢掉（/omni/v1/chat/completions 与 /omni/v1/responses 都中招——Responses
+	// 翻译层明明产出了 temperature/max_tokens/tool_choice/response_format，一转
+	// struct 就没了）。它们被原样交给 provider（见 provider.ApplySampling）。
+	Temperature         *float64        `json:"temperature,omitempty"`
+	TopP                *float64        `json:"top_p,omitempty"`
+	MaxTokens           *int            `json:"max_tokens,omitempty"`
+	MaxCompletionTokens *int            `json:"max_completion_tokens,omitempty"`
+	Stop                json.RawMessage `json:"stop,omitempty"`
+	ParallelToolCalls   *bool           `json:"parallel_tool_calls,omitempty"`
+	ToolChoice          json.RawMessage `json:"tool_choice,omitempty"`
+	ResponseFormat      json.RawMessage `json:"response_format,omitempty"`
+	User                string          `json:"user,omitempty"`
 }
 
 // Model is one entry in GET /v1/models. The credit/price fields below are

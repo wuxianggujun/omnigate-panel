@@ -230,7 +230,7 @@ func TestChatResponseToResponses(t *testing.T) {
 			{"id":"call_1","type":"function","function":{"name":"f","arguments":"{\"a\":1}"}}
 		]},"finish_reason":"tool_calls"}],
 		"usage":{"prompt_tokens":3,"completion_tokens":5,"total_tokens":8}
-	}`), "glm-5.2", "resp_fixed", map[string]any{"k": "v"})
+	}`), "glm-5.2", "resp_fixed", map[string]any{"k": "v"}, Echo{})
 	if err != nil {
 		t.Fatalf("translate: %v", err)
 	}
@@ -263,11 +263,96 @@ func TestChatResponseToResponses(t *testing.T) {
 	}
 }
 
+// TestEchoRequestFieldsInResponse OpenAI 会把请求里的 tools / tool_choice /
+// parallel_tool_calls 回显到 response 对象；此前恒为 []/"auto"/true（等于回显撒谎）。
+// 两种入站 tools 形态都应规范成 Responses 扁平形态回显。
+func TestEchoRequestFieldsInResponse(t *testing.T) {
+	cr, err := RequestToChat([]byte(`{
+		"model":"m","input":"hi","parallel_tool_calls":false,
+		"tools":[{"type":"function","function":{"name":"nested","description":"d","parameters":{"type":"object"}}}],
+		"tool_choice":{"type":"function","function":{"name":"nested"}}
+	}`), nil)
+	if err != nil {
+		t.Fatalf("translate: %v", err)
+	}
+	out, err := ChatResponseToResponses([]byte(`{"model":"m","choices":[{"message":{"role":"assistant","content":"x"}}]}`), "m", "resp_x", nil, cr.Echo)
+	if err != nil {
+		t.Fatalf("translate response: %v", err)
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(out, &resp); err != nil {
+		t.Fatalf("not json: %v", err)
+	}
+	tools, _ := resp["tools"].([]any)
+	if len(tools) != 1 {
+		t.Fatalf("tools=%v (want the nested tool echoed flat)", resp["tools"])
+	}
+	item := tools[0].(map[string]any)
+	if item["type"] != "function" || item["name"] != "nested" || item["description"] != "d" {
+		t.Errorf("echoed tool=%v", item)
+	}
+	if _, ok := item["parameters"].(map[string]any); !ok {
+		t.Errorf("echoed tool parameters=%v", item["parameters"])
+	}
+	if tc, _ := resp["tool_choice"].(map[string]any); tc["type"] != "function" || tc["name"] != "nested" {
+		t.Errorf("tool_choice=%v", resp["tool_choice"])
+	}
+	if resp["parallel_tool_calls"] != false {
+		t.Errorf("parallel_tool_calls=%v (want false)", resp["parallel_tool_calls"])
+	}
+}
+
+// TestEchoDefaultsWhenRequestHasNoTools 客户端没传 tools 时按规范回显 [] 与 "auto"。
+func TestEchoDefaultsWhenRequestHasNoTools(t *testing.T) {
+	cr, err := RequestToChat([]byte(`{"model":"m","input":"hi"}`), nil)
+	if err != nil {
+		t.Fatalf("translate: %v", err)
+	}
+	out, err := ChatResponseToResponses([]byte(`{"model":"m","choices":[{"message":{"role":"assistant","content":"x"}}]}`), "m", "resp_x", nil, cr.Echo)
+	if err != nil {
+		t.Fatalf("translate response: %v", err)
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(out, &resp); err != nil {
+		t.Fatalf("not json: %v", err)
+	}
+	if tools, ok := resp["tools"].([]any); !ok || len(tools) != 0 {
+		t.Errorf("tools=%v (want [])", resp["tools"])
+	}
+	if resp["tool_choice"] != "auto" {
+		t.Errorf("tool_choice=%v (want auto)", resp["tool_choice"])
+	}
+	if resp["parallel_tool_calls"] != true {
+		t.Errorf("parallel_tool_calls=%v (want true)", resp["parallel_tool_calls"])
+	}
+}
+
+// TestStreamEnvelopeEchoesRequestFields 流式信封（response.created/completed）同样
+// 要回显请求侧字段。
+func TestStreamEnvelopeEchoesRequestFields(t *testing.T) {
+	cr, err := RequestToChat([]byte(`{"model":"m","input":"hi","stream":true,"tools":[{"type":"function","name":"f","parameters":{"type":"object"}}]}`), nil)
+	if err != nil {
+		t.Fatalf("translate: %v", err)
+	}
+	rec := httptest.NewRecorder()
+	tr := NewTranslator(rec, true, cr.Model, nil, cr.Echo)
+	_, _ = tr.Write([]byte("data: {\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n"))
+	_, _ = tr.Write([]byte("data: [DONE]\n\n"))
+	tr.Finish()
+	body := rec.Body.String()
+	if !strings.Contains(body, `"name":"f"`) {
+		t.Errorf("stream envelope missing echoed tool\n%s", body)
+	}
+	if !strings.Contains(body, `"tool_choice":"auto"`) {
+		t.Errorf("stream envelope missing tool_choice\n%s", body)
+	}
+}
+
 // TestStreamMultipleToolCallsOmittedIndex 一个 chunk 内多个 tool_call 且都省略
 // index（OmniGate 引擎的形态）：必须拆成多个 function_call 输出项，而不是合并。
 func TestStreamMultipleToolCallsOmittedIndex(t *testing.T) {
 	rec := httptest.NewRecorder()
-	tr := NewTranslator(rec, true, "m", nil)
+	tr := NewTranslator(rec, true, "m", nil, Echo{})
 	frame := `{"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"tool_calls":[` +
 		`{"id":"call_1","type":"function","function":{"name":"a","arguments":"{\"x\":1}"}},` +
 		`{"id":"call_2","type":"function","function":{"name":"b","arguments":"{}"}},` +
@@ -294,7 +379,7 @@ func TestStreamMultipleToolCallsOmittedIndex(t *testing.T) {
 // TestStreamIncrementalToolArgs 增量参数（首帧带 id，后续帧仅带 index）应合并到同一项。
 func TestStreamIncrementalToolArgs(t *testing.T) {
 	rec := httptest.NewRecorder()
-	tr := NewTranslator(rec, true, "m", nil)
+	tr := NewTranslator(rec, true, "m", nil, Echo{})
 	f1 := `{"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_x","type":"function","function":{"name":"f","arguments":"{\"a\""}}]}}]}`
 	f2 := `{"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":":1}"}}]}}]}`
 	_, _ = tr.Write([]byte("data: " + f1 + "\n\n"))
@@ -313,7 +398,7 @@ func TestStreamIncrementalToolArgs(t *testing.T) {
 // TestAssistantMessageNonStream 非流式：可从 Translator 取回助手消息（供续写存储）。
 func TestAssistantMessageNonStream(t *testing.T) {
 	rec := httptest.NewRecorder()
-	tr := NewTranslator(rec, false, "m", nil)
+	tr := NewTranslator(rec, false, "m", nil, Echo{})
 	tr.WriteHeader(200)
 	_, _ = tr.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"hey"},"finish_reason":"stop"}]}`))
 	tr.Finish()
@@ -326,7 +411,7 @@ func TestAssistantMessageNonStream(t *testing.T) {
 // TestAssistantMessageStream 流式：聚合出的助手消息含正文与工具调用。
 func TestAssistantMessageStream(t *testing.T) {
 	rec := httptest.NewRecorder()
-	tr := NewTranslator(rec, true, "m", nil)
+	tr := NewTranslator(rec, true, "m", nil, Echo{})
 	f := `{"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":"hi"}}]}`
 	_, _ = tr.Write([]byte("data: " + f + "\n\n"))
 	_, _ = tr.Write([]byte("data: [DONE]\n\n"))
@@ -340,7 +425,7 @@ func TestAssistantMessageStream(t *testing.T) {
 // TestAssistantMessageFailed 流式失败：不产出可存储的助手消息。
 func TestAssistantMessageFailed(t *testing.T) {
 	rec := httptest.NewRecorder()
-	tr := NewTranslator(rec, true, "m", nil)
+	tr := NewTranslator(rec, true, "m", nil, Echo{})
 	_, _ = tr.Write([]byte("data: {\"error\":{\"message\":\"boom\",\"type\":\"upstream_error\"}}\n\n"))
 	tr.Finish()
 	if msg := tr.AssistantMessage(); msg != nil {
@@ -351,7 +436,7 @@ func TestAssistantMessageFailed(t *testing.T) {
 // TestTranslatorResponseID id 稳定：Translator.ResponseID 与响应体一致。
 func TestTranslatorResponseID(t *testing.T) {
 	rec := httptest.NewRecorder()
-	tr := NewTranslator(rec, false, "m", map[string]any{"a": "b"})
+	tr := NewTranslator(rec, false, "m", map[string]any{"a": "b"}, Echo{})
 	tr.WriteHeader(200)
 	_, _ = tr.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"x"}}]}`))
 	tr.Finish()

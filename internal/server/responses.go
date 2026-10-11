@@ -51,7 +51,7 @@ func (h *Handler) responses(w http.ResponseWriter, r *http.Request) {
 	r2.Header = r.Header.Clone()
 	r2.Header.Set("Content-Type", "application/json")
 
-	tw := responses.NewTranslator(w, cr.Stream, cr.Model, cr.Metadata)
+	tw := responses.NewTranslator(w, cr.Stream, cr.Model, cr.Metadata, cr.Echo)
 	h.chatCompletions(tw, r2)
 	tw.Finish()
 

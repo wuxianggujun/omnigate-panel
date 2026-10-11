@@ -39,7 +39,7 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 	}
 	req.Stream = cr.Stream
 
-	tw := responses.NewTranslator(w, cr.Stream, cr.Model, cr.Metadata)
+	tw := responses.NewTranslator(w, cr.Stream, cr.Model, cr.Metadata, cr.Echo)
 	s.gw.HandleChat(r.Context(), &req, tw)
 	tw.Finish()
 

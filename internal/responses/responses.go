@@ -84,6 +84,43 @@ type inputItem struct {
 	Output    json.RawMessage `json:"output"`
 }
 
+// Echo 是 OpenAI 会在 response 对象里原样回显的请求侧字段：tools /
+// tool_choice / parallel_tool_calls。客户端（含严格校验的 Codex 类工具）可能读
+// 这几个字段，此前恒为 []/"auto"/true，属于「回显撒谎」。零值 = 客户端没传，
+// 按规范给默认值（tools=[]、tool_choice="auto"、parallel_tool_calls=true）。
+type Echo struct {
+	// Tools 是规范化成 Responses 扁平形态的工具定义（只含真正转发给上游的那些）。
+	Tools []map[string]any
+	// ToolChoice 是规范化后的 tool_choice：字符串，或 {"type":"function","name":…}。
+	ToolChoice any
+	// ParallelToolCalls 为 nil 时按规范回显 true。
+	ParallelToolCalls *bool
+}
+
+// toolsJSON 返回回显用的 tools，永不为 nil（nil 会序列化成 null，规范是 []）。
+func (e Echo) toolsJSON() []map[string]any {
+	if e.Tools == nil {
+		return []map[string]any{}
+	}
+	return e.Tools
+}
+
+// toolChoiceJSON 返回回显用的 tool_choice（缺省 "auto"）。
+func (e Echo) toolChoiceJSON() any {
+	if e.ToolChoice == nil {
+		return "auto"
+	}
+	return e.ToolChoice
+}
+
+// parallelJSON 返回回显用的 parallel_tool_calls（缺省 true）。
+func (e Echo) parallelJSON() bool {
+	if e.ParallelToolCalls == nil {
+		return true
+	}
+	return *e.ParallelToolCalls
+}
+
 // ChatRequest is a Responses request translated to a chat/completions request,
 // plus the bookkeeping the caller needs to serve and (optionally) persist it.
 type ChatRequest struct {
@@ -103,6 +140,9 @@ type ChatRequest struct {
 	Store bool
 	// Metadata is echoed back verbatim in the response ("metadata").
 	Metadata map[string]any
+	// Echo 是响应对象里要回显的请求侧字段（tools / tool_choice /
+	// parallel_tool_calls），调用方把它交给 Translator。
+	Echo Echo
 	// DroppedTools 是入站 tools 里没能映射成 chat 函数、被丢弃的条目数（type 非
 	// function，或缺 name）。非零 = 模型看不见这些工具，只能干聊——调用方必须
 	// 记一行日志：这类「工具静默消失」此前只能靠用户报障才发现。
@@ -220,6 +260,11 @@ func RequestToChat(raw []byte, store *Store) (*ChatRequest, error) {
 		PreviousID:   req.PreviousResponseID,
 		Store:        req.Store == nil || *req.Store, // OpenAI defaults store to true
 		Metadata:     meta,
+		Echo: Echo{
+			Tools:             toolsEcho(req.Tools),
+			ToolChoice:        toolChoiceEcho(req.ToolChoice),
+			ParallelToolCalls: req.ParallelToolCalls,
+		},
 		DroppedTools: droppedTools,
 	}, nil
 }
@@ -457,6 +502,78 @@ func toolChoiceToChat(raw json.RawMessage) any {
 	return nil
 }
 
+// toolsEcho normalizes the inbound tools into the Responses flat shape for the
+// response object. OpenAI mirrors the request's tools back; both accepted
+// inbound shapes collapse to the flat one, which is what a Responses client
+// expects to read. Entries we did not forward (dropped by toolsToChat) are not
+// echoed — echoing a tool the gateway cannot honor would be a lie.
+func toolsEcho(tools []tool) []map[string]any {
+	out := make([]map[string]any, 0, len(tools))
+	for _, t := range tools {
+		if t.Type != "" && t.Type != "function" {
+			continue
+		}
+		name, desc, params, strict := t.Name, t.Description, t.Parameters, t.Strict
+		if name == "" && t.Function != nil {
+			name, desc, params, strict = t.Function.Name, t.Function.Description, t.Function.Parameters, t.Function.Strict
+		}
+		if name == "" {
+			continue
+		}
+		item := map[string]any{"type": "function", "name": name}
+		if desc != "" {
+			item["description"] = desc
+		}
+		if len(params) == 0 {
+			params = json.RawMessage(`{"type":"object","properties":{}}`)
+		}
+		item["parameters"] = json.RawMessage(params)
+		if strict != nil {
+			item["strict"] = *strict
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
+// toolChoiceEcho normalizes the inbound tool_choice into the Responses shape for
+// the response object. Absent/unparseable → "auto" (the spec default).
+func toolChoiceEcho(raw json.RawMessage) any {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
+		return "auto"
+	}
+	if trimmed[0] == '"' {
+		var s string
+		if json.Unmarshal(trimmed, &s) == nil && s != "" {
+			return s
+		}
+		return "auto"
+	}
+	var obj struct {
+		Type     string `json:"type"`
+		Name     string `json:"name"`
+		Function *struct {
+			Name string `json:"name"`
+		} `json:"function"`
+	}
+	if json.Unmarshal(trimmed, &obj) != nil {
+		return "auto"
+	}
+	switch obj.Type {
+	case "auto", "none", "required":
+		return obj.Type
+	}
+	name := obj.Name
+	if name == "" && obj.Function != nil {
+		name = obj.Function.Name
+	}
+	if name != "" {
+		return map[string]any{"type": "function", "name": name}
+	}
+	return "auto"
+}
+
 // textToChat translates text.format → response_format.
 func textToChat(text *textFormat) any {
 	if text == nil || text.Format == nil {
@@ -538,8 +655,10 @@ func usageToResponses(u *chatUsage) map[string]any {
 }
 
 // ChatResponseToResponses translates a non-streaming chat response into a
-// Responses response. id, when empty, is generated; metadata is echoed back.
-func ChatResponseToResponses(chatResp []byte, fallbackModel, id string, metadata map[string]any) ([]byte, error) {
+// Responses response. id, when empty, is generated; metadata is echoed back;
+// echo carries the request-side fields OpenAI mirrors back (tools /
+// tool_choice / parallel_tool_calls).
+func ChatResponseToResponses(chatResp []byte, fallbackModel, id string, metadata map[string]any, echo Echo) ([]byte, error) {
 	if id == "" {
 		id = RandID("resp_")
 	}
@@ -627,15 +746,18 @@ func ChatResponseToResponses(chatResp []byte, fallbackModel, id string, metadata
 	}
 
 	out := map[string]any{
-		"id":          id,
-		"object":      "response",
-		"created_at":  created,
-		"status":      status,
-		"model":       model,
-		"output":      output,
-		"output_text": outputText,
-		"usage":       usageToResponses(cr.Usage),
-		"metadata":    metadata,
+		"id":                  id,
+		"object":              "response",
+		"created_at":          created,
+		"status":              status,
+		"model":               model,
+		"output":              output,
+		"output_text":         outputText,
+		"usage":               usageToResponses(cr.Usage),
+		"metadata":            metadata,
+		"tools":               echo.toolsJSON(),
+		"tool_choice":         echo.toolChoiceJSON(),
+		"parallel_tool_calls": echo.parallelJSON(),
 	}
 	if incomplete != nil {
 		out["incomplete_details"] = incomplete
@@ -656,6 +778,7 @@ type Translator struct {
 	model    string
 	id       string
 	metadata map[string]any
+	echo     Echo
 
 	hdr         http.Header
 	status      int
@@ -669,14 +792,16 @@ type Translator struct {
 }
 
 // NewTranslator builds a Translator wrapping inner. metadata (may be nil) is
-// echoed back in the response envelope.
-func NewTranslator(inner http.ResponseWriter, stream bool, model string, metadata map[string]any) *Translator {
+// echoed back in the response envelope; echo carries the request-side fields
+// OpenAI mirrors back (tools / tool_choice / parallel_tool_calls).
+func NewTranslator(inner http.ResponseWriter, stream bool, model string, metadata map[string]any, echo Echo) *Translator {
 	return &Translator{
 		inner:    inner,
 		stream:   stream,
 		model:    model,
 		id:       RandID("resp_"),
 		metadata: metadata,
+		echo:     echo,
 		hdr:      http.Header{},
 	}
 }
@@ -808,7 +933,7 @@ func (t *Translator) flushNonStream() {
 		_, _ = t.inner.Write(t.body)
 		return
 	}
-	converted, err := ChatResponseToResponses(t.body, t.model, t.id, t.metadata)
+	converted, err := ChatResponseToResponses(t.body, t.model, t.id, t.metadata, t.echo)
 	if err != nil {
 		// Unparseable: pass the original body through (best effort).
 		t.copyHeadersToInner()
@@ -906,6 +1031,7 @@ type streamState struct {
 	created  int64
 	seq      int
 	metadata map[string]any
+	echo     Echo
 
 	started  bool
 	finished bool
@@ -937,6 +1063,7 @@ func newStreamState(t *Translator, model string) *streamState {
 		id:           t.id,
 		created:      time.Now().Unix(),
 		metadata:     t.metadata,
+		echo:         t.echo,
 		toolsByID:    map[string]*toolState{},
 		toolsByIndex: map[int]*toolState{},
 	}
@@ -1224,9 +1351,9 @@ func (s *streamState) envelope(status string, output []map[string]any) map[strin
 		"model":               s.model,
 		"output":              output,
 		"usage":               nil,
-		"parallel_tool_calls": true,
-		"tool_choice":         "auto",
-		"tools":               []any{},
+		"parallel_tool_calls": s.echo.parallelJSON(),
+		"tool_choice":         s.echo.toolChoiceJSON(),
+		"tools":               s.echo.toolsJSON(),
 		"error":               nil,
 		"incomplete_details":  nil,
 		"metadata":            meta,

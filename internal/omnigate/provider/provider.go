@@ -4,6 +4,7 @@ package provider
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"io"
 	"strings"
 
@@ -64,9 +65,58 @@ type ChatInput struct {
 	// ReasoningEffort is the OpenAI thinking tier (minimal/low/medium/high)
 	// forwarded to reasoning-capable upstreams; empty = not requested.
 	ReasoningEffort string
+	// Temperature / TopP / MaxTokens / Stop / ParallelToolCalls / ToolChoice /
+	// ResponseFormat / User are the standard OpenAI sampling & structure controls.
+	// Zero value = the client didn't send it. OpenAI-speaking providers merge them
+	// into the request body via ApplySampling; providers with a bespoke protocol
+	// (runable) ignore them.
+	Temperature       *float64
+	TopP              *float64
+	MaxTokens         *int
+	Stop              json.RawMessage
+	ParallelToolCalls *bool
+	ToolChoice        json.RawMessage
+	ResponseFormat    json.RawMessage
+	User              string
 	// Incognito/Mode mirror the original gateway's upstream modes.
 	Incognito bool
 	Mode      string
+}
+
+// ApplySampling merges the standard OpenAI sampling/structure controls from in
+// into an OpenAI-compatible request body. Providers call it right after filling
+// model/messages/stream, so a client's temperature / max_tokens / tool_choice /
+// response_format / ... actually reach the upstream instead of being dropped when
+// the gateway parses the request into openai.ChatRequest.
+//
+// tool_choice / response_format / stop are copied as raw JSON, so both the string
+// and the object form stay valid. A provider whose upstream wants a different
+// shape (trae) normalizes afterwards.
+func ApplySampling(body map[string]any, in ChatInput) {
+	if in.Temperature != nil {
+		body["temperature"] = *in.Temperature
+	}
+	if in.TopP != nil {
+		body["top_p"] = *in.TopP
+	}
+	if in.MaxTokens != nil {
+		body["max_tokens"] = *in.MaxTokens
+	}
+	if in.ParallelToolCalls != nil {
+		body["parallel_tool_calls"] = *in.ParallelToolCalls
+	}
+	if len(in.ToolChoice) > 0 {
+		body["tool_choice"] = json.RawMessage(in.ToolChoice)
+	}
+	if len(in.ResponseFormat) > 0 {
+		body["response_format"] = json.RawMessage(in.ResponseFormat)
+	}
+	if len(in.Stop) > 0 {
+		body["stop"] = json.RawMessage(in.Stop)
+	}
+	if in.User != "" {
+		body["user"] = in.User
+	}
 }
 
 // Event is one normalized stream event.

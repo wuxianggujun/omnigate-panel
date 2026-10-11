@@ -3180,8 +3180,9 @@ function renderRecon(hist) {
         + '靠 5 分钟一次的上游快照纠回）。'
         + (expiringTotal > 0 ? '当前池内仍有 <b>' + expiringTotal + '</b> 分处于快过期窗口。' : '');
     } else {
-      msg = '本窗口有 <b>' + fmtCredit(diffTotal) + '</b> 分入账（签到奖励 / 充值），'
-        + '所以余额掉得比计费用量少——不是记账漏了。';
+      msg = '本窗口余额掉得比计费用量少 <b>' + fmtCredit(diffTotal) + '</b> 分：通常是窗口内有'
+        + '签到奖励 / 充值入账；也可能是余额历史起点晚于窗口左边界（服务端最多容忍 20 分钟）'
+        + '让用量侧多算了开头那一段——不是记账漏了。';
     }
     if (canCompare && covered < hist.accounts.length) {
       msg += '（' + (hist.accounts.length - covered) + ' 个账号样本不足，未计入余额合计：'
@@ -3200,7 +3201,7 @@ function renderRecon(hist) {
   $('usReconNote').textContent = '覆盖近 ' + cover + ' · ' + covered
     + ' 个账号有足够历史 · 每 5 分钟一次采样'
     + (reconHoursUsed <= 0 ? ' · 待满 1 个整点小时'
-      : (reconNarrowed ? ' · 已收窄到保留期 ' + clampH + 'h' : ''));
+      : (reconNarrowed ? ' · 已按实际覆盖收窄（上限 ' + clampH + 'h）' : ''));
   $('usReconBody').innerHTML = rows.map(r => {
     const h = r.h, meta = r.meta;
     const nick = meta.nickname ? esc(meta.nickname) : '<span style="color:var(--ink-3)">未命名</span>';

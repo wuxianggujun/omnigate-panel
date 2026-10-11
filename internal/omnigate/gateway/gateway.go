@@ -573,11 +573,11 @@ func (g *Gateway) HandleChat(ctx context.Context, req *openai.ChatRequest, w htt
 			flush()
 			return
 		}
-		if !res.sawData {
-			// 上游 200 但空流（0 有效帧）：不是成功。写 error 帧兜底，并用 502 观测
-			// （与非流式空响应同语义，与 WorkBuddy 侧 empty stream 一致）。上游原文
-			// 一并带出：这类失败最常见的成因是上游用 200 回了一个非 SSE 的 JSON 错误体
-			// （限流 / 审核 / 参数错），只报 "empty" 会把真实原因彻底吞掉。
+		if !res.sawData && res.finish == "" {
+			// 上游 200 但空流（0 有效帧）、且连 finish_reason 都没发：不是成功。写
+			// error 帧兜底，并用 502 观测（与非流式空响应同语义）。上游原文一并带出：
+			// 这类失败最常见的成因是上游用 200 回了一个非 SSE 的 JSON 错误体（限流 /
+			// 审核 / 参数错），只报 "empty" 会把真实原因彻底吞掉。
 			g.log.Error("对话失败 %s: 上游空流（200+0 帧）finish=%q%s", displayModel, res.finish, sampleSuffix(res.sample))
 			markStreamFailure(ctx, reqlog.OutcomeStreamError, http.StatusBadGateway)
 			fmt.Fprintf(ew, "data: %s\n\n", openai.ErrorJSON("upstream_error", "empty upstream stream"+sampleSuffix(res.sample)))
@@ -585,6 +585,11 @@ func (g *Gateway) HandleChat(ctx context.Context, req *openai.ChatRequest, w htt
 			_ = openai.Done(ew)
 			flush()
 			return
+		}
+		if !res.sawData {
+			// 收到过 finish_reason：合法空回复（成因见非流式分支同名注释）。不写 error
+			// 帧，照常发 finish + [DONE]，让客户端拿到一个「空但正常结束」的流。
+			g.log.Warn("空回复 %s · finish=%s · 上游正常收尾但无正文", displayModel, res.finish)
 		}
 		if len(res.toolCalls) > 0 {
 			_ = openai.EmitToolCalls(ew, id, displayModel, created, res.toolCalls)
@@ -614,12 +619,20 @@ func (g *Gateway) HandleChat(ctx context.Context, req *openai.ChatRequest, w htt
 		writeJSON(w, 502, openai.ErrorJSON("upstream_error", err.Error()))
 		return
 	}
-	if !res.sawData {
-		// 上游 200 但空响应（0 有效帧）：不是成功（与流式空流同语义）。上游原文一并
-		// 带出，原因见流式分支的同名注释。
+	if !res.sawData && res.finish == "" {
+		// 上游 200 但空响应（0 有效帧）、且连 finish_reason 都没发：上游确实断了，不是
+		// 成功。上游原文一并带出，原因见流式分支的同名注释。
 		g.log.Error("对话失败 %s: 上游空响应 finish=%q%s", displayModel, res.finish, sampleSuffix(res.sample))
 		writeJSON(w, 502, openai.ErrorJSON("upstream_error", "empty upstream response"+sampleSuffix(res.sample)))
 		return
+	}
+	if !res.sawData {
+		// 收到过 finish_reason：上游正常收尾，只是这次补全一个正文/思考字节都没有。
+		// 实测成因：max_tokens 很小时模型把预算全花在上游不上报为 reasoning_content 的
+		// 内部推理上，上游于是只发空 delta 帧 + finish_reason=length。这是合法空回复，
+		// 按 OpenAI 语义回 200 + 空正文 + finish_reason；当成上游故障会让客户端拿到
+		// 502，误以为网关或上游坏了（此前就是如此）。
+		g.log.Warn("空回复 %s · finish=%s · 上游正常收尾但无正文", displayModel, res.finish)
 	}
 	if m := ReqMetaFrom(ctx); m != nil {
 		m.Usage = res.usage

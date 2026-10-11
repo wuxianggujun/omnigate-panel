@@ -29,11 +29,16 @@ func (p *Panel) getConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 凭证（upstash.token / upstream.device_token 等）只回显脱敏形态；顶层 api_key
-	// 刻意跳过：面板前端要用它调内置 OmniGate 的 /omni/*，见 secret.go 注释。
+	// 对**已登录**用户刻意跳过：面板前端要用它调内置 OmniGate 的 /omni/*，见
+	// secret.go 注释。匿名只读访问者拿不到可用密钥——额外抹掉 api_key / api_keys。
+	view := maskSecrets(gen, "api_key")
+	if !authed(r) {
+		view = maskGatewayKeys(view)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":     true,
 		"path":   p.cfg.ConfigPath,
-		"config": maskSecrets(gen, "api_key"),
+		"config": view,
 	})
 }
 

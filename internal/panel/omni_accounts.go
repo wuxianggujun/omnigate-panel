@@ -14,12 +14,13 @@ import (
 )
 
 // omniAccounts 返回归一化的 OmniGate 账号（?balance=1 时实时查上游余额）。
+// 匿名只读访问者忽略 balance：实时余额要拿账号 cookie 打上游，不该由未登录访客触发。
 func (p *Panel) omniAccounts(w http.ResponseWriter, r *http.Request) {
 	if p.cfg.OmniAccounts == nil {
 		writeErr(w, http.StatusNotImplemented, "omnigate not enabled")
 		return
 	}
-	withBalance := r.URL.Query().Get("balance") == "1"
+	withBalance := r.URL.Query().Get("balance") == "1" && authed(r)
 	d, err := p.cfg.OmniAccounts(withBalance)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, "list omnigate accounts: "+err.Error())

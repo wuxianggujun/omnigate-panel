@@ -29,12 +29,16 @@ func (p *Panel) getOmniConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 凭证只回显脱敏形态（前缀 + 长度）：providers[].api_key 与 accounts[].cookie /
-	// password / refresh_token 等原始值绝不离开服务端（viewer 也能 GET 本接口）。
-	// 保存时按「掩码 = 未改动」还原，见 saveOmniConfig 与 secret.go。
+	// password / refresh_token 等原始值绝不离开服务端。匿名只读访问者还额外抹掉
+	// 顶层网关密钥 api_keys。保存时按「掩码 = 未改动」还原，见 secret.go。
+	view := maskSecrets(gen)
+	if !authed(r) {
+		view = maskGatewayKeys(view)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":     true,
 		"path":   p.cfg.OmniConfigPath,
-		"config": maskSecrets(gen),
+		"config": view,
 	})
 }
 

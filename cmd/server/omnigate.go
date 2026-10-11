@@ -167,6 +167,17 @@ func (m *omniManager) PoolStatuses() []outbound.PoolStatus {
 	return m.obRT.PoolStatuses()
 }
 
+// Models 返回 OmniGate 汇总模型目录（与 /omni/v1/models 同源，含积分价）。面板
+// 「模型与档位」页与请求记录页的积分列用它：进程内直取网关运行时，匿名只读访问
+// 也无需、且不会拿到网关 api_key。
+func (m *omniManager) Models(ctx context.Context) (any, error) {
+	rt := m.cur.Load()
+	if rt == nil {
+		return nil, errors.New("omnigate 未就绪")
+	}
+	return rt.gw.ListModels(ctx), nil
+}
+
 // SetAPIKey 更新 OmniGate 复用的网关 api_key 并热重载（面板「重新生成」密钥后
 // 调用，使 /omni/* 与网关 api_key 保持同一把）。未启用时仅记住新值，供后续
 // build 回填。返回错误不致命——调用方记日志，重启后自然对齐。

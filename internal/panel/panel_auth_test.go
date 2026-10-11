@@ -110,9 +110,13 @@ func TestPanelAuthSessionLoginLogout(t *testing.T) {
 		!strings.Contains(rec.Body.String(), `"authenticated":false`) {
 		t.Fatalf("session state (anon) = %d %s", rec.Code, rec.Body.String())
 	}
-	// 未登录访问受保护接口 → 401。
-	if rec := do(p, "GET", "/panel/api/config", "", nil, nil); rec.Code != http.StatusUnauthorized {
-		t.Fatalf("anon config = %d want 401", rec.Code)
+	// 只读接口默认公开：未登录 GET 通过鉴权层（无 LoadConfig → 501，而非 401）。
+	if rec := do(p, "GET", "/panel/api/config", "", nil, nil); rec.Code != http.StatusNotImplemented {
+		t.Fatalf("anon read config = %d want 501 (public read passed auth)", rec.Code)
+	}
+	// 写接口仍要求登录：未登录 POST → 401。
+	if rec := do(p, "POST", "/panel/api/config", `{}`, nil, nil); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("anon write config = %d want 401", rec.Code)
 	}
 	// 错误密码 → 401（且不泄漏账号是否存在）。
 	if rec := do(p, "POST", "/panel/api/session", `{"username":"admin","password":"nope"}`, nil, nil); rec.Code != http.StatusUnauthorized {
@@ -129,41 +133,88 @@ func TestPanelAuthSessionLoginLogout(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), `"authenticated":true`) || !strings.Contains(rec.Body.String(), `"admin"`) {
 		t.Fatalf("session state (authed) = %s", rec.Body.String())
 	}
-	// 登出后会话立即失效。
+	// 登出后会话立即失效：写接口回到 401（只读仍公开）。
 	if rec := do(p, "DELETE", "/panel/api/session", "", ck, nil); rec.Code != 200 {
 		t.Fatalf("logout = %d", rec.Code)
 	}
-	if rec := do(p, "GET", "/panel/api/config", "", ck, nil); rec.Code != http.StatusUnauthorized {
-		t.Fatalf("after logout config = %d want 401", rec.Code)
+	if rec := do(p, "POST", "/panel/api/config", `{}`, ck, nil); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("after logout write config = %d want 401", rec.Code)
 	}
 }
 
-// 配了面板账号后，网关 api_key 不再能打开面板。
+// 配了面板账号后，网关 api_key 不再能打开面板（写接口一律要求会话登录）。
 func TestPanelAuthAPIKeyRejectedWhenUsersConfigured(t *testing.T) {
 	users := []panelauth.User{pwUser(t, "admin", panelauth.RoleAdmin, "pw123456")}
 	p, _ := newAuthPanel(t, users, "test-key")
 
-	if rec := do(p, "GET", "/panel/api/config", "", nil, map[string]string{"Authorization": "Bearer test-key"}); rec.Code != http.StatusUnauthorized {
+	if rec := do(p, "POST", "/panel/api/config", `{}`, nil, map[string]string{"Authorization": "Bearer test-key"}); rec.Code != http.StatusUnauthorized {
 		t.Fatalf("api_key with users configured = %d want 401", rec.Code)
 	}
-	if rec := do(p, "GET", "/panel/api/config", "", nil, nil); rec.Code != http.StatusUnauthorized {
+	if rec := do(p, "POST", "/panel/api/config", `{}`, nil, nil); rec.Code != http.StatusUnauthorized {
 		t.Fatalf("no credentials = %d want 401", rec.Code)
 	}
 }
 
-// 未配置任何面板账号时，网关 api_key 不再能打开面板（已与 api_key 彻底解耦）：
-// 一律 401，须先用 `-set-admin-password` 引导账号。
+// 未配置任何面板账号时：只读接口默认公开（无需登录），写接口一律 401——
+// 网关 api_key 不再能打开面板（已与 api_key 彻底解耦）。
 func TestPanelAuthNoLegacyFallbackWithoutUsers(t *testing.T) {
 	p, _ := newAuthPanel(t, nil, "test-key")
-	if rec := do(p, "GET", "/panel/api/config", "", nil, map[string]string{"Authorization": "Bearer test-key"}); rec.Code != http.StatusUnauthorized {
+	// 只读公开：GET 通过鉴权层（无 LoadConfig → 501，而非 401）。
+	if rec := do(p, "GET", "/panel/api/config", "", nil, nil); rec.Code != http.StatusNotImplemented {
+		t.Fatalf("anon read without users = %d want 501 (public read)", rec.Code)
+	}
+	// 写接口：api_key / 匿名都拒绝。
+	if rec := do(p, "POST", "/panel/api/config", `{}`, nil, map[string]string{"Authorization": "Bearer test-key"}); rec.Code != http.StatusUnauthorized {
 		t.Fatalf("api_key without users = %d want 401", rec.Code)
 	}
-	if rec := do(p, "GET", "/panel/api/config", "", nil, nil); rec.Code != http.StatusUnauthorized {
-		t.Fatalf("anon without users = %d want 401", rec.Code)
+	if rec := do(p, "POST", "/panel/api/config", `{}`, nil, nil); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("anon write without users = %d want 401", rec.Code)
 	}
 	// 未配置账号时登录端点也拒绝（无账号可登）。
 	if rec := do(p, "POST", "/panel/api/session", `{"username":"admin","password":"x"}`, nil, nil); rec.Code != http.StatusBadRequest {
 		t.Fatalf("login without users = %d want 400", rec.Code)
+	}
+}
+
+// 匿名只读不得泄漏可用网关密钥：GET /panel/api/config 对未登录访问者必须把顶层
+// api_key / api_keys 一并脱敏；已登录（admin）仍拿到明文 api_key（面板前端要用它
+// 调 /omni/*），但嵌套凭证一律脱敏。
+func TestPublicReadMasksGatewayKeys(t *testing.T) {
+	users := []panelauth.User{pwUser(t, "admin", panelauth.RoleAdmin, "pw123456")}
+	p, _ := newAuthPanel(t, users, "gw-secret-1234567890")
+	p.cfg.LoadConfig = func() (any, error) {
+		return map[string]any{
+			"api_key":  "gw-secret-1234567890",
+			"api_keys": []any{"gw-secret-1234567890"},
+			"upstream": map[string]any{"device_token": "dev-secret-abcdef"},
+		}, nil
+	}
+
+	// 匿名：密钥全部脱敏。
+	rec := do(p, "GET", "/panel/api/config", "", nil, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("anon config = %d want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, "gw-secret-1234567890") || strings.Contains(body, "dev-secret-abcdef") {
+		t.Fatalf("匿名响应泄漏明文密钥：%s", body)
+	}
+	if !strings.Contains(body, maskMarker) {
+		t.Fatalf("匿名响应应含脱敏掩码：%s", body)
+	}
+
+	// 已登录：顶层 api_key 仍明文（面板前端要用它调 /omni/*），嵌套凭证仍脱敏。
+	ck := login(t, p, "admin", "pw123456")
+	rec = do(p, "GET", "/panel/api/config", "", ck, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("authed config = %d want 200", rec.Code)
+	}
+	authedBody := rec.Body.String()
+	if !strings.Contains(authedBody, "gw-secret-1234567890") {
+		t.Fatalf("已登录应保留顶层 api_key 明文：%s", authedBody)
+	}
+	if strings.Contains(authedBody, "dev-secret-abcdef") {
+		t.Fatalf("嵌套 device_token 应脱敏：%s", authedBody)
 	}
 }
 
@@ -353,8 +404,9 @@ func TestPanelAuthResolveAuthEdges(t *testing.T) {
 	users := []panelauth.User{pwUser(t, "admin", panelauth.RoleAdmin, "pw123456")}
 	p, _ := newAuthPanel(t, users, "test-key")
 	bogus := &http.Cookie{Name: sessionCookieName, Value: "not-a-real-token"}
-	if rec := do(p, "GET", "/panel/api/config", "", bogus, nil); rec.Code != http.StatusUnauthorized {
-		t.Fatalf("bogus cookie = %d want 401", rec.Code)
+	// 伪造会话不等于已登录：写接口仍 401。
+	if rec := do(p, "POST", "/panel/api/config", `{}`, bogus, nil); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("bogus cookie write = %d want 401", rec.Code)
 	}
 	// 会话令牌也可经 Bearer 头传（自动化友好）。
 	ck := login(t, p, "admin", "pw123456")

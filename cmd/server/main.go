@@ -463,6 +463,9 @@ func main() {
 			defer cancel()
 			return omni.CheckinAll(ctx)
 		}
+		// 模型目录只读代理：面板「模型与档位」页匿名也能看 OmniGate 模型与积分价，
+		// 但不经过需要 api_key 的 /omni/* HTTP。
+		pcfg.OmniModels = omni.Models
 		// runable 登录校验（服务端会话探测 + 取积分）：runable 只支持 Google/Facebook
 		// 登录、会话是 httpOnly Cookie（网页读不到），面板无法自动抓取，只能由用户粘贴。
 		pcfg.OmniLogin = omni.LoginRunable

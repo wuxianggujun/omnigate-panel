@@ -2,9 +2,14 @@
 // Cookie、角色（admin/viewer）、登录失败限流与 CSRF 防护。
 //
 // 认证（resolveAuth）：唯一入口是面板会话——浏览器用会话 Cookie，自动化用
-// Authorization: Bearer <会话令牌>。面板**不再**接受网关 api_key（哪怕一个面板
-// 账号都没配置）：未配置账号时所有 /panel/api/* 一律 401，须先在服务器执行
-// `omnigate-panel -set-admin-password` 引导一个账号后才能进入面板。
+// Authorization: Bearer <会话令牌>。面板**不接受**网关 api_key。
+//
+// 两种门（默认公开只读）：
+//   - read：**只读**接口（GET）默认公开，无需登录；已登录则注入身份，未登录以匿名
+//     身份放行。响应里的凭证由 maskSecrets 统一脱敏，匿名请求还会额外抹掉网关
+//     自己的 api_key / api_keys（见 secret.go），所以「能看」不会泄漏可用密钥。
+//   - auth/admin：**写**接口一律要求登录（admin 才能改配置/运维账号）。未登录时
+//     前端只会看到只读视图，点写操作会被引导去登录。
 //
 // CSRF：会话 Cookie 走 SameSite=Strict + 非安全方法校验 Origin/Sec-Fetch-Site
 // 同源；Bearer（会话令牌）不受 CSRF 影响（浏览器不会自动带上）。
@@ -86,6 +91,21 @@ func (p *Panel) auth(next http.HandlerFunc) http.HandlerFunc {
 		next(w, r.WithContext(context.WithValue(r.Context(), authCtxKey, ar)))
 	}
 }
+
+// read 中间件：只读接口（GET）默认公开。已登录则注入身份（前端据此显示写权限），
+// 未登录以匿名身份放行（ar.ok=false）。凭证脱敏由各 handler 负责，匿名请求还会
+// 额外抹掉网关 api_key / api_keys。
+//
+// 只用于安全方法（GET）；写接口仍走 auth/admin。
+func (p *Panel) read(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ar := p.resolveAuth(r)
+		next(w, r.WithContext(context.WithValue(r.Context(), authCtxKey, ar)))
+	}
+}
+
+// authed 报告当前请求是否带有效面板会话（read 中间件注入）。
+func authed(r *http.Request) bool { return authFromContext(r.Context()).ok }
 
 // admin 中间件：在 auth 基础上要求 admin 角色。
 func (p *Panel) admin(next http.HandlerFunc) http.HandlerFunc {

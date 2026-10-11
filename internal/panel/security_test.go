@@ -8,8 +8,8 @@ import (
 )
 
 func newTestPanel() *Panel {
-	// 未注入面板鉴权 store（= 未配置账号）：所有 /panel/api/* 一律 401，
-	// 不进入依赖 Pool/Upstream 的 handler。
+	// 未注入面板鉴权 store（= 未配置账号）：只读接口默认公开（无依赖 → 501），
+	// 写接口一律 401。测试只碰不依赖 Pool/Upstream 的 handler。
 	return New(Config{Version: "test", APIKey: "test-key"})
 }
 
@@ -20,8 +20,8 @@ func TestSecurityHeadersOnAllPanelResponses(t *testing.T) {
 		{"GET", "/panel/"},
 		{"GET", "/panel/app.js"},
 		{"GET", "/panel/theme.css"},
-		{"GET", "/panel/api/overview"}, // 401（未提供 key）
-		{"POST", "/panel/api/config"},  // 401
+		{"GET", "/panel/api/config"},   // 501（只读公开，无 LoadConfig）
+		{"POST", "/panel/api/config"},  // 401（写需登录）
 		{"GET", "/panel/api/nonexistent"},
 	}
 	for _, c := range paths {
@@ -205,17 +205,24 @@ func TestValidUID(t *testing.T) {
 	}
 }
 
-// 未登录的 API 请求一律 401；网关 api_key 已不能打开面板（与面板鉴权彻底解耦）。
+// 只读接口默认公开（无需登录）；写接口未登录一律 401；网关 api_key 已不能打开面板。
 func TestAuthLayerBehavior(t *testing.T) {
 	p := newTestPanel()
+	// 只读公开：GET 通过鉴权层（无 LoadConfig → 501，而非 401）。
 	rec := httptest.NewRecorder()
-	p.ServeHTTP(rec, httptest.NewRequest("GET", "/panel/api/overview", nil))
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("no session: code=%d want 401", rec.Code)
+	p.ServeHTTP(rec, httptest.NewRequest("GET", "/panel/api/config", nil))
+	if rec.Code == http.StatusUnauthorized {
+		t.Fatalf("anon read must not be 401: code=%d", rec.Code)
 	}
-	// 网关 api_key（哪怕就是本进程的 api_key）不再放行面板接口。
+	// 写接口未登录 → 401。
+	recW := httptest.NewRecorder()
+	p.ServeHTTP(recW, httptest.NewRequest("POST", "/panel/api/config", nil))
+	if recW.Code != http.StatusUnauthorized {
+		t.Fatalf("anon write: code=%d want 401", recW.Code)
+	}
+	// 网关 api_key（哪怕就是本进程的 api_key）不再放行面板写接口。
 	rec2 := httptest.NewRecorder()
-	req2 := httptest.NewRequest("GET", "/panel/api/overview", nil)
+	req2 := httptest.NewRequest("POST", "/panel/api/config", nil)
 	req2.Header.Set("Authorization", "Bearer test-key")
 	p.ServeHTTP(rec2, req2)
 	if rec2.Code != http.StatusUnauthorized {

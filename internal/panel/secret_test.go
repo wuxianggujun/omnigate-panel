@@ -175,3 +175,38 @@ func TestMaskSecretsSkipTop(t *testing.T) {
 		t.Fatalf("嵌套 api_key 应脱敏，得到 %v", got)
 	}
 }
+
+// TestMaskGatewayKeys 匿名只读：顶层 api_key / api_keys 必须一并抹掉，且幂等。
+func TestMaskGatewayKeys(t *testing.T) {
+	cfg := map[string]any{
+		"api_key":  "gw-key-1234567890",
+		"api_keys": []any{"gw-key-1234567890", "", "another-key-abcdef"},
+		"providers": []any{
+			map[string]any{"name": "p", "api_key": "up-key-1234567890"},
+		},
+	}
+	// 先按「已登录」口径（跳过顶层 api_key），再按匿名口径抹一次。
+	view := maskSecrets(cfg, "api_key")
+	out := maskGatewayKeys(view).(map[string]any)
+	if s, _ := out["api_key"].(string); s == "gw-key-1234567890" || !isMasked(s) {
+		t.Fatalf("匿名时顶层 api_key 应脱敏，得到 %v", out["api_key"])
+	}
+	arr, _ := out["api_keys"].([]any)
+	if len(arr) != 3 {
+		t.Fatalf("api_keys 长度应保持，得到 %v", arr)
+	}
+	if s, _ := arr[0].(string); s == "gw-key-1234567890" || !isMasked(s) {
+		t.Fatalf("api_keys[0] 应脱敏，得到 %v", arr[0])
+	}
+	if arr[1] != "" {
+		t.Fatalf("空元素应原样，得到 %v", arr[1])
+	}
+	if s, _ := arr[2].(string); s == "another-key-abcdef" || !isMasked(s) {
+		t.Fatalf("api_keys[2] 应脱敏，得到 %v", arr[2])
+	}
+	// 幂等：再抹一次不变。
+	again := maskGatewayKeys(out).(map[string]any)
+	if again["api_key"] != out["api_key"] {
+		t.Fatalf("掩码应幂等，得到 %v", again["api_key"])
+	}
+}

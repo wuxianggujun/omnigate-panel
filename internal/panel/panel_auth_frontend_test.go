@@ -27,6 +27,8 @@ func TestPanelAuthFrontendWiring(t *testing.T) {
 	for _, id := range []string{
 		`id="loginVeil"`, `id="loginForm"`, `id="loginUser"`, `id="loginPass"`,
 		`id="btnLogin"`, `id="whoami"`, `id="btnLogout"`, `id="paccBox"`, `id="loginErr"`,
+		// 默认公开只读：未登录时顶部的「登录」入口。
+		`id="btnTopLogin"`,
 	} {
 		if !strings.Contains(html, id) {
 			t.Errorf("index.html missing %s", id)
@@ -42,6 +44,11 @@ func TestPanelAuthFrontendWiring(t *testing.T) {
 		"fetch('/panel/api/session')",
 		"api('session', { method: 'POST'",
 		"api('session', { method: 'DELETE'",
+		// 默认公开只读：顶部登录入口 + 匿名也能看 OmniGate 模型（走面板侧代理，
+		// 不再依赖需要 api_key 的 /omni/*）。
+		"$('btnTopLogin').onclick",
+		"api('omni/models')",
+		"looksMasked",
 	} {
 		if !strings.Contains(js, needle) {
 			t.Errorf("app.js missing wiring: %q", needle)
@@ -51,5 +58,9 @@ func TestPanelAuthFrontendWiring(t *testing.T) {
 	css := get("/panel/theme.css")
 	if !strings.Contains(css, `body[data-role="viewer"] [data-admin]`) {
 		t.Error("theme.css missing viewer [data-admin] gating rule")
+	}
+	// 未登录（public）与 viewer 一样隐藏写控件。
+	if !strings.Contains(css, `body[data-role="public"] [data-admin]`) {
+		t.Error("theme.css missing public (anonymous) [data-admin] gating rule")
 	}
 }

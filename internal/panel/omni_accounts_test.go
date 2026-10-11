@@ -169,11 +169,16 @@ func TestOmniAccountLoginNotEnabled(t *testing.T) {
 	}
 }
 
-// 统一账号池端点未鉴权一律 401。
+// 统一账号池端点：只读默认公开（GET → 200），写接口未鉴权一律 401。
 func TestOmniAccountEndpointsUnauthorized(t *testing.T) {
 	p := New(Config{Version: "test", APIKey: "k", OmniAccounts: func(bool) (any, error) { return nil, nil }})
+	// 只读公开：匿名 GET 直接返回账号列表。
+	rec0 := httptest.NewRecorder()
+	p.ServeHTTP(rec0, httptest.NewRequest("GET", "/panel/api/omni/accounts", nil))
+	if rec0.Code != 200 {
+		t.Errorf("GET /panel/api/omni/accounts status=%d want 200 (public read)", rec0.Code)
+	}
 	for _, c := range []struct{ method, path string }{
-		{"GET", "/panel/api/omni/accounts"},
 		{"POST", "/panel/api/omni/account/checkin"},
 		{"POST", "/panel/api/omni/account/remove"},
 		{"POST", "/panel/api/omni/account/login"},

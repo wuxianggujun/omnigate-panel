@@ -62,6 +62,13 @@ applyTheme();
 /* 面板 API：鉴权只走同源会话 Cookie（SameSite=Strict），不再附带任何 Bearer。
    网关 api_key 仅用于 /omni/*（见 apiAbs），与面板登录彻底解耦。 */
 async function api(path, opts = {}) {
+  // 公开只读：未登录时写操作不发请求，直接引导登录（服务端本来也会 401）。
+  // 登录端点本身例外。
+  const method = (opts.method || 'GET').toUpperCase();
+  if (method !== 'GET' && path !== 'session' && !authState.authenticated) {
+    showAuthGate();
+    throw new Error('未登录：面板为只读模式，请先登录再操作');
+  }
   const h = Object.assign({}, opts.headers || {});
   if (opts.body && !(opts.body instanceof FormData)) h['Content-Type'] = 'application/json';
   const r = await fetch('/panel/api/' + path, Object.assign({}, opts, { headers: h }));
@@ -371,39 +378,42 @@ $('btnLogin').addEventListener('click', doLogin);
 $('loginUser').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); doLogin(); } });
 $('loginPass').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); doLogin(); } });
 
+/* 顶部「登录」：未登录时打开登录门（未配置账号则给命令行引导）。 */
+$('btnTopLogin').onclick = () => { if (authState.configured) openLogin(); else openSetup(); };
+
 /* 退出登录：注销会话并回到登录页。 */
 $('btnLogout').onclick = async () => {
   try { await api('session', { method: 'DELETE' }); } catch (e) { /* 已失效也照常回登录页 */ }
   location.reload();
 };
 
-/* 应用身份到界面：viewer 隐藏所有 [data-admin] 写操作控件（服务端仍强校验）。 */
+/* 应用身份到界面：未登录 = 公开只读（public），与 viewer 一样隐藏所有 [data-admin]
+   写控件，但顶部给出「登录」入口。服务端仍强校验写接口。 */
 function applyRole() {
-  const role = authState.role || 'viewer';
+  const role = authState.authenticated ? (authState.role || 'viewer') : 'public';
   document.body.dataset.role = role;
   const w = $('whoami');
   if (w) {
     const show = !!(authState.authenticated && authState.username);
     w.hidden = !show;
-    if (show) w.textContent = authState.username + ' · ' + role;
+    if (show) w.textContent = authState.username + ' · ' + (authState.role || 'viewer');
   }
   const lo = $('btnLogout');
   if (lo) lo.hidden = !authState.authenticated;
+  const li = $('btnTopLogin');
+  if (li) li.hidden = authState.authenticated;
 }
 
-/* 启动引导：查会话 → 已登录即进入；否则弹登录门 / 未配置引导。 */
+/* 启动引导：查会话 → 无论是否登录都直接进入面板（默认公开只读）；未登录只显示
+   只读视图，点写操作或顶部「登录」时才弹登录门。 */
 async function bootstrapAuth() {
   let s;
   try { s = await (await fetch('/panel/api/session')).json(); }
   catch (e) { s = { authenticated: false, configured: false, mode: '' }; }
   authState = Object.assign({ authenticated: false, configured: false, mode: '', username: '', role: '' }, s);
   applyRole();
-  if (authState.authenticated) {
-    closeGates();
-    start();
-  } else {
-    showAuthGate();
-  }
+  closeGates();
+  start();
 }
 
 /* ── 路由 ─────────────────────────────────────────────────────────── */
@@ -3598,14 +3608,18 @@ if ($('btnPk')) $('btnPk').onclick = () => loadPackages(true);
 //（Bearer）鉴权——面板登录已与 api_key 解耦，故这里按需从 /panel/api/config
 // 取一次 api_key 并缓存到 localStorage（admin/viewer 均可读配置）。
 let omniKeyFetched = false;
+// looksMasked 判断脱敏占位（如 sk-6d06…(len=48)）。面板默认只读：匿名访问
+// /panel/api/config 拿到的 api_key 是掩码，不能当密钥用，也不该缓存下来。
+function looksMasked(v) { return typeof v === 'string' && v.indexOf('…(len=') >= 0; }
 async function ensureOmniKey() {
-  const cached = localStorage.getItem(LS_KEY);
+  let cached = localStorage.getItem(LS_KEY);
+  if (looksMasked(cached)) { localStorage.removeItem(LS_KEY); cached = null; }
   if (cached) return cached;
   if (!omniKeyFetched) {
     try {
       const d = await api('config');
       const k = d && d.config && d.config.api_key;
-      if (k) { localStorage.setItem(LS_KEY, k); omniKeyFetched = true; return k; }
+      if (k && !looksMasked(k)) { localStorage.setItem(LS_KEY, k); omniKeyFetched = true; return k; }
     } catch (e) { /* 读取失败：留待下次重试 */ }
   }
   return '';
@@ -4108,7 +4122,7 @@ let omPricePending = null;
 function ensureOmPriceMap() {
   if (omPriceMap) return Promise.resolve(omPriceMap);
   if (!omPricePending) {
-    omPricePending = apiAbs('/omni/v1/models').then(d => {
+    omPricePending = api('omni/models').then(d => {
       const map = {};
       for (const m of (d && d.data) || []) {
         const short = omniPriceShort(m);
@@ -4125,7 +4139,7 @@ async function loadUpstreamModels() {
   const box = $('models');
   if (!box) return;
   try {
-    const data = await apiAbs('/omni/v1/models');
+    const data = await api('omni/models');
     const list = (data && data.data) || [];
     $('modelCnt').textContent = list.length + ' 个模型';
     if (!list.length) { box.innerHTML = '<div class="empty">暂无模型</div>'; return; }
@@ -4147,7 +4161,7 @@ async function loadOmniModels() {
   if (!tb) return;
   tb.innerHTML = '<tr><td colspan="6"><div class="empty">正在向上游查询…</div></td></tr>';
   try {
-    const data = await apiAbs('/omni/v1/models');
+    const data = await api('omni/models');
     omAll = (data && data.data) || [];
     if ($('omNote')) $('omNote').textContent = omAll.length ? omAll.length + ' 个模型' : '上游未返回模型';
     renderOmniModels();

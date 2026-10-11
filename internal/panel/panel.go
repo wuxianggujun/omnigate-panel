@@ -12,6 +12,7 @@
 package panel
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -119,6 +120,10 @@ type Config struct {
 	OmniCheckin    func(provider, label string) (any, error)
 	OmniRemove     func(provider, label string) (any, error)
 	OmniCheckinAll func() (any, error)
+	// OmniModels 返回 OmniGate 汇总模型目录（与 /omni/v1/models 同源，含积分价）。
+	// 面板侧只读代理：匿名也能看模型与价格，但不需要、也不暴露网关 api_key。
+	// nil 时 /panel/api/omni/models 返回 501。
+	OmniModels func(ctx context.Context) (any, error)
 	// OmniLogin 校验 runable 类账号（服务端会话探测），返回账号身份与当前积分。
 	// 面板「浏览器登录」调用：runable 只支持 Google/Facebook 登录，会话是 httpOnly
 	// Cookie（网页读不到），只能由用户粘贴 session_token；nil 时对应接口返回 501。
@@ -228,25 +233,29 @@ func (p *Panel) routes() {
 	// 重新生成网关 api_key（仅管理员）：轮换密钥防泄漏被滥用。
 	p.mux.HandleFunc("POST /panel/api/regenerate_key", p.admin(p.regenerateKey))
 
-	// 只读接口（admin/viewer 均可）。
-	p.mux.HandleFunc("GET /panel/api/omni/config", p.auth(p.getOmniConfig))
-	p.mux.HandleFunc("GET /panel/api/omni/outbound", p.auth(p.getOutbound))
-	p.mux.HandleFunc("GET /panel/api/realm_routing", p.auth(p.getRealmRouting))
-	p.mux.HandleFunc("GET /panel/api/omni/accounts", p.auth(p.omniAccounts))
-	p.mux.HandleFunc("GET /panel/api/overview", p.auth(p.overview))
-	p.mux.HandleFunc("GET /panel/api/logs", p.auth(p.logsHandler))
-	p.mux.HandleFunc("GET /panel/api/request_metrics", p.auth(p.requestMetrics))
-	p.mux.HandleFunc("GET /panel/api/request_logs", p.auth(p.requestLogs))
-	p.mux.HandleFunc("GET /panel/api/models", p.auth(p.models))
+	// 只读接口：**默认公开**（无需登录）——面板默认只读，凭证由 maskSecrets 脱敏，
+	// 匿名请求还会额外抹掉网关 api_key/api_keys（见 secret.go）。写接口仍要求登录。
+	p.mux.HandleFunc("GET /panel/api/omni/config", p.read(p.getOmniConfig))
+	p.mux.HandleFunc("GET /panel/api/omni/outbound", p.read(p.getOutbound))
+	p.mux.HandleFunc("GET /panel/api/realm_routing", p.read(p.getRealmRouting))
+	p.mux.HandleFunc("GET /panel/api/omni/accounts", p.read(p.omniAccounts))
+	// OmniGate 模型目录（含积分价）：面板侧只读代理，匿名可用，不暴露网关 api_key。
+	p.mux.HandleFunc("GET /panel/api/omni/models", p.read(p.omniModels))
+	p.mux.HandleFunc("GET /panel/api/overview", p.read(p.overview))
+	p.mux.HandleFunc("GET /panel/api/logs", p.read(p.logsHandler))
+	p.mux.HandleFunc("GET /panel/api/request_metrics", p.read(p.requestMetrics))
+	p.mux.HandleFunc("GET /panel/api/request_logs", p.read(p.requestLogs))
+	p.mux.HandleFunc("GET /panel/api/models", p.read(p.models))
+	p.mux.HandleFunc("GET /panel/api/accounts/{uid}/tasks", p.read(p.accountTasks))
+	p.mux.HandleFunc("GET /panel/api/tasks/queue", p.read(p.tasksQueueStatus))
+	p.mux.HandleFunc("GET /panel/api/school/vouchers", p.read(p.schoolVouchers))
+	p.mux.HandleFunc("GET /panel/api/packages", p.read(p.packages))
+	p.mux.HandleFunc("GET /panel/api/usage", p.read(p.usage))
+	p.mux.HandleFunc("GET /panel/api/model_probes", p.read(p.modelProbes))
+	p.mux.HandleFunc("GET /panel/api/config", p.read(p.getConfig))
+	// 添加账号的 OAuth 轮询属于管理员流程，仍需登录。
 	p.mux.HandleFunc("GET /panel/api/login/poll", p.auth(p.loginPoll))
 	p.mux.HandleFunc("GET /panel/api/login/regions", p.auth(p.loginRegions))
-	p.mux.HandleFunc("GET /panel/api/accounts/{uid}/tasks", p.auth(p.accountTasks))
-	p.mux.HandleFunc("GET /panel/api/tasks/queue", p.auth(p.tasksQueueStatus))
-	p.mux.HandleFunc("GET /panel/api/school/vouchers", p.auth(p.schoolVouchers))
-	p.mux.HandleFunc("GET /panel/api/packages", p.auth(p.packages))
-	p.mux.HandleFunc("GET /panel/api/usage", p.auth(p.usage))
-	p.mux.HandleFunc("GET /panel/api/model_probes", p.auth(p.modelProbes))
-	p.mux.HandleFunc("GET /panel/api/config", p.auth(p.getConfig))
 
 	// 写操作 / 敏感读取（仅管理员）：改配置、账号运维、任务执行、导出凭证。
 	p.mux.HandleFunc("POST /panel/api/omni/config", p.admin(p.saveOmniConfig))

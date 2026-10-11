@@ -107,6 +107,36 @@ function authLost(msg) {
   showAuthGate();
   return httpErr(msg, 401);
 }
+
+/* stickyToast 不自动消失的提示（点击关闭）：用于「面板已更新，请刷新」这类
+   需要用户注意一次、但很可能错过 3.6 秒自动消失的信息。 */
+function stickyToast(msg) {
+  const el = document.createElement('div');
+  el.className = 'tst err';
+  el.textContent = msg;
+  el.title = '点击关闭';
+  el.style.cursor = 'pointer';
+  el.onclick = () => el.remove();
+  $('toasts').appendChild(el);
+}
+
+/* ── 版本自检（针对「已经打开的标签页」）───────────────────────────────
+   面板是 SPA：部署新版本后已经开着的页面不会自己刷新，用户会在旧 JS 上排查新
+   功能（曾把「找不到注册入口」误当成功能缺失）。这里记住首次加载时的资源指纹
+   （服务端随 /panel/api/session 返回），之后定时比对，不一致就提示刷新一次。 */
+let pageBuild = '';
+let buildNotified = false;
+let refTicks = 0;
+async function checkBuild() {
+  if (!pageBuild || buildNotified) return;
+  try {
+    const s = await (await fetch('/panel/api/session')).json();
+    if (s && s.build && s.build !== pageBuild) {
+      buildNotified = true;
+      stickyToast('面板已更新，请刷新页面（Ctrl+Shift+R / ⌘⇧R）后使用新版本');
+    }
+  } catch (e) { /* 网络抖动忽略，下次再查 */ }
+}
 // esc 文本/属性双安全转义。不能只用 div.innerHTML（它转义 <>& 但不转义引号），
 // 否则字符串拼进 HTML 属性（如 title="uid: ..."）时引号可闭合属性并注入事件处理器。
 // 显式替换 5 个字符：& < > " '（& 必须最先，避免二次转义）。
@@ -572,6 +602,7 @@ async function bootstrapAuth() {
   authState = Object.assign({ authenticated: false, configured: false, mode: '', username: '', role: '', allowRegistration: false }, s);
   // 会话接口用 snake_case 的 allow_registration；统一成前端用的驼峰字段。
   authState.allowRegistration = !!(s && s.allow_registration) && authState.configured;
+  pageBuild = (s && s.build) || '';   // 版本自检基准（见 checkBuild）
   setAuthMode('login');
   applyRole();
   closeGates();
@@ -2105,6 +2136,7 @@ $('btnRefresh').onclick = async () => {
 
 /* ── 轮询 ─────────────────────────────────────────────────────────── */
 function refreshVisible() {
+  if (++refTicks % 12 === 0) checkBuild();   // 约每 60 秒自检一次版本（见 checkBuild）
   if (view === 'accounts') loadOverview(true);
   else if (view === 'logs') loadRequestLogs();
   else if (view === 'runlogs') { if ($('rlAuto').checked) loadRunLogs(); }

@@ -64,3 +64,71 @@ func TestPanelAuthFrontendWiring(t *testing.T) {
 		t.Error("theme.css missing public (anonymous) [data-admin] gating rule")
 	}
 }
+
+// TestPanelAuthFrontendRegisterEntry 回归：登录弹层必须有显眼的「注册」入口。
+// 用户曾反馈「对话框里没有办法注册」——当时的入口是标题旁的小 tab，容易被忽略，
+// 现在改成表单顶部的整宽两段式切换（.tabs.seg）。
+func TestPanelAuthFrontendRegisterEntry(t *testing.T) {
+	p := newTestPanel()
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, httptest.NewRequest("GET", "/panel/", nil))
+	html := rec.Body.String()
+
+	for _, needle := range []string{
+		`id="authTabs"`,
+		`class="tabs seg"`,
+		`data-auth-mode="login"`,
+		`data-auth-mode="register"`,
+	} {
+		if !strings.Contains(html, needle) {
+			t.Errorf("index.html 登录弹层缺少注册入口: %q", needle)
+		}
+	}
+	if !strings.Contains(html, `id="authTabs" hidden`) {
+		t.Error("未开放自助注册时应默认隐藏切换条（由 app.js 按 allow_registration 打开）")
+	}
+
+	rec = httptest.NewRecorder()
+	p.ServeHTTP(rec, httptest.NewRequest("GET", "/panel/theme.css", nil))
+	css := rec.Body.String()
+	if !strings.Contains(css, ".dlg .tabs.seg") {
+		t.Error("theme.css 缺少整宽两段式切换条样式 .dlg .tabs.seg")
+	}
+
+	rec = httptest.NewRecorder()
+	p.ServeHTTP(rec, httptest.NewRequest("GET", "/panel/app.js", nil))
+	js := rec.Body.String()
+	for _, needle := range []string{
+		// 密码框「显示 / 隐藏」由 app.js 统一注入。
+		"function addPwEyes()",
+		"addPwEyes();",
+		"dataset.pwEye",
+		// 401 统一收敛（不再每 3 秒把登录门顶回来）。
+		"function authLost(",
+		"function httpErr(",
+		// 已打开页面的版本自检。
+		"function checkBuild(",
+		"function stickyToast(",
+	} {
+		if !strings.Contains(js, needle) {
+			t.Errorf("app.js 缺少接线: %q", needle)
+		}
+	}
+}
+
+// TestPanelAuthSessionExposesBuild /panel/api/session 必须带资源指纹 build：
+// 已经打开的页面据此发现「服务端已更新」，提示刷新（否则用户会在旧 JS 上排查新功能）。
+func TestPanelAuthSessionExposesBuild(t *testing.T) {
+	if len(panelBuild) != 12 {
+		t.Fatalf("panelBuild 应为 12 位十六进制，得到 %q", panelBuild)
+	}
+	users := []panelauth.User{pwUser(t, "admin", panelauth.RoleAdmin, "pw123456")}
+	p, _ := newAuthPanel(t, users, "test-key")
+	rec := do(p, "GET", "/panel/api/session", "", nil, nil)
+	if rec.Code != 200 {
+		t.Fatalf("anon session = %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), `"build":"`+panelBuild+`"`) {
+		t.Fatalf("session 响应未带 build 指纹: %s", rec.Body.String())
+	}
+}

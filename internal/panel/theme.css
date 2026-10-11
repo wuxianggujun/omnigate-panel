@@ -350,7 +350,9 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
 .dlg .tabs { display: inline-flex; gap: 2px; background: var(--surface-2); border-radius: 9px; padding: 3px; margin-left: 10px; vertical-align: middle; }
 .dlg .tabs .tab { padding: 4px 14px; border-radius: 7px; border: none; background: transparent; color: var(--ink-3); font: 550 12.5px var(--sans); cursor: pointer; }
 .dlg .tabs .tab.on { background: var(--surface); color: var(--ink); box-shadow: 0 1px 3px rgba(0,0,0,.25); }
-#authTabs { margin-left: 0; margin-top: 8px; }
+/* 登录 / 注册切换：整宽两段式。比标题旁的小 tab 显眼得多——用户曾反馈「找不到注册入口」。 */
+.dlg .tabs.seg { display: flex; width: 100%; margin: 0 0 16px; padding: 3px; }
+.dlg .tabs.seg .tab { flex: 1; padding: 8px 0; font-size: 13px; }
 .tab-panel + .tab-panel { border-top: 1px solid var(--line-soft); margin: 0 -20px; padding: 14px 20px 0; }
 .url {
   background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px;

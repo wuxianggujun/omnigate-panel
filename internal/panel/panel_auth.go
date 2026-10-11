@@ -140,6 +140,8 @@ func (p *Panel) sessionState(w http.ResponseWriter, r *http.Request) {
 		"authenticated": ar.ok,
 		"configured":    configured,
 		"mode":          string(ar.mode),
+		// 前端资源指纹：已经打开的页面据此发现「服务端已更新」并提示刷新。
+		"build": panelBuild,
 	}
 	// 自助注册是否开放：前端据此决定登录门里是否显示「注册」入口。
 	allowReg := false

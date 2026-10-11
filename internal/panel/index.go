@@ -9,7 +9,9 @@
 package panel
 
 import (
+	"crypto/sha256"
 	_ "embed"
+	"encoding/hex"
 	"net/http"
 )
 
@@ -24,6 +26,18 @@ var appJS []byte
 //
 //go:embed theme.css
 var themeCSS []byte
+
+// panelBuild 前端资源指纹（三个资源内容的 sha256 前 12 位）。页面每次加载时随
+// /panel/api/session 带回，前端定时比对：不一致说明服务端已发布新版本，提示用户
+// 刷新。解决的是「已经打开的标签页」——SPA 不会自己刷新，用户会在旧 JS 上排查新
+// 功能（曾把「找不到注册入口」误当成功能缺失）。
+var panelBuild = func() string {
+	h := sha256.New()
+	h.Write(indexHTML)
+	h.Write(appJS)
+	h.Write(themeCSS)
+	return hex.EncodeToString(h.Sum(nil))[:12]
+}()
 
 // OmniGate 子页面（多上游网关）已并入主面板：供应商配置、出站代理、账号池都成为
 // 主面板内的视图，不再有独立页面；旧 URL 由 panel.go 的 omniRedirect 兜底跳转。

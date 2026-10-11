@@ -999,14 +999,14 @@
   <div class="dlg" style="width:440px">
     <header class="has-x">
       <h3 id="authTitle">登录面板</h3>
-      <div class="tabs" id="authTabs" hidden>
+      <button class="dlg-x" id="btnCloseLogin" title="关闭（也可以点空白处或按 Esc）" aria-label="关闭">✕</button>
+      <div class="hint" id="authHint">面板账号与网关 api_key 相互独立。<b>未登录时面板为只读</b>（可看账号数/健康度等汇总与模型目录，凭证与账号明细不可见）；登录后才能添加/运维自己的账号，没有账号可点上方「注册」自助创建。</div>
+    </header>
+    <div class="body">
+      <div class="tabs seg" id="authTabs" hidden>
         <button class="tab on" data-auth-mode="login">登录</button>
         <button class="tab" data-auth-mode="register">注册</button>
       </div>
-      <button class="dlg-x" id="btnCloseLogin" title="关闭（也可以点空白处或按 Esc）" aria-label="关闭">✕</button>
-      <div class="hint" id="authHint">面板账号与网关 api_key 相互独立。<b>未登录时面板为只读</b>（可看账号数/健康度等汇总与模型目录，凭证与账号明细不可见）；登录后才能添加/运维自己的账号。</div>
-    </header>
-    <div class="body">
       <form id="loginForm">
         <label class="fld"><span class="lb">账号</span>
           <input id="loginUser" list="loginUsers" autocomplete="username" placeholder="账号"></label>

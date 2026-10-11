@@ -2,8 +2,9 @@
 // 主配置）一律只给「前缀 + 长度」掩码，原始值绝不离开服务端；保存时按「掩码 =
 // 未改动」从落盘配置还原，保证前端整份回传（含掩码）也不会把密钥写成掩码串。
 //
-// 掩码形态：前 6 字符 + "…(len=N)"，如 sk-6d06…(len=48)（len 按字节计）。
-// 判据：值里含 "…(len=" 即视为掩码——真实凭证不含该子串，误判概率可忽略。
+// 掩码形态：前 6 字符 + "…" + 后 4 字符 + "…(len=N)"，如 sk-6d0…1a2b…(len=51)
+// （len 按字节计；短于 12 字符时只露前一半）。判据：值里含 "…(len=" 即视为掩码——
+// 真实凭证不含该子串，误判概率可忽略。
 //
 // 为什么要这一层：面板是多人共用的（admin 全权 / viewer 只读），而「供应商配置」
 // 是**只读接口**（viewer 也能 GET）。此前 GET /panel/api/omni/config 会把
@@ -48,18 +49,20 @@ func urlKey(k string) bool {
 // isMasked 值是否已是掩码形态。
 func isMasked(s string) bool { return strings.Contains(s, maskMarker) }
 
-// maskSecret 保留前 6 字符 + 长度标记；短于 12 字符时只露前一半（否则 5 字符的密码
-// 会被整段显示，等于没脱敏）；空串与已脱敏值原样返回。
+// maskSecret 保留「首尾可辨识片段 + 长度」；短于 12 字符时只露前一半（否则 5 字符的
+// 密码会被整段显示，等于没脱敏）；空串与已脱敏值原样返回。
+// 形态：前 6 + "…" + 后 4 + "…(len=N)"，如 sk-6d0…1a2b…(len=51)。
+// 为什么留尾 4：只看前缀时多把同前缀的 key 长得一模一样，留尾几位便于人工核对是哪一个。
 func maskSecret(s string) string {
 	if s == "" || isMasked(s) {
 		return s
 	}
 	n := len(s)
-	head := 6
 	if n < 12 {
-		head = n / 2
+		// 短值只露前一半：露首尾会让「5 字符密码」暴露 4/5。
+		return s[:n/2] + maskMarker + strconv.Itoa(n) + ")"
 	}
-	return s[:head] + maskMarker + strconv.Itoa(n) + ")"
+	return s[:6] + "…" + s[n-4:] + maskMarker + strconv.Itoa(n) + ")"
 }
 
 // maskURLUserinfo 把 URL 里的 user:pass@ 换成掩码，保留其余部分。无 userinfo 时

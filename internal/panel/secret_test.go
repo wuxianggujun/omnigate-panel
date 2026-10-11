@@ -19,6 +19,10 @@ func TestMaskSecret(t *testing.T) {
 	if !strings.HasPrefix(got, "sk-6d0") || !strings.HasSuffix(got, "(len=35)") {
 		t.Fatalf("掩码形态不对：%q", got)
 	}
+	// 长凭证留尾 4 便于核对是哪一个（用户要求「开头结尾」都能看到一点）。
+	if !strings.Contains(got, "…0bd3…(len=35)") {
+		t.Fatalf("长凭证掩码应含尾 4 字符：%q", got)
+	}
 	if !isMasked(got) {
 		t.Fatalf("isMasked 未识别 %q", got)
 	}

@@ -3080,8 +3080,9 @@ function barsHtml(series) {
  *   Δ余额    = credits(窗口末) - credits(窗口首)   ← 余额快照历史（仅 WorkBuddy 账号）
  *   计费用量 = Σ usage.credit                      ← 上游 usage.credit 累计
  *   差额     = 计费用量 + Δ余额                     ← 正常应 ≈ 0
- * 差额 > 0 说明余额掉得比记录的用量还多——最典型的来源就是**积分过期**（到期批次
- * 没被消耗就归零），其次是上游口径差异；差额 < 0 说明窗口内有入账（签到奖励/充值）。
+ * 差额 < 0 说明余额掉得比记录的用量还多——最典型的来源就是**积分过期**（到期批次
+ * 没被消耗就归零），其次是上游口径差异；差额 > 0 说明余额掉得比用量少（窗口内有
+ * 签到奖励 / 充值入账，或用量侧口径偏大）。
  * 这既是「快过期积分到底有没有被烧掉」的直接答案，也是面板与 NewAPI 对账的落点。 */
 function renderRecon(hist) {
   const box = $('usReconBox');
@@ -3170,14 +3171,16 @@ function renderRecon(hist) {
       msg = '✓ 对得上：本窗口计费用量合计 <b>' + fmtCredit(creditedTotal) + '</b>，余额净变化 <b>'
         + fmtCredit(netTotal) + '</b>，差额 <b>' + fmtCredit(diffTotal) + '</b> 在口径容差 ±'
         + fmtCredit(slop) + ' 内（用量按小时桶聚合、余额按 5 分钟采样点取，边界差不超过 20 分钟）。';
-    } else if (diffTotal > 0) {
-      msg = '⚠ 余额比计费用量多掉了 <b>' + fmtCredit(diffTotal) + '</b> 分（超出容差 ±'
+    } else if (diffTotal < 0) {
+      // Δ余额 是负的（掉分），diff = 用量 + Δ余额 < 0 ⇒ 余额掉得**比计费用量还多**
+      // ⇒ 到期批次没被消耗就归零（积分过期），其次是上游口径差异。
+      msg = '⚠ 余额比计费用量多掉了 <b>' + fmtCredit(-diffTotal) + '</b> 分（超出容差 ±'
         + fmtCredit(slop) + '）：多半是<b>积分过期</b>（到期批次没被消耗就归零），'
         + '其次是上游口径差异（本地扣减是 int64(credit+0.5)，单次不足 0.5 分的请求不扣，'
         + '靠 5 分钟一次的上游快照纠回）。'
         + (expiringTotal > 0 ? '当前池内仍有 <b>' + expiringTotal + '</b> 分处于快过期窗口。' : '');
     } else {
-      msg = '本窗口有 <b>' + fmtCredit(-diffTotal) + '</b> 分入账（签到奖励 / 充值），'
+      msg = '本窗口有 <b>' + fmtCredit(diffTotal) + '</b> 分入账（签到奖励 / 充值），'
         + '所以余额掉得比计费用量少——不是记账漏了。';
     }
     if (canCompare && covered < hist.accounts.length) {
@@ -3218,7 +3221,8 @@ function renderRecon(hist) {
     const diffTip = h.ok
       ? '计费用量 ' + fmtCredit(r.use) + ' + 余额变化 ' + fmtCredit(h.net) + ' = ' + fmtCredit(r.diff)
         + '（容差 ±' + fmtCredit(rowSlop) + '）'
-        + (Math.abs(r.diff) > rowSlop ? '：对不上，多半是积分过期或窗口内入账' : '：对得上')
+        + (r.diff < -rowSlop ? '：余额掉得比用量多，多半是积分过期'
+          : (r.diff > rowSlop ? '：余额掉得比用量少（入账 / 用量侧偏大）' : '：对得上'))
       : '缺余额变化，无法对账';
     const short = h.uid.length > 16 ? h.uid.slice(0, 16) + '…' : h.uid;
     return '<tr>' +

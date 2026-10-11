@@ -377,3 +377,27 @@ func TestExtractKeyMultimodalContent(t *testing.T) {
 		t.Error("pure-image url changes must keep same derived key")
 	}
 }
+
+// TestAssignForModelNarrowsNewSessions 首次分配走 AssignForModel（快过期硬优先层），
+// 而可用性校验仍用 AvailableForModel（全集）——已绑在普通号上的会话不该被判失效
+// 而重绑（那会让粘性给快过期让路，换号丢 prompt 缓存）。
+func TestAssignForModelNarrowsNewSessions(t *testing.T) {
+	r := New(Config{
+		TTL:               time.Minute,
+		Store:             newCountingStore(),
+		AvailableForModel: func(string) []string { return []string{"expiring", "regular"} },
+		AssignForModel:    func(string) []string { return []string{"expiring"} },
+	})
+
+	for i := 0; i < 20; i++ {
+		uid, ok := r.ResolveForModel(fmt.Sprintf("s-%d", i), "m")
+		if !ok || uid != "expiring" {
+			t.Fatalf("新会话 uid=%q ok=%v，want expiring（分配走优先层）", uid, ok)
+		}
+	}
+
+	r.Bind("kept", "regular")
+	if uid, ok := r.ResolveForModel("kept", "m"); !ok || uid != "regular" {
+		t.Fatalf("已绑会话 uid=%q ok=%v，want regular（校验走可用性全集）", uid, ok)
+	}
+}

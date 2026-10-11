@@ -26,3 +26,19 @@ func realmAwareAvailableForModel(p *pool.Pool, rr *server.RealmRouter) func(mode
 		return p.WeightedAvailableUIDsForModelRealms(bare, realms)
 	}
 }
+
+// realmAwareAssignForModel 构造会话**首次分配**的域感知闭包（P1 快过期硬优先层的粘性侧）。
+//
+// 与 realmAwareAvailableForModel 的域解析完全同形，差别只在 pool 侧方法：这个走
+// AssignUIDsForModelRealm(s)，会把候选收窄到快过期优先层（层为空时回落全集）。
+// 两个闭包必须分开注入——分配可以用窄集，可用性校验必须用全集（见 session.Config）。
+func realmAwareAssignForModel(p *pool.Pool, rr *server.RealmRouter) func(model string) []string {
+	return func(model string) []string {
+		if rr == nil {
+			realm, bare := server.ResolveModel(model)
+			return p.AssignUIDsForModelRealm(bare, realm)
+		}
+		bare, realms := rr.Ordered(model, nil)
+		return p.AssignUIDsForModelRealms(bare, realms)
+	}
+}

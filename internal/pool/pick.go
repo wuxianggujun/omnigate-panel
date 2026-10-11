@@ -242,8 +242,35 @@ func (p *Pool) pickLocked(tried map[string]bool, reqModel, realm string, allowCo
 	for _, e := range cands {
 		ti, ci := costTier(e)
 		if ti == bestTier {
-			ws = append(ws, weighted{e: e, w: p.routingWeightOf(e, maxCredits, now), tier: ti, cost1k: ci})
+			ws = append(ws, weighted{e: e, tier: ti, cost1k: ci})
 		}
+	}
+	// 快过期硬优先层（P1）：只要最优成本层里存在有效快过期账号，就把候选收窄到它们之内。
+	// 旧实现只把快过期号的权重乘 expiringVirtualSlots——面对高余额长期号那点差距
+	// （线上约 53% : 47%）压不住任何东西，「30 分明天过期」照样烂在账上。
+	// 收窄放在成本分层之后：能免费（tier 0）就不该为了烧快过期积分去付费。
+	// 在途占满的号已在候选构建时被过滤，故收窄不会堵死——快过期号打满在途后自然
+	// 溢出到普通层（下一轮 pick 重新过滤）。层为空（无快过期号 / 量不足 / 都不可用）时不收窄。
+	if p.preferExpiring {
+		tier := make([]weighted, 0, len(ws))
+		for _, c := range ws {
+			if expiringPreferred(c.e, now) {
+				tier = append(tier, c)
+			}
+		}
+		if len(tier) > 0 {
+			ws = tier
+		}
+	}
+	// P5 分级加权基准：候选集内最大快过期量（0 = 无快过期成员 → routingWeightOf 退化为普通权重）。
+	var maxExpiring int64
+	for _, c := range ws {
+		if c.e.creditsExpiring > maxExpiring {
+			maxExpiring = c.e.creditsExpiring
+		}
+	}
+	for i := range ws {
+		ws[i].w = p.routingWeightOf(ws[i].e, maxCredits, maxExpiring, now)
 	}
 	// 等权重洗牌：仅当存在权重相等且候选数超过 top5 时，才对 ws 做 Fisher-Yates
 	// 洗牌（且**不消耗 p.randInt64N 注入源**，避免改变 pickWeighted 的确定性语义，
@@ -272,6 +299,18 @@ func (p *Pool) pickLocked(tried map[string]bool, reqModel, realm string, allowCo
 		}
 		if ws[i].w != ws[j].w {
 			return ws[i].w > ws[j].w
+		}
+		// 快过期层内：同权重时最早到期者优先（P5 的 FEFO 排序兜底）。无有效快过期
+		// 批次的账号（零值到期）排在最后，不参与这项比较。
+		ei, ej := ws[i].e.creditsEarliestExpiry, ws[j].e.creditsEarliestExpiry
+		if !ei.Equal(ej) {
+			if ei.IsZero() {
+				return false
+			}
+			if ej.IsZero() {
+				return true
+			}
+			return ei.Before(ej)
 		}
 		return ws[i].e.a.UID < ws[j].e.a.UID // 稳定兜底（洗牌后此项几乎不触发）
 	})
@@ -342,6 +381,7 @@ func (p *Pool) pickLocked(tried map[string]bool, reqModel, realm string, allowCo
 //     这是有意的保守选择——目录未覆盖的模型多为内部/别名模型，拦了会让号
 //     永久失联；风险由「未知」本身承担，但已知收费的一律拦。
 //   - model 为空（无模型上下文）不拦：无成本维度，floor 无从判收费。
+//   - 快过期批次有效（P3）：快过期积分不用即归零，保底拦它等于白送（见函数内注释）。
 //
 // 余额用本地插值口径（签到权威值 - 每笔 usage.credit 实扣，见 NoteModelCost）：
 // 只会偏低不会偏高（官方对账延迟方向安全），正是保底需要的安全方向。
@@ -354,6 +394,13 @@ func (p *Pool) floorBlockedForModel(e *entry, model string, now time.Time) bool 
 // 同名模型在 CN / global 两域倍率可不同）。realm 为空时按倍率表的空域键查。
 func (p *Pool) floorBlockedForRealmModel(e *entry, model, realm string, now time.Time) bool {
 	if p.creditFloor <= 0 || model == "" || e.credits >= p.creditFloor {
+		return false
+	}
+	// P3：有有效快过期批次的号不受保底限制。保底的目的是「留余额给免费模型」，
+	// 但快过期积分不用就归零——拦下来等于白送（实测：余额 96、明天到期的号恰好被
+	// floor=100 拦死，96 分注定蒸发）。这是「保底」与「快过期优先」冲突时的取舍：
+	// 宁可少留一点保底，也不让确定会损失的积分烂在账上。
+	if expiringPreferred(e, now) {
 		return false
 	}
 	// 1) 本地实测台账：最权威（真实扣费证据）。
@@ -447,23 +494,30 @@ var minPickGap = 100 * time.Millisecond
 //
 //	  - credits 比例 = 该号 credits / 候选集内最大 credits（避免量纲爆炸）
 //	  - idleWeight = min(距 lastUsed 小时数 × idleWeightPerHour, idleWeightMax)；从未使用给满分
+//	  - 快过期量因子（P5）= 1 + (expiringVirtualSlots-1) × 该号快过期量 / 候选集内最大快过期量
+//	    （仅在 prefer_expiring 开启且号在快过期优先层内时生效，见 routingWeightOf）
 //
 // credits 全 0 时仍按 idleWeight 加权（不退化均匀随机）。
 // 权重为浮点，用 int64 定点（×1e6）抽签可保持确定性随机源注入（randInt64N 语义不变）。
 // 随机源优先用 p.randInt64N（仅供测试注入确定性），nil 时回退 math/rand/v2 全局源。
 func (p *Pool) pickWeighted(cands []*entry) *entry {
 	now := time.Now()
-	var maxCredits int64
+	// 两个基准都取自本次传入的候选集（与 maxCredits 同口径——调用方传的是 top5 子集，
+	// 故是「子集内相对权重」；选号语义上子集即最终决策集，与截断排序的差异不影响正确性）。
+	var maxCredits, maxExpiring int64
 	for _, e := range cands {
 		if e.credits > maxCredits {
 			maxCredits = e.credits
+		}
+		if e.creditsExpiring > maxExpiring {
+			maxExpiring = e.creditsExpiring
 		}
 	}
 	const scale = 1_000_000 // 定点放大：int64 累加权重大整数抽签
 	weights := make([]int64, len(cands))
 	var total int64
 	for i, e := range cands {
-		w := p.routingWeightOf(e, maxCredits, now)
+		w := p.routingWeightOf(e, maxCredits, maxExpiring, now)
 		weights[i] = int64(w * scale)
 		total += weights[i]
 	}
@@ -520,14 +574,34 @@ func expiringNow(e *entry, now time.Time) bool {
 		e.creditsEarliestExpiry.After(now)
 }
 
-// routingWeightOf 在普通账号权重上叠加快过期虚拟实例数量。prefer_expiring=false
-// 或账号无有效快过期批次时，实例数恒为 1，结果与旧 weightOf 完全一致。
-func (p *Pool) routingWeightOf(e *entry, maxCredits int64, now time.Time) float64 {
+// expiringMinCredits 进入快过期硬优先层的最低快过期量（P5 门槛，单位同 credits）。
+//
+// 校准：线上近 24h 平均每次请求约 0.2 积分（2131 分 / 9871 次），5 分≈25 次请求。
+// 低于这个量级为残渣把所有新会话改道到一个号并不划算；且该号通常一两个请求后就被
+// NoteModelCost 扣空、自然退出优先层（creditsEarliestRemaining 归零 → expiringNow=false）。
+const expiringMinCredits = 5
+
+// expiringPreferred 报告账号是否进入快过期硬优先层（P1 层成员判据 = 有效快过期批次
+// 且量达 expiringMinCredits）。层成员在选号里被硬优先，且不受积分保底拦截（P3）。
+func expiringPreferred(e *entry, now time.Time) bool {
+	return expiringNow(e, now) && e.creditsExpiring >= expiringMinCredits
+}
+
+// routingWeightOf 在普通账号权重上叠加快过期分级加权（P5）。
+//
+// 旧口径是无条件 ×expiringVirtualSlots：层内不再区分「296 分明天到期」与「6 分」，
+// 且层外那点差距（线上约 53% : 47%）根本压不住高余额长期号——硬优先层（P1，见
+// pickLocked）才是主力，本函数只负责层内相对分配。
+//
+// maxExpiring 是**同一候选集**内最大快过期量（0 = 无快过期成员）。量因子把层内
+// 最大者放大到 expiringVirtualSlots、其余按比例（下限 ×1）；层外/未启用/无快过期
+// 批次时系数恒 1，结果与旧 weightOf 逐字一致。
+func (p *Pool) routingWeightOf(e *entry, maxCredits, maxExpiring int64, now time.Time) float64 {
 	w := p.weightOf(e, maxCredits, now)
-	if p.preferExpiring && expiringNow(e, now) {
-		return w * expiringVirtualSlots
+	if !p.preferExpiring || maxExpiring <= 0 || !expiringPreferred(e, now) {
+		return w
 	}
-	return w
+	return w * (1 + float64(expiringVirtualSlots-1)*float64(e.creditsExpiring)/float64(maxExpiring))
 }
 
 // SetCredits 更新账号余额。

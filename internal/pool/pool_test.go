@@ -1740,7 +1740,7 @@ func TestTokenUsagePersistsAcrossReload(t *testing.T) {
 	}
 }
 
-func TestPickPrefersExpiringByVirtualWeight(t *testing.T) {
+func TestPickHardPrefersExpiringTier(t *testing.T) {
 	withNoPickGap(t)
 	p := New("")
 	p.Add(&auth.Auth{UID: "later"})
@@ -1752,8 +1752,14 @@ func TestPickPrefersExpiringByVirtualWeight(t *testing.T) {
 	p.SetCreditsDetailed("soon", 100, 100, 100, now.Add(2*time.Hour), 100)
 	p.SetCreditsDetailed("none", 100, 100, 0, time.Time{}, 0)
 
-	// 3:1 虚拟实例是软偏好而非硬优先。用确定性随机源统计长期分布：两个快过期
-	// 账号的合计份额应显著高于普通账号，同时普通账号仍保留少量流量。
+	// P5 层内 FEFO 排序兜底：两号余额/快过期量相同 → 权重相同 → 最早到期者排前。
+	// 确定性随机源（r=0 取候选集首个）验证排序结果确实是 soon 而不是字典序。
+	p.SetRandomSource(func(n int64) int64 { return 0 })
+	if got := p.Pick(); got == nil || got.UID != "soon" {
+		t.Fatalf("层内 FEFO pick=%v want soon（最早到期）", got)
+	}
+
+	// P1 硬优先层：快过期号独占候选，普通号零流量；层内两号都持续分到流量。
 	rng := rand.New(rand.NewPCG(1, 2))
 	p.SetRandomSource(func(n int64) int64 { return rng.Int64N(n) })
 	counts := map[string]int{}
@@ -1764,9 +1770,11 @@ func TestPickPrefersExpiringByVirtualWeight(t *testing.T) {
 		}
 		counts[got.UID]++
 	}
-	expiring := counts["soon"] + counts["later"]
-	if expiring < 1500 || counts["none"] == 0 {
-		t.Fatalf("virtual weight distribution=%v, want expiring majority and regular non-zero", counts)
+	if counts["none"] != 0 {
+		t.Fatalf("普通号不应分到流量（硬优先层独占）: %v", counts)
+	}
+	if counts["soon"] == 0 || counts["later"] == 0 {
+		t.Fatalf("层内两个快过期号都应分到流量: %v", counts)
 	}
 }
 
@@ -1796,8 +1804,8 @@ func TestPreferExpiringDisabledRestoresWeight(t *testing.T) {
 	p.SetCreditsDetailed("b", 100, 100, 0, time.Time{}, 0)
 
 	p.mu.Lock()
-	we := p.routingWeightOf(p.byUID["a"], 100, now)
-	wn := p.routingWeightOf(p.byUID["b"], 100, now)
+	we := p.routingWeightOf(p.byUID["a"], 100, 50, now)
+	wn := p.routingWeightOf(p.byUID["b"], 100, 50, now)
 	p.mu.Unlock()
 	if we != wn*expiringVirtualSlots {
 		t.Fatalf("enabled expiring weight=%v want %v", we, wn*expiringVirtualSlots)
@@ -1806,8 +1814,8 @@ func TestPreferExpiringDisabledRestoresWeight(t *testing.T) {
 	p.SetPreferExpiring(false)
 
 	p.mu.Lock()
-	wa := p.routingWeightOf(p.byUID["a"], 100, now)
-	wb := p.routingWeightOf(p.byUID["b"], 100, now)
+	wa := p.routingWeightOf(p.byUID["a"], 100, 50, now)
+	wb := p.routingWeightOf(p.byUID["b"], 100, 50, now)
 	p.mu.Unlock()
 	if wa != wb {
 		t.Fatalf("disabled expiring weights differ: %v/%v", wa, wb)

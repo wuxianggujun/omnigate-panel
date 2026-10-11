@@ -142,6 +142,8 @@ func main() {
 			// 域感知闭包：模型名按 RealmRouter 解析成有序候选域，再按域过滤可用账号
 			// （跨 realm 不泄漏）；裸名按 realm_routing 优先级，显式前缀仍硬指定。
 			AvailableForModel: realmAwareAvailableForModel(p, realmRouter),
+			// 首次分配走快过期硬优先层（层为空时内部回落 AvailableForModel 同集）。
+			AssignForModel: realmAwareAssignForModel(p, realmRouter),
 		})
 		sessRouter.LoadFromStore() // 启动时从 Redis 恢复粘性（读操作仅此处）
 		sessRouter.StartGC()

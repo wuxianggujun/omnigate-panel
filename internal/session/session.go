@@ -40,7 +40,17 @@ type Config struct {
 	// 为什么粘性需要模型维度：绑定只记 uid，而同一个会话可能换模型。账号被 6004
 	// 模型级限额后对**其他模型**仍可用（issue #31 豁免），此时若只按账号级可用性
 	// 校验，会话会被钉在这个号上反复失败——正是"限额后换不动号"的观感来源。
+	//
+	// 语义是**可用性全集**：快路径命中校验与慢路径 re-check 都用它，故不能收窄
+	// （收窄会让既有绑定被判失效而重绑，见 AssignForModel）。
 	AvailableForModel func(model string) []string
+	// AssignForModel 会话**首次分配**使用的候选列表，可与 AvailableForModel 不同
+	// （更窄）：用于把新会话优先绑到积分快过期的账号上（pool 侧的快过期硬优先层）。
+	// 返回空切片时回落 AvailableForModel。nil 时行为与引入前一致。
+	//
+	// 刻意不参与可用性校验：那会让粘性给快过期让路（换号丢 prompt 缓存），是另一档
+	// 需要显式决策的策略，不在本字段语义内。
+	AssignForModel func(model string) []string
 }
 
 // Router 会话粘性路由器。
@@ -173,7 +183,9 @@ func (r *Router) ResolveForModel(key, model string) (string, bool) {
 		delete(r.entries, key) // 失效：清掉再分配
 	}
 
-	uids := r.availableSlice(model)
+	// 分配候选优先走 AssignForModel（快过期硬优先层：把新会话优先绑到积分快过期的号上，
+	// 避免「30 分明天过期却一直被高余额长期号压住」）；为空时它内部回落到可用性全集。
+	uids := r.assignSlice(model)
 	if len(uids) == 0 {
 		return "", false
 	}
@@ -285,6 +297,17 @@ func (r *Router) availableSlice(model string) []string {
 		return nil
 	}
 	return r.cfg.Available()
+}
+
+// assignSlice 返回首次分配的候选列表：优先用 AssignForModel（快过期硬优先层），
+// 它为空（无快过期号 / 未注入）时回落可用性全集。返回值非空即代表池里还有可用账号。
+func (r *Router) assignSlice(model string) []string {
+	if r.cfg.AssignForModel != nil {
+		if uids := r.cfg.AssignForModel(model); len(uids) > 0 {
+			return uids
+		}
+	}
+	return r.availableSlice(model)
 }
 
 func expired(e entry, now time.Time, ttl time.Duration) bool {

@@ -35,12 +35,15 @@ func (p *Pool) AvailableUIDsForRealm(realm string) []string {
 
 // WeightedAvailableUIDsForModelRealm 返回带虚拟实例权重的可用账号列表。
 //
-// 普通账号出现 1 次；有效快过期账号出现 expiringVirtualSlots 次。调用方继续按
-// 原有序列表哈希，即可让新会话对快过期账号形成温和偏好。重复项按 UID 排序后
+// 普通账号出现 1 次；有效快过期账号出现 expiringVirtualSlots 次。重复项按 UID 排序后
 // 展开，保证同一账号拓扑下不同进程得到一致列表。
 //
 // 该方法是现有 AvailableUIDsForModelRealm 的增量入口，不改变旧方法语义，也不
 // 修改配置、状态或 Redis schema。prefer_expiring=false 时退化为逐账号一次。
+//
+// 现状（P1 之后）：新会话的「快过期优先」已由 AssignUIDsForModelRealm 以硬优先层
+// 实现，本列表只剩「可用性集合」用途（session.availableSet 会把它转成 set，重复项
+// 对集合无影响）。保留重复项是为了不改变既有函数语义与测试口径。
 func (p *Pool) WeightedAvailableUIDsForModelRealm(model, realm string) []string {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -92,12 +95,9 @@ func (p *Pool) WeightedAvailableUIDsForModelRealms(model string, realms []string
 	return out
 }
 
-// AvailableUIDsForModelRealm 同 AvailableUIDsForModel，但仅返回 Realm()==realm 的账号
-// （6004 模型豁免照常生效）。realm=="" 退化为 AvailableUIDsForModel。
-func (p *Pool) AvailableUIDsForModelRealm(model, realm string) []string {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	now := time.Now()
+// availableUIDsForModelRealmLocked 返回 realm 内「该模型可用」的账号 uid（healthyForModel
+// 且未占满在途）有序列表。调用方必须已持 p.mu（读锁即可）。
+func (p *Pool) availableUIDsForModelRealmLocked(model, realm string, now time.Time) []string {
 	uids := make([]string, 0, len(p.byUID))
 	for uid, e := range p.byUID {
 		if realm != "" && e.a.Realm() != realm {
@@ -113,4 +113,60 @@ func (p *Pool) AvailableUIDsForModelRealm(model, realm string) []string {
 	}
 	sort.Strings(uids)
 	return uids
+}
+
+// AvailableUIDsForModelRealm 同 AvailableUIDsForModel，但仅返回 Realm()==realm 的账号
+// （6004 模型豁免照常生效）。realm=="" 退化为 AvailableUIDsForModel。
+//
+// 语义是「可用性全集」：会话粘性校验（已绑号是否仍可用）必须用它，不能用
+// AssignUIDsForModelRealm——后者会按快过期优先层收窄，用在校验上会让普通号上的
+// 既有绑定被判失效而重绑（= 粘性给快过期让路，见 AssignUIDsForModelRealm 注释）。
+func (p *Pool) AvailableUIDsForModelRealm(model, realm string) []string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.availableUIDsForModelRealmLocked(model, realm, time.Now())
+}
+
+// AssignUIDsForModelRealm 会话**首次分配**用的候选列表（P1 快过期硬优先层的粘性侧）：
+// 存在快过期优先层成员时只返回它们，否则退回全部可用账号（与 AvailableUIDsForModelRealm 同集）。
+//
+// 为什么要与可用性校验分开：校验必须用全集，否则已绑在普通号上的会话会被判「不可用」
+// 而重绑——那等于让粘性给快过期让路，会换号丢 prompt 缓存（新号按全价重算 prompt），
+// 是刻意未启用的另一档策略。本方法只决定「新会话绑到谁」。
+//
+// 在途占满的号已被排除，故收窄不会堵死：层内号打满在途后新会话自然落到普通号上。
+func (p *Pool) AssignUIDsForModelRealm(model, realm string) []string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	now := time.Now()
+	all := p.availableUIDsForModelRealmLocked(model, realm, now)
+	if !p.preferExpiring {
+		return all
+	}
+	tier := make([]string, 0, len(all))
+	for _, uid := range all {
+		if expiringPreferred(p.byUID[uid], now) {
+			tier = append(tier, uid)
+		}
+	}
+	if len(tier) > 0 {
+		return tier
+	}
+	return all
+}
+
+// AssignUIDsForModelRealms 按 realms 顺序合并各域的分配候选（供会话粘性分配用）。
+// 各域互斥（一个账号只属一个域），直接拼接即可。realms 为空 → 退化为不过滤。
+func (p *Pool) AssignUIDsForModelRealms(model string, realms []string) []string {
+	if len(realms) == 0 {
+		return p.AssignUIDsForModelRealm(model, "")
+	}
+	if len(realms) == 1 {
+		return p.AssignUIDsForModelRealm(model, realms[0])
+	}
+	var out []string
+	for _, realm := range realms {
+		out = append(out, p.AssignUIDsForModelRealm(model, realm)...)
+	}
+	return out
 }

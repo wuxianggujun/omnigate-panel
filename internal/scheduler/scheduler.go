@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/wuxianggujun/omnigate-panel/internal/auth"
+	"github.com/wuxianggujun/omnigate-panel/internal/credithist"
 	"github.com/wuxianggujun/omnigate-panel/internal/logfmt"
 	"github.com/wuxianggujun/omnigate-panel/internal/pool"
 	"github.com/wuxianggujun/omnigate-panel/internal/upstream"
@@ -61,6 +62,10 @@ type Config struct {
 	// 待办并执行，与面板「执行全部待办」按钮同管线）。调度器只管时点不管实现——
 	// panel 在 scheduler 之后构造，用 SetGrowthHook 事后挂载；nil 时到点跳过。
 	GrowthHook func()
+
+	// History 余额快照历史（credithist）：签到/余额刷新拿到上游权威余额后各采一次。
+	// nil 时完全不采样（面板的「近 N 小时消耗」与对账随之停用），不影响任何任务。
+	History *credithist.Recorder
 }
 
 // Scheduler 调度器。
@@ -500,6 +505,7 @@ func (s *Scheduler) RunCheckinNowFiltered(allow func(uid string) bool) {
 		}
 		s.cfg.Pool.ReenableIfCredits(st.UID, remain, total)
 		s.cfg.Pool.SetCreditsDetailed(st.UID, remain, total, expiring, earliestAt, earliestRemaining)
+		s.noteCredits(st.UID, remain, expiring)
 	}
 	s.RunStreakBonusNow()
 }
@@ -625,6 +631,16 @@ func (s *Scheduler) RunKeepaliveNowFiltered(allow func(uid string) bool) {
 	}
 }
 
+// noteCredits 采一次余额快照（面板「近 N 小时消耗」与用量对账的数据源，见
+// internal/credithist）。只采上游权威余额，不采 NoteModelCost 的本地扣减——
+// 后者是 d=int64(credit+0.5) 的粗粒度扣减，小额请求根本不扣，掺进来只会锯齿化。
+// History 未注入时空操作：采样纯属观测，绝不能影响任务本身。
+func (s *Scheduler) noteCredits(uid string, credits, expiring int64) {
+	if s.cfg.History != nil {
+		s.cfg.History.Record(uid, credits, expiring)
+	}
+}
+
 // RunBalanceRefreshNow 并发查询余额并更新池内 credits。
 // 账号范围：默认跳过禁用账号；schedule.include_disabled_in_tasks 打开时一并刷新
 // （轮换用法下据此判断下一个该启用谁）。注意 ReenableIfCredits 对 disabled 是
@@ -660,6 +676,7 @@ func (s *Scheduler) RunBalanceRefreshNowFiltered(allow func(uid string) bool) {
 			}
 			s.cfg.Pool.ReenableIfCredits(uid, remain, total)
 			s.cfg.Pool.SetCreditsDetailed(uid, remain, total, expiring, earliestAt, earliestRemaining)
+			s.noteCredits(uid, remain, expiring)
 		}(a, st.UID)
 	}
 	wg.Wait()

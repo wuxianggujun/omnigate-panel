@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/wuxianggujun/omnigate-panel/internal/auth"
+	"github.com/wuxianggujun/omnigate-panel/internal/credithist"
 	"github.com/wuxianggujun/omnigate-panel/internal/livecfg"
 	"github.com/wuxianggujun/omnigate-panel/internal/panelauth"
 	"github.com/wuxianggujun/omnigate-panel/internal/pool"
@@ -60,6 +61,8 @@ type Config struct {
 
 	// Usage 逐请求用量记录器（nil = 用量接口返回 501）。
 	Usage *usage.Recorder
+	// History 余额快照历史（nil = 不返回「近 N 小时净变化」，用量页对账卡片隐藏）。
+	History *credithist.Recorder
 	// RequestLog 请求指标与归档（nil = 对应接口返回 501）。
 	RequestLog *reqlog.Recorder
 
@@ -275,6 +278,8 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/api/school/vouchers", p.read(p.schoolVouchers))
 	p.mux.HandleFunc("GET /panel/api/packages", p.read(p.packages))
 	p.mux.HandleFunc("GET /panel/api/usage", p.read(p.usage))
+	// 余额快照历史（「近 N 小时消耗」/用量对账）：与 usage 同窗口口径，只读。
+	p.mux.HandleFunc("GET /panel/api/credits/history", p.read(p.creditsHistory))
 	p.mux.HandleFunc("GET /panel/api/model_probes", p.read(p.modelProbes))
 	// 添加账号的 OAuth 轮询：登录即可（普通用户也能给自己加号）。
 	p.mux.HandleFunc("GET /panel/api/login/poll", p.tenant(p.loginPoll))
@@ -361,13 +366,6 @@ func (p *Panel) expiringSoonWindow() time.Duration {
 // 明细按身份过滤：admin/viewer 全部，普通 user 只返回自己拥有的账号，未登录
 // 访客返回空数组（只看得到汇总数字）。
 func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
-	// 用 WithPaused 而不是 CountsDetailed：后者把暂停号并进 disabled（/status 的
-	// 「不可用」口径），而概况卡片要分开展示（issue #125）。
-	total, healthy, cooling, disabled, paused, inFlightFull := p.cfg.Pool.CountsDetailedWithPaused()
-	sticky := 0
-	if p.cfg.StickyCount != nil {
-		sticky = p.cfg.StickyCount()
-	}
 	owned, all := p.ownFilter(r)
 	accounts := make([]pool.Status, 0, 8)
 	for _, st := range p.cfg.Pool.List() {
@@ -375,7 +373,20 @@ func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
 			accounts = append(accounts, st)
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	writeJSON(w, http.StatusOK, p.overviewBody(accounts))
+}
+
+// overviewBody 组装 /panel/api/overview 的响应体（拆出来是为了让 credits_net
+// 这类「按可见账号过滤」的附加字段有个明确的落点）。
+func (p *Panel) overviewBody(accounts []pool.Status) map[string]any {
+	// 用 WithPaused 而不是 CountsDetailed：后者把暂停号并进 disabled（/status 的
+	// 「不可用」口径），而概况卡片要分开展示（issue #125）。
+	total, healthy, cooling, disabled, paused, inFlightFull := p.cfg.Pool.CountsDetailedWithPaused()
+	sticky := 0
+	if p.cfg.StickyCount != nil {
+		sticky = p.cfg.StickyCount()
+	}
+	body := map[string]any{
 		"version":         p.cfg.Version,
 		"uptime_sec":      int(time.Since(p.started).Seconds()),
 		"auth_required":   p.apiKey() != "",
@@ -391,7 +402,25 @@ func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
 		// model_locks 模型级限流全清单（哪些模型不能用、锁了几个号、还要锁多久）：
 		// 与 accounts 的账号池视图互补，前端「模型锁池」表直接渲染。无锁时为 null。
 		"model_locks": p.cfg.Pool.ModelLockView(),
-	})
+	}
+	// credits_net 余额快照历史的近 24h 净变化（负 = 掉了）：账号行据此直接标
+	// 「近24h −48」，与「积分构成」页的实时逐包查询互补——这里只读本地历史，
+	// 零上游开销，因此可以随每次轮询一起给。只对本次可见的账号返回（多租户）。
+	if p.cfg.History != nil {
+		// 只保留本次可见账号：user 不该看到别人的号有没有在掉分。
+		visibleUID := make(map[string]bool, len(accounts))
+		for _, st := range accounts {
+			visibleUID[st.UID] = true
+		}
+		net := map[string]credithist.Account{}
+		for _, a := range p.cfg.History.Snapshot(credithist.DefaultWindow, 0,
+			func(uid string) bool { return visibleUID[uid] }, time.Now()) {
+			net[a.UID] = a
+		}
+		body["credits_net"] = net
+		body["credits_net_window_sec"] = int64(credithist.DefaultWindow.Seconds())
+	}
+	return body
 }
 
 // logsHandler 返回日志环形缓冲快照（时间升序，含频道标记 chat/task/sys）。
@@ -989,6 +1018,59 @@ func (p *Panel) usage(w http.ResponseWriter, r *http.Request) {
 		allowUID = func(uid string) bool { return owned[wbOwnerKey(uid)] }
 	}
 	writeJSON(w, http.StatusOK, p.cfg.Usage.SnapshotWindowFiltered(win, nicks, currentRate, allowUID))
+}
+
+// creditHistoryPoints 余额历史序列的降采样点数（近 24h 约每 40 分钟一根柱）。
+// 只要够看出「什么时候掉的、掉了多少」，不必把 300 个原始采样点全发给浏览器。
+const creditHistoryPoints = 36
+
+// creditsHistory 返回余额快照历史（「近 N 小时消耗」与用量对账的数据源）。
+// 窗口口径与 /panel/api/usage 一致（hours / from / to；都不给 = 24h）——前端用
+// 同一组查询参数同时拉两份数据，才能逐账号对账。
+//
+// 与用量页不同，历史是采样点而不是小时桶：请求窗口超过保留期（26h）时只能给出
+// 保留期内那一段，响应里每行的 span_sec / from / to 就是**实际**覆盖区间，
+// 前端据此如实标注「近 3.2h」，不假装成 24h。
+// 归属过滤同 overview：普通用户只看自己账号，admin/viewer 看全部，未登录为空。
+func (p *Panel) creditsHistory(w http.ResponseWriter, r *http.Request) {
+	if p.cfg.History == nil {
+		writeErr(w, http.StatusNotImplemented, "credit history not available")
+		return
+	}
+	q := r.URL.Query()
+	now := time.Now()
+	from := parseTimeParam(q.Get("from"))
+	to := parseTimeParam(q.Get("to"))
+	if !to.IsZero() {
+		now = to
+	}
+	window := credithist.DefaultWindow
+	switch {
+	case !from.IsZero() && !to.IsZero() && to.After(from):
+		window = to.Sub(from)
+	case from.IsZero() && to.IsZero():
+		if v := q.Get("hours"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+				window = time.Duration(n) * time.Hour
+			}
+		}
+	}
+	// 窗口非法 / 「全部历史」/ 超出保留期：能给的只有保留期那一段。
+	if window <= 0 || window > credithist.Retention {
+		window = credithist.Retention
+	}
+	owned, all := p.ownFilter(r)
+	var allow func(uid string) bool
+	if !all {
+		allow = func(uid string) bool { return owned[wbOwnerKey(uid)] }
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"window_sec":    int64(window.Seconds()),
+		"retention_sec": int64(credithist.Retention.Seconds()),
+		"now":           now.Format(time.RFC3339),
+		"series_points": creditHistoryPoints,
+		"accounts":      p.cfg.History.Snapshot(window, creditHistoryPoints, allow, now),
+	})
 }
 
 // parseTimeParam 解析时间查询参数：unix 秒（前端默认）或 RFC3339（便于手工调

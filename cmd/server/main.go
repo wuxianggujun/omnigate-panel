@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/wuxianggujun/omnigate-panel/internal/auth"
+	"github.com/wuxianggujun/omnigate-panel/internal/credithist"
 	"github.com/wuxianggujun/omnigate-panel/internal/livecfg"
 	"github.com/wuxianggujun/omnigate-panel/internal/outbound"
 	"github.com/wuxianggujun/omnigate-panel/internal/panel"
@@ -204,9 +205,18 @@ func main() {
 	// 回落仓库内嵌种子；models.dev 按需拉取成功后原子写回。
 	upstream.SetModelCatalogPath(stateSibling(cfg.StateFile, "model.json"))
 
+	// 余额快照历史（「近 N 小时消耗」/用量对账的数据源）：与 state 文件同目录，
+	// 缺省 data/credits_history.json。只记录、不参与任何路由决策。
+	creditHist := credithist.New(stateSibling(cfg.StateFile, "credits_history.json"))
+	creditHist.Start()
+	defer creditHist.Stop()
+	log.Printf("[credithist] 余额快照历史已启用: %s (%s)",
+		stateSibling(cfg.StateFile, "credits_history.json"), creditHist.Describe())
+
 	sch := scheduler.New(scheduler.Config{
 		Pool:           p,
 		Upstream:       up,
+		History:        creditHist,
 		CheckinHours:   cfg.Schedule.CheckinHours,
 		TravelHours:    cfg.Schedule.TravelHours,
 		ActivityHours:  cfg.Schedule.ActivityHours,
@@ -318,6 +328,7 @@ func main() {
 	pcfg := panel.Config{
 		Pool:        p,
 		Usage:       rec,
+		History:     creditHist,
 		RequestLog:  requestLog,
 		Upstream:    up,
 		Scheduler:   sch,

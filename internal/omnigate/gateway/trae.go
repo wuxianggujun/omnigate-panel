@@ -152,10 +152,18 @@ func (g *Gateway) finishTraeLogin(ctx context.Context, providerName, stateID str
 		providerName = pend.provider
 	}
 	if !ok {
-		// 无 pending（或已过期）：新生成指纹。deviceId 只用于签到（须互异且
-		// 稳定），此处新生成即可，不影响 refreshToken 的可用性。
+		// 无 pending（或已过期）：新生成 machineID。deviceID 优先复用回调里的
+		// loginTraceID —— TRAE 只会回传它，且它就等于登录时用的 deviceID（登录
+		// URL 里 device_id 与 login_trace_id 相同），复用可让签到设备与登录设备
+		// 保持一致；拿不到才新生成（deviceId 只影响签到，须互异且稳定）。
 		machineID, _ := trae.NewMachineID()
-		deviceID, _ := trae.NewCheckinDeviceID()
+		deviceID := ""
+		if t := strings.TrimSpace(info.TraceID); len(t) == 16 {
+			deviceID = t
+		}
+		if deviceID == "" {
+			deviceID, _ = trae.NewCheckinDeviceID()
+		}
 		pend = traePending{provider: providerName, machineID: machineID, deviceID: deviceID}
 	}
 	if providerName == "" {

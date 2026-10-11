@@ -4,6 +4,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/wuxianggujun/omnigate-panel/internal/panelauth"
 )
 
 // TestPanelAuthFrontendWiring 前端鉴权接线回归：登录控件存在、登录按钮已绑定

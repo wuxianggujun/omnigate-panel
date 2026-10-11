@@ -1060,9 +1060,11 @@ func (p *Panel) creditsHistory(w http.ResponseWriter, r *http.Request) {
 	const maxHours = int(credithist.Retention / time.Hour)
 	hours := int(credithist.DefaultWindow / time.Hour)
 	window := credithist.DefaultWindow
+	explicit := false
 	switch {
 	case !from.IsZero() && !to.IsZero() && to.After(from):
 		// 显式区间：按调用方给的边界（调用方负责对齐整点，见 usage.Window 的约定）。
+		explicit = true
 		window = to.Sub(from)
 		hours = int(window / time.Hour)
 	case from.IsZero() && to.IsZero():
@@ -1080,21 +1082,67 @@ func (p *Panel) creditsHistory(w http.ResponseWriter, r *http.Request) {
 	if window <= 0 || window > credithist.Retention {
 		window = credithist.Retention
 	}
-	winFrom := now.Add(-window)
 	owned, all := p.ownFilter(r)
 	var allow func(uid string) bool
 	if !all {
 		allow = func(uid string) bool { return owned[wbOwnerKey(uid)] }
 	}
+	snap := p.cfg.History.Snapshot(window, creditHistoryPoints, allow, now)
+	// 采样点是 5 分钟粒度、用量是小时桶：两侧必须覆盖同一批整点桶才对得上。能对齐的
+	// 桶数由最早的采样点决定（窗口锚在当前整点），不够就收窄——否则刚上线时会拿 26h
+	// 的用量去比 25 分钟的余额变化，差额纯属幻觉。hours=0 表示连一个整点桶都覆盖不了，
+	// 前端据此只展示余额侧、不做对账。
+	if !explicit {
+		if n := alignedHours(snap, now); n < hours {
+			hours = n
+			if n >= 1 {
+				window = now.Sub(now.Truncate(time.Hour).Add(-time.Duration(n-1) * time.Hour))
+				snap = p.cfg.History.Snapshot(window, creditHistoryPoints, allow, now)
+			}
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"window_sec":    int64(window.Seconds()),
 		"hours":         hours,
-		"from":          winFrom.Format(time.RFC3339),
+		"from":          now.Add(-window).Format(time.RFC3339),
 		"to":            now.Format(time.RFC3339),
 		"retention_sec": int64(credithist.Retention.Seconds()),
 		"series_points": creditHistoryPoints,
-		"accounts":      p.cfg.History.Snapshot(window, creditHistoryPoints, allow, now),
+		"accounts":      snap,
 	})
+}
+
+// alignedHours 返回这批采样能对齐到几个整点桶。hours=N 的窗口是 [当前整点-(N-1)h, now]，
+// 每个账号的净变化取自「窗口内最早的采样点 → 最新采样点」，所以 N 的上限由**历史最短的
+// 那个账号**决定：它的最早采样点若晚于窗口左边界，它那一小段净变化就会被掺进整窗口的
+// 合计里（用量按整桶算、余额只算了一小截 → 虚报「积分过期」）。
+// 取所有账号里**最晚**的 From 就是这个约束。另外给 15 分钟余量（桶的 1/4）：采样是
+// 5 分钟粒度，左边界落在两个采样点之间是常态，否则每遇到桶边界没采样就白丢一整桶。
+// 返回 0 表示连一个整点桶都覆盖不了（刚上线几分钟的状态）。
+func alignedHours(snap []credithist.Account, now time.Time) int {
+	const slack = 15 * time.Minute
+	anchor := now.Truncate(time.Hour)
+	var newest time.Time
+	for _, a := range snap {
+		if a.From == "" {
+			continue
+		}
+		ts, err := time.Parse(time.RFC3339, a.From)
+		if err != nil {
+			continue
+		}
+		if newest.IsZero() || ts.After(newest) {
+			newest = ts
+		}
+	}
+	if newest.IsZero() {
+		return 0
+	}
+	d := anchor.Sub(newest) + slack
+	if d < 0 {
+		return 0
+	}
+	return int(d/time.Hour) + 1
 }
 
 // parseTimeParam 解析时间查询参数：unix 秒（前端默认）或 RFC3339（便于手工调

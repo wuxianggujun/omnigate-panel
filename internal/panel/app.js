@@ -3108,8 +3108,14 @@ function renderRecon(hist) {
     const cr = credited[h.uid];
     const use = cr ? Number(cr.credits || 0) : 0;
     rows.push({ h, meta, use, diff: use + (h.ok ? Number(h.net || 0) : 0) });
-    if (h.ok) { netTotal += Number(h.net || 0); covered++; }
-    creditedTotal += use;
+    // creditedTotal 必须与 netTotal **同口径**（只累计 h.ok 的账号）：一边算余额、一边
+    // 不算用量，差额就会被系统性推成正值，读起来正是「积分过期」——最坏的那种假警报。
+    // 未纳入的账号仍然逐行显示（计费用量照给，差额给「—」），只是不进合计。
+    if (h.ok) {
+      netTotal += Number(h.net || 0);
+      creditedTotal += use;
+      covered++;
+    }
     expiringTotal += Number(meta.credits_expiring || 0);
   });
   const diffTotal = creditedTotal + netTotal;
@@ -3149,7 +3155,8 @@ function renderRecon(hist) {
     if (reconHoursUsed <= 0) {
       // 余额历史刚上线时只有几分钟：用量按小时桶记账，桶对齐不了就没法对账。
       msg = '余额历史还没覆盖满一个整点小时（用量按小时桶记账，两侧必须覆盖同一批桶），'
-        + '暂时只能看余额侧的变化。余额每 5 分钟刷新一次，过一小时这里会自动出现对账数字。';
+        + '暂时只能看余额侧的变化。余额每 5 分钟刷新一次，等历史跨过下一个整点后，'
+        + '这里会自动出现对账数字。';
     } else if (noUsage) {
       msg = '取不到与余额历史同窗口的用量，暂不能对账（余额侧的数字仍然有效）。';
     } else if (none) {
@@ -3161,7 +3168,7 @@ function renderRecon(hist) {
     } else if (diffOk) {
       msg = '✓ 对得上：本窗口计费用量合计 <b>' + fmtCredit(creditedTotal) + '</b>，余额净变化 <b>'
         + fmtCredit(netTotal) + '</b>，差额 <b>' + fmtCredit(diffTotal) + '</b> 在口径容差 ±'
-        + fmtCredit(slop) + ' 内（用量按小时桶聚合，边界最多错开一个桶）。';
+        + fmtCredit(slop) + ' 内（用量按小时桶聚合、余额按 5 分钟采样点取，边界差不超过 15 分钟）。';
     } else if (diffTotal > 0) {
       msg = '⚠ 余额比计费用量多掉了 <b>' + fmtCredit(diffTotal) + '</b> 分（超出容差 ±'
         + fmtCredit(slop) + '）：多半是<b>积分过期</b>（到期批次没被消耗就归零），'

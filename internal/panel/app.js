@@ -4194,6 +4194,7 @@ async function loadOmniConfig() {
     $('cfgMode').value = omniCfg.mode || 'text';
     $('cfgReasoning').checked = !!omniCfg.reasoning;
     renderProvEditor();
+    renderKeyEditor();
     ogMsg('cfgMsg', '已加载 ' + omniCfg.providers.length + ' 个供应商', 'ok');
   } catch (e) {
     $('provEditor').innerHTML = '<div class="empty">供应商配置不可用：' + esc(e.message) + '</div>';
@@ -4302,8 +4303,119 @@ function normalizeOmniForSave(cfg) {
   return out;
 }
 
-async function saveOmniConfig() {
-  if (!omniCfg) { ogMsg('cfgMsg', '配置尚未加载', 'err'); return; }
+/* ── 网关密钥（按供应商收窄；决定客户端能用哪些模型） ──
+ *
+ * api_keys 允许两种写法：裸串（全量）与对象（{"key","name","providers"}）。编辑器统一
+ * 归一成对象，保存时原样回传；后端序列化时会把「未命名且未收窄」的密钥写回裸串，
+ * 所以 omnigate.json 的形态不会被这次前端归一污染。
+ */
+function normOmniKeys() {
+  if (!omniCfg) return [];
+  const raw = Array.isArray(omniCfg.api_keys) ? omniCfg.api_keys : [];
+  omniCfg.api_keys = raw.map(k => (typeof k === 'string')
+    ? { key: k, name: '', providers: [] }
+    : {
+        key: (k && k.key) || '',
+        name: (k && k.name) || '',
+        providers: (k && Array.isArray(k.providers)) ? k.providers.slice() : [],
+      });
+  return omniCfg.api_keys;
+}
+
+function newKeyValue() {
+  const bytes = [];
+  const c = window.crypto || {};
+  if (typeof c.getRandomValues === 'function' && typeof Uint8Array === 'function') {
+    const buf = new Uint8Array(24);
+    c.getRandomValues(buf);
+    for (const b of buf) bytes.push(b);
+  } else {
+    for (let i = 0; i < 24; i++) bytes.push(Math.floor(Math.random() * 256));
+  }
+  return 'sk-' + bytes.map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+function keyCard(k, i) {
+  const provs = ((omniCfg && omniCfg.providers) || []).map(p => p.name).filter(Boolean);
+  const has = (k.providers || []);
+  const boxes = provs.length
+    ? provs.map(n => '<label class="kchk"><input type="checkbox" data-act="keyProv" data-i="' + i + '" value="' + esc(n) + '"' + (has.indexOf(n) >= 0 ? ' checked' : '') + '> ' + esc(n) + '</label>').join('')
+    : '<span class="og-s">还没有供应商可授权</span>';
+  const scope = has.length ? '<span class="tag warn">收窄</span>' : '<span class="tag ok">全量</span>';
+  return '<div class="og-card">' +
+    '<div class="og-row" style="justify-content:space-between">' +
+      '<div class="og-t">密钥 #' + (i + 1) + ' ' + scope + '</div>' +
+      '<button class="danger" data-act="delKey" data-i="' + i + '">删除</button>' +
+    '</div>' +
+    '<div class="og-fields">' +
+      '<label>名称（仅用于辨认）<input data-act="keyName" data-i="' + i + '" value="' + esc(k.name || '') + '" placeholder="如 raccoon 专用"></label>' +
+      '<label>密钥<textarea data-act="keyVal" data-i="' + i + '" rows="1" spellcheck="false" placeholder="sk-...（发给客户端）">' + esc(k.key || '') + '</textarea></label>' +
+    '</div>' +
+    '<div class="og-row" style="margin-top:6px">' +
+      '<button data-act="genKey" data-i="' + i + '">生成随机密钥</button>' +
+      '<span class="og-s">生成后请立刻复制：保存后这里仍会回显，但只有管理员看得到。</span>' +
+    '</div>' +
+    '<div class="og-sep"></div>' +
+    '<div class="og-s">授权供应商（<strong>不勾 = 全量</strong>，可调用所有模型）</div>' +
+    '<div class="og-fields">' + boxes + '</div>' +
+  '</div>';
+}
+
+function renderKeyEditor() {
+  const box = $('keyEditor');
+  if (!box) return;
+  const keys = normOmniKeys();
+  if (!keys.length) {
+    box.innerHTML = '<div class="empty">还没有客户端密钥，点「+ 新增密钥」开始。面板自己那把密钥不在列表里（恒为全量）。</div>';
+    return;
+  }
+  box.innerHTML = keys.map((k, i) => keyCard(k, i)).join('');
+}
+
+function onKeyInput(ev) {
+  const el = ev.target;
+  const i = +(el.dataset && el.dataset.i);
+  if (isNaN(i) || !omniCfg || !Array.isArray(omniCfg.api_keys)) return;
+  const k = omniCfg.api_keys[i];
+  if (!k) return;
+  const act = el.dataset.act;
+  if (act === 'keyName') k.name = el.value;
+  else if (act === 'keyVal') k.key = el.value.trim();
+  else if (act === 'keyProv') {
+    k.providers = k.providers || [];
+    const at = k.providers.indexOf(el.value);
+    if (el.checked && at < 0) k.providers.push(el.value);
+    if (!el.checked && at >= 0) k.providers.splice(at, 1);
+    renderKeyEditor(); // 角标（全量/收窄）随之更新
+  }
+}
+
+function onKeyClick(ev) {
+  const btn = ev.target.closest('button[data-act]');
+  if (!btn || !omniCfg || !Array.isArray(omniCfg.api_keys)) return;
+  const i = +btn.dataset.i;
+  const k = omniCfg.api_keys[i];
+  if (!k) return;
+  if (btn.dataset.act === 'genKey') {
+    k.key = newKeyValue();
+    renderKeyEditor();
+  } else if (btn.dataset.act === 'delKey') {
+    if (!confirm('删除密钥「' + (k.name || ('#' + (i + 1))) + '」？删掉后正在用它调用的客户端会立刻收到 401。')) return;
+    omniCfg.api_keys.splice(i, 1);
+    renderKeyEditor();
+  }
+}
+
+function addKey() {
+  omniCfg = omniCfg || {};
+  omniCfg.api_keys = Array.isArray(omniCfg.api_keys) ? omniCfg.api_keys : [];
+  omniCfg.api_keys.push({ key: newKeyValue(), name: '', providers: [] });
+  renderKeyEditor();
+}
+
+async function saveOmniConfig(msgId) {
+  const mid = msgId || 'cfgMsg';
+  if (!omniCfg) { ogMsg(mid, '配置尚未加载', 'err'); return; }
   const body = normalizeOmniForSave(omniCfg);
   body.default_provider = $('cfgDefaultProvider').value;
   body.default_model = $('cfgDefaultModel').value.trim();
@@ -4312,11 +4424,11 @@ async function saveOmniConfig() {
   try {
     await api('omni/config', { method: 'POST', body: JSON.stringify(body) });
     await loadOmniConfig();
-    ogMsg('cfgMsg', '已保存并热生效', 'ok');
+    ogMsg(mid, '已保存并热生效', 'ok');
     await loadOverview(true);
     if (view === 'outbound') loadOutbound();
   } catch (e) {
-    ogMsg('cfgMsg', '保存失败：' + e.message, 'err');
+    ogMsg(mid, '保存失败：' + e.message, 'err');
   }
 }
 
@@ -4924,10 +5036,15 @@ async function saveOutbound() {
   on('accSource', () => { accSourceFilter = $('accSource').value; renderAccountRows(); }, 'change');
   // 供应商配置
   on('btnAddProv', addProvider);
-  on('btnSaveCfg', saveOmniConfig);
+  on('btnSaveCfg', () => saveOmniConfig());
   on('btnReloadCfg', loadOmniConfig);
   const pe = $('provEditor');
   if (pe) { pe.addEventListener('input', onProvInput); pe.addEventListener('change', onProvInput); pe.addEventListener('click', onProvClick); }
+  // 网关密钥卡（按供应商收窄的客户端密钥）
+  on('btnAddKey', addKey);
+  on('btnSaveCfgKeys', () => saveOmniConfig('keyMsg'));
+  const ke = $('keyEditor');
+  if (ke) { ke.addEventListener('input', onKeyInput); ke.addEventListener('change', onKeyInput); ke.addEventListener('click', onKeyClick); }
   // 账号授权（OmniGate）：raccoon 网页授权 / 粘贴 Token；runable 浏览器登录（粘贴 Cookie）
   on('btnStartOgAuth', authorizeOmni);
   on('btnOpenAuth', openOmniAuth);

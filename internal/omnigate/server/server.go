@@ -339,20 +339,28 @@ func apiKeyFrom(r *http.Request) string {
 	return strings.TrimSpace(r.Header.Get("x-api-key"))
 }
 
+// keyScope 解析请求携带的网关密钥，返回该密钥的授权范围。未配置任何密钥时网关
+// 本就开放，返回零值 APIKey（= 全量）。
+//
+// 面板自己那把密钥（cfg.PanelKey，= config.json 的 api_key）恒为全量：面板前端要用
+// 它调 /omni/*，不能被任何收窄规则误伤。
+func (s *Server) keyScope(r *http.Request) (config.APIKey, bool) {
+	key := apiKeyFrom(r)
+	if s.cfg.PanelKey != "" && key == s.cfg.PanelKey {
+		return config.APIKey{}, true
+	}
+	if len(s.cfg.APIKeys) == 0 && s.cfg.PanelKey == "" {
+		return config.APIKey{}, true
+	}
+	return s.cfg.APIKeys.Find(key)
+}
+
 // keyOK 报告请求是否携带了合法的网关密钥，**不写响应**——用于「同一端点按鉴权
 // 程度给不同详细度」的场景（见 handleHealth）。未配置 api_key 时与 authorized
 // 同口径：网关本就开放，直接视为通过。
 func (s *Server) keyOK(r *http.Request) bool {
-	if len(s.cfg.APIKeys) == 0 {
-		return true
-	}
-	key := apiKeyFrom(r)
-	for _, k := range s.cfg.APIKeys {
-		if k != "" && k == key {
-			return true
-		}
-	}
-	return false
+	_, ok := s.keyScope(r)
+	return ok
 }
 
 // authorized enforces the optional API-key gate.
@@ -367,9 +375,24 @@ func (s *Server) authorized(w http.ResponseWriter, r *http.Request) bool {
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
-	models := s.gw.ListModels(ctx)
+	k, _ := s.keyScope(r) // 已过 authorized
+	models := s.gw.ListModelsFor(ctx, k.Providers)
 	body, _ := json.Marshal(openai.ModelList{Object: "list", Data: models})
 	writeJSON(w, 200, body)
+}
+
+// allowModel 校验当前密钥是否有权使用该模型会路由到的供应商；越权写 403 并返回
+// false。刻意不做静默改道（改打到有权的供应商）——那等于绕过收窄，客户端会以为
+// 自己调的是 A 实际打到 B。也刻意不假装 404：排障时「不存在」比「无权限」更难查。
+func (s *Server) allowModel(w http.ResponseWriter, r *http.Request, model string) bool {
+	k, _ := s.keyScope(r) // 已过 authorized
+	prov := s.gw.ProviderOf(model)
+	if k.Allows(prov) {
+		return true
+	}
+	writeJSON(w, http.StatusForbidden, openai.ErrorJSON("model_not_allowed",
+		"api key is scoped to providers ["+strings.Join(k.Providers, ", ")+"]; requested model routes to provider "+prov))
+	return false
 }
 
 func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
@@ -381,6 +404,9 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	var req openai.ChatRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		writeJSON(w, 400, openai.ErrorJSON("invalid_json", "invalid JSON body: "+err.Error()))
+		return
+	}
+	if !s.allowModel(w, r, req.Model) {
 		return
 	}
 	s.gw.HandleChat(r.Context(), &req, w)
@@ -715,9 +741,12 @@ func decodeBody(r *http.Request, v any) error {
 // 标签、cooldowns/sessions 是调度状态、recent 是运行日志、addresses 是内网地址、
 // proxy_pools 是出站代理池——匿名放出去等于把账号清单和调度全貌挂在公网上
 // （WorkBuddy 侧同口径：/metrics 要求 api_key，/healthz 只回计数）。
+//
+// 收窄密钥（按供应商授权、发给客户端的那些）同样只拿最小身份标识：它是客户端凭据，
+// 只该能调自己那批模型，不该顺带读到账号清单与调度全貌。
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Service", "omnigate")
-	if !s.keyOK(r) {
+	if k, ok := s.keyScope(r); !ok || k.Scoped() {
 		// 最小身份标识：够探活与「是不是本服务」判别，不泄露任何运营数据。
 		writeJSON(w, 200, []byte(`{"status":"ok","service":"omnigate"}`))
 		return

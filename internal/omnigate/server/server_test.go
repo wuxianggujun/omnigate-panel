@@ -127,13 +127,17 @@ func TestServeLoggedAppliesStreamOutcome(t *testing.T) {
 }
 
 // TestHealthAnonymousHidesOpsDetail：/omni/healthz 恒无鉴权（编排探活只需状态码
-// 语义），但匿名 / 错 key 只能拿到最小身份标识。providers（含全部账号标签）、
-// cooldowns、sessions、recent（运行日志）、addresses（内网地址）、proxy_pools
-// 都是运营数据，匿名放出去等于把账号清单与调度全貌挂在公网。
+// 语义），但匿名 / 错 key / **收窄密钥** 只能拿到最小身份标识。providers（含全部
+// 账号标签）、cooldowns、sessions、recent（运行日志）、addresses（内网地址）、
+// proxy_pools 都是运营数据，匿名放出去等于把账号清单与调度全貌挂在公网；收窄密钥
+// 是发给客户端的凭据，只该能调自己那批模型，同样不该顺带读到这些。
 //
 // 这里故意把 gw 留成 nil：一旦走了明细分支就会 panic，等于反向证明没走。
 func TestHealthAnonymousHidesOpsDetail(t *testing.T) {
-	s := &Server{cfg: &config.Config{APIKeys: []string{"secret-key"}}}
+	s := &Server{cfg: &config.Config{APIKeys: config.APIKeyList{
+		{Key: "secret-key"},
+		{Key: "sk-rc", Name: "浣熊专用", Providers: []string{"raccoon"}},
+	}}}
 	cases := []struct {
 		name    string
 		headers map[string]string
@@ -141,6 +145,7 @@ func TestHealthAnonymousHidesOpsDetail(t *testing.T) {
 		{"no_key", nil},
 		{"wrong_key", map[string]string{"Authorization": "Bearer nope"}},
 		{"empty_bearer", map[string]string{"Authorization": "Bearer "}},
+		{"scoped_key", map[string]string{"Authorization": "Bearer sk-rc"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -186,7 +191,7 @@ func TestKeyOK(t *testing.T) {
 		t.Error("未配置 api_key 时应视为通过（网关本就开放，与 authorized 同口径）")
 	}
 
-	s := &Server{cfg: &config.Config{APIKeys: []string{"secret-key"}}}
+	s := &Server{cfg: &config.Config{APIKeys: config.APIKeyList{{Key: "secret-key"}}}}
 	cases := []struct {
 		name string
 		set  func(*http.Request)
@@ -206,5 +211,74 @@ func TestKeyOK(t *testing.T) {
 				t.Errorf("keyOK = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// scopeReq 造一个带密钥的请求（Bearer）。
+func scopeReq(key string) *http.Request {
+	r := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	if key != "" {
+		r.Header.Set("Authorization", "Bearer "+key)
+	}
+	return r
+}
+
+// TestKeyScopeNarrowsProviders 客户端密钥的授权范围必须如实解析：全量密钥放行所有
+// 供应商，收窄密钥只放行白名单内的。
+func TestKeyScopeNarrowsProviders(t *testing.T) {
+	s := &Server{cfg: &config.Config{
+		APIKeys: config.APIKeyList{
+			{Key: "sk-full"},
+			{Key: "sk-rc", Name: "浣熊专用", Providers: []string{"raccoon"}},
+		},
+		PanelKey: "sk-panel",
+	}}
+
+	k, ok := s.keyScope(scopeReq("sk-full"))
+	if !ok || !k.Allows("raccoon") || !k.Allows("runable") {
+		t.Errorf("全量密钥应放行所有供应商: ok=%v scope=%+v", ok, k)
+	}
+
+	k, ok = s.keyScope(scopeReq("sk-rc"))
+	if !ok || !k.Allows("raccoon") || k.Allows("runable") {
+		t.Errorf("收窄密钥只该放行 raccoon: ok=%v scope=%+v", ok, k)
+	}
+
+	if _, ok := s.keyScope(scopeReq("nope")); ok {
+		t.Error("未登记的密钥必须判为不通过")
+	}
+	if _, ok := s.keyScope(scopeReq("")); ok {
+		t.Error("未携带密钥必须判为不通过")
+	}
+}
+
+// TestKeyScopePanelKeyAlwaysFull 面板自己那把密钥（= config.json 的 api_key）必须恒为
+// 全量：面板前端要用它调 /omni/*，任何收窄规则都不能误伤它。
+func TestKeyScopePanelKeyAlwaysFull(t *testing.T) {
+	s := &Server{cfg: &config.Config{
+		APIKeys:  config.APIKeyList{{Key: "sk-rc", Providers: []string{"raccoon"}}},
+		PanelKey: "sk-panel",
+	}}
+	k, ok := s.keyScope(scopeReq("sk-panel"))
+	if !ok {
+		t.Fatal("面板密钥必须始终有效")
+	}
+	if !k.Allows("raccoon") || !k.Allows("runable") || !k.Allows("deepseek") {
+		t.Errorf("面板密钥必须恒为全量，得到 %+v", k)
+	}
+}
+
+// TestKeyScopePanelKeyLocksGateway api_keys 为空但注入了面板密钥时，网关**不能**被当成
+// 「未配置密钥、本就开放」——否则任何匿名请求都能直接打上游。
+func TestKeyScopePanelKeyLocksGateway(t *testing.T) {
+	s := &Server{cfg: &config.Config{PanelKey: "sk-panel"}}
+	if _, ok := s.keyScope(scopeReq("")); ok {
+		t.Error("只注入面板密钥时，匿名请求必须判为不通过")
+	}
+	if _, ok := s.keyScope(scopeReq("anything")); ok {
+		t.Error("只注入面板密钥时，错误密钥必须判为不通过")
+	}
+	if _, ok := s.keyScope(scopeReq("sk-panel")); !ok {
+		t.Error("面板密钥本身必须通过")
 	}
 }

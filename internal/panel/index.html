@@ -747,6 +747,22 @@
 
       <div class="box">
         <header>
+          <h3>网关密钥 <span class="hint">按供应商收窄：决定每把客户端密钥能用哪些模型</span></h3>
+          <span class="grow"></span>
+          <button class="xs" id="btnAddKey">+ 新增密钥</button>
+        </header>
+        <div class="pad">
+          <div class="og-hint" style="margin-top:0">发给客户端的 <code>/v1/*</code> 与 <code>/omni/v1/*</code> 密钥。不勾任何供应商 = <strong>全量</strong>（所有模型都能调）；勾选后该密钥只能调用这些供应商的模型，<code>/v1/models</code> 也会相应收窄，越权请求直接 <strong>403</strong>（不静默改道到别的供应商）。<br><strong>面板自己那把密钥恒为全量、不在本列表里</strong>（它是「配置」页的 <code>api_key</code>），所以在这里删光密钥也不会把面板锁死。改完点保存即热生效。</div>
+          <div id="keyEditor"></div>
+          <div class="og-row" style="margin-top:10px">
+            <button class="primary" id="btnSaveCfgKeys">保存并生效</button>
+            <span class="og-msg" id="keyMsg"></span>
+          </div>
+        </div>
+      </div>
+
+      <div class="box">
+        <header>
           <h3>上游模型目录 <span class="hint" id="modelCnt"></span></h3>
           <span class="grow"></span>
           <button class="xs" id="btnLoadModels">刷新模型</button>

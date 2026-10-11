@@ -111,7 +111,8 @@ func maskSecrets(v any, skipTop ...string) any {
 // maskGatewayKeys 额外抹掉顶层网关密钥 api_key / api_keys（返回同一份 map 的副本）。
 // 已登录的管理员要靠顶层 api_key 调 /omni/*，所以脱敏层默认跳过它；但**匿名只读**
 // 访问者绝不能拿到可用密钥，故匿名分支在读完之后再调一次本函数。
-// api_keys 是字符串数组（OmniGate 复用的同一把钥匙），逐元素脱敏。
+// api_keys 逐元素脱敏：元素可能是裸串（全量密钥）或对象（{"key":…,"providers":[…]}
+// 收窄密钥），两种形态都要盖住——否则收窄密钥会以明文回显给只读访问者。
 func maskGatewayKeys(v any) any {
 	m, ok := v.(map[string]any)
 	if !ok {
@@ -123,9 +124,22 @@ func maskGatewayKeys(v any) any {
 	if arr, ok := m["api_keys"].([]any); ok {
 		out := make([]any, len(arr))
 		for i, e := range arr {
-			if s, ok := e.(string); ok && s != "" && !isMasked(s) {
-				out[i] = maskSecret(s)
-				continue
+			switch t := e.(type) {
+			case string:
+				if t != "" && !isMasked(t) {
+					out[i] = maskSecret(t)
+					continue
+				}
+			case map[string]any:
+				if s, ok := t["key"].(string); ok && s != "" && !isMasked(s) {
+					cp := make(map[string]any, len(t))
+					for k, val := range t {
+						cp[k] = val
+					}
+					cp["key"] = maskSecret(s)
+					out[i] = cp
+					continue
+				}
 			}
 			out[i] = e
 		}

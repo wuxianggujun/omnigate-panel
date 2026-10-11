@@ -34,6 +34,13 @@ Runable、办公小浣熊（Raccoon）以及任意 OpenAI 兼容上游统一成�
   运行日志 / 内网地址 / 代理池等明细需带 `api_key`（未配置 `api_key` 时网关本就开放，按开放处理）。
 - **浣熊账号**支持浏览器授权登录（生成授权链接 → 粘贴 `office-raccoon://auth/callback?...` 回调），
   也支持直接粘贴 access/refresh token；账号与刷新后的 token 落盘在 `data/omnigate/state.json`。
+- **网关密钥可按供应商收窄**（`omnigate.json` 的 `api_keys`，面板「上游供应商」页有专门的密钥卡）：
+  发给客户端的密钥可以只放行指定的供应商，`/v1/models` 与 `/omni/v1/models` 会相应收窄成它有权用的
+  那批模型，越权请求直接 `403 model_not_allowed`（**不静默改道**到别的供应商，否则等于绕过收窄）。
+  两种写法都支持——裸串 `"sk-xxx"` = 全量；对象
+  `{"key":"sk-xxx","name":"raccoon 专用","providers":["raccoon"]}` = 只放行 `raccoon`。
+  面板自己那把密钥（`config.json` 的 `api_key`）**恒为全量且不落进 `omnigate.json`**，所以在密钥卡里
+  删光密钥也不会把面板锁死；`api_keys` 为空且未注入面板密钥时网关仍按「本就开放」处理（行为不变）。
 - OmniGate 使用**独立配置文件** `omnigate.json`（示例见 `omnigate.example.json`），与面板的
   `config.json` 互不干扰；面板 `config.json` 里的 `omnigate_config` 指向它（缺省 `./omnigate.json`）。
   文件不存在时自动跳过，面板其余功能照常运行。

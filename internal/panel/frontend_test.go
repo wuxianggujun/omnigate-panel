@@ -1178,3 +1178,56 @@ func TestUsagePageSurfacesInterruptedRequests(t *testing.T) {
 		t.Error("theme.css 缺少 .usgap 提示样式")
 	}
 }
+
+// TestAppJSGatewayKeyCard 钉住「网关密钥」卡的归一与范围判定。
+//
+// api_keys 允许裸串（全量，历史写法）与对象（可收窄到指定供应商）两种形态，编辑器
+// 必须把两者归一成同一形状，否则裸串条目在卡里会渲染成空。角标必须如实反映授权范围
+// ——「全量 / 收窄」是运维判断「这把钥匙能调什么」的唯一线索，标错会直接误判权限。
+func TestAppJSGatewayKeyCard(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; gateway key card test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const start = src.indexOf('/* ── 网关密钥（按供应商收窄');
+const end = src.indexOf('async function saveOmniConfig');
+if (start < 0 || end < 0 || end < start) throw new Error('gateway key region not found');
+const ctx = { JSON, Math, Array, Object, String, Number, isNaN, esc: s => String(s == null ? '' : s) };
+vm.createContext(ctx);
+vm.runInContext(src.slice(start, end) + '\nthis.normOmniKeys = normOmniKeys; this.keyCard = keyCard;', ctx);
+ctx.omniCfg = {
+  providers: [{ name: 'raccoon' }, { name: 'runable' }],
+  api_keys: ['sk-full', { key: 'sk-rc', name: '浣熊专用', providers: ['raccoon'] }],
+};
+const keys = ctx.normOmniKeys();
+const cards = keys.map((k, i) => ctx.keyCard(k, i));
+process.stdout.write(JSON.stringify({
+  norm: keys,
+  fullTag: cards[0].includes('<span class="tag ok">全量</span>'),
+  scopedTag: cards[1].includes('<span class="tag warn">收窄</span>'),
+  keepsFullKey: cards[0].includes('sk-full'),
+  keepsName: cards[1].includes('浣熊专用'),
+  raccoonChecked: cards[1].includes('value="raccoon" checked'),
+  runableChecked: cards[1].includes('value="runable" checked'),
+}));`
+	f, err := os.CreateTemp(t.TempDir(), "gwkey-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("gateway key card node test failed: %v\n%s", err, out)
+	}
+	const want = `{"norm":[{"key":"sk-full","name":"","providers":[]},{"key":"sk-rc","name":"浣熊专用","providers":["raccoon"]}],` +
+		`"fullTag":true,"scopedTag":true,"keepsFullKey":true,"keepsName":true,"raccoonChecked":true,"runableChecked":false}`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("gateway key card=%s\nwant %s", out, want)
+	}
+}

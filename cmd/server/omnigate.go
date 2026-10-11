@@ -123,10 +123,16 @@ func newOmniManager(cfg *Config, requestLog *reqlog.Recorder, usageRec *usage.Re
 
 // build 由配置构建一份新运行时（不动旧运行时）。
 func (m *omniManager) build(cfg *omniconfig.Config) (*omniRuntime, error) {
-	// 面板 api_key 复用为 OmniGate 的 API key（面板前端同一把钥匙即可调用 /omni/*）。
-	if len(cfg.APIKeys) == 0 && m.apiKey != "" {
-		cfg.APIKeys = []string{m.apiKey}
-	}
+	// 面板 api_key 复用为 OmniGate 的网关密钥（面板前端同一把钥匙即可调用 /omni/*）。
+	// 它走独立的 PanelKey（不落盘、恒全量），刻意不混进面向客户端的 api_keys：
+	// 混进去会被写进 omnigate.json，轮换 api_key 后旧钥匙仍残留在文件里继续可用，
+	// 而且它会出现在面板的「网关密钥」卡里、被误当成一把可删的客户端密钥。
+	cfg.PanelKey = m.apiKey
+	// 兼容历史形态：早期版本把面板密钥写进了 api_keys（当时「api_keys 为空才注入」，而
+	// 保存时又整段保留运行时值，于是它被持久化进了文件）。PanelKey 已经覆盖了它，这里
+	// 把它从面向客户端的列表里摘掉——否则它会以「一把全量客户端密钥」的形态出现在面板
+	// 的密钥卡里，既误导又容易手滑删错。
+	cfg.APIKeys = dropAPIKey(cfg.APIKeys, m.apiKey)
 	gw, err := omnigateway.New(cfg, m.st, m.logger,
 		omnigateway.WithProxyResolver(m.proxyFor),
 		omnigateway.WithPoolResolver(m.poolFor),
@@ -146,6 +152,21 @@ func (m *omniManager) build(cfg *omniconfig.Config) (*omniRuntime, error) {
 	// 代理池状态：让 /omni/healthz 能看到各池的存活/候选数。
 	srv.SetPoolStatus(func() any { return m.PoolStatuses() })
 	return &omniRuntime{cfg: cfg, gw: gw, sched: sched, srv: srv}, nil
+}
+
+// dropAPIKey 返回去掉指定 key 后的列表（key 为空时原样返回）。用于把历史版本持久化
+// 进 api_keys 的面板密钥摘掉——PanelKey 已经覆盖它，留在列表里只会被当成客户端密钥。
+func dropAPIKey(list omniconfig.APIKeyList, key string) omniconfig.APIKeyList {
+	if key == "" {
+		return list
+	}
+	out := make(omniconfig.APIKeyList, 0, len(list))
+	for _, k := range list {
+		if k.Key != key {
+			out = append(out, k)
+		}
+	}
+	return out
 }
 
 // proxyFor 把某供应商解析成出站代理（来自面板 outbound 路由的
@@ -184,6 +205,7 @@ func (m *omniManager) Models(ctx context.Context) (any, error) {
 func (m *omniManager) SetAPIKey(key string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	oldKey := m.apiKey
 	m.apiKey = key
 	if m.st == nil {
 		return nil
@@ -192,7 +214,8 @@ func (m *omniManager) SetAPIKey(key string) error {
 	if rt == nil {
 		return nil
 	}
-	// 深拷贝当前配置并清空 api_keys：build 会用新的 m.apiKey 回填（见 build）。
+	// 深拷贝当前配置后重建：面向客户端的 api_keys 原样保留，只有 PanelKey 换成新值
+	//（见 build）。
 	raw, err := json.Marshal(rt.cfg)
 	if err != nil {
 		return err
@@ -201,7 +224,9 @@ func (m *omniManager) SetAPIKey(key string) error {
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		return err
 	}
-	cfg.APIKeys = nil
+	// 轮换后面板旧密钥必须立刻失效：历史版本把它持久化进了 api_keys，不摘掉的话它会以
+	// 「一把全量客户端密钥」的形态继续可用（文件里还留着）。build 会再摘一次新值。
+	cfg.APIKeys = dropAPIKey(cfg.APIKeys, oldKey)
 	newRT, err := m.build(&cfg)
 	if err != nil {
 		return err
@@ -296,11 +321,11 @@ func (m *omniManager) Save(raw []byte) ([]string, error) {
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		return nil, fmt.Errorf("解析配置失败: %w", err)
 	}
-	// 保留服务端/运行时字段：面板不编辑 server/data_dir/api_keys。
+	// 保留服务端/运行时字段：面板不编辑 server / data_dir（api_keys 现在由面板的
+	// 「网关密钥」卡管理，故不再保留——它已不再是纯运行时字段）。
 	if rt := m.cur.Load(); rt != nil {
 		cfg.Server = rt.cfg.Server
 		cfg.DataDir = rt.cfg.DataDir
-		cfg.APIKeys = rt.cfg.APIKeys
 	}
 	if err := cfg.Normalize(); err != nil {
 		return nil, err

@@ -438,8 +438,24 @@ func (g *Gateway) pickAccount(name string) *provider.Account {
 
 // ListModels aggregates every provider's models, prefixed with "provider/".
 func (g *Gateway) ListModels(ctx context.Context) []openai.Model {
+	return g.ListModelsFor(ctx, nil)
+}
+
+// ListModelsFor 同 ListModels，但只聚合 allowed 中列出的 provider（空 = 全部）。
+// 供按供应商收窄的入站密钥使用：客户端只该看到自己有权调用的模型。
+func (g *Gateway) ListModelsFor(ctx context.Context, allowed []string) []openai.Model {
+	var allow map[string]bool
+	if len(allowed) > 0 {
+		allow = make(map[string]bool, len(allowed))
+		for _, name := range allowed {
+			allow[name] = true
+		}
+	}
 	out := []openai.Model{}
 	for _, name := range g.order {
+		if allow != nil && !allow[name] {
+			continue
+		}
 		models, err := g.models(ctx, name)
 		if err != nil {
 			g.log.Warn("获取 %s 模型失败: %v", name, err)
@@ -454,6 +470,15 @@ func (g *Gateway) ListModels(ctx context.Context) []openai.Model {
 		}
 	}
 	return out
+}
+
+// ProviderOf 返回该模型会被路由到的 provider 名（与 route 同口径：带 "provider/"
+// 前缀且前缀是已知 provider 时用前缀，否则回落默认 provider）。供入站密钥的
+// 授权校验使用——校验必须与实际路由同源，否则会出现「放行了却打不到」或
+// 「拦住了却能打」。
+func (g *Gateway) ProviderOf(model string) string {
+	name, _ := g.route(model)
+	return name
 }
 
 // route splits a requested model into (provider, upstream model).

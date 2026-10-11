@@ -471,7 +471,8 @@ async function bootstrapAuth() {
   try { s = await (await fetch('/panel/api/session')).json(); }
   catch (e) { s = { authenticated: false, configured: false, mode: '' }; }
   authState = Object.assign({ authenticated: false, configured: false, mode: '', username: '', role: '', allowRegistration: false }, s);
-  if (!authState.configured) authState.allowRegistration = false;
+  // 会话接口用 snake_case 的 allow_registration；统一成前端用的驼峰字段。
+  authState.allowRegistration = !!(s && s.allow_registration) && authState.configured;
   setAuthMode('login');
   applyRole();
   closeGates();

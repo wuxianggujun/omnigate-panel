@@ -3100,24 +3100,34 @@ function renderRecon(hist) {
 
   const winH = Math.max(1, Math.round((hist.window_sec || 0) / 3600));
   const clampH = Math.max(1, Math.round((hist.retention_sec || 0) / 3600));
-  // 请求窗口比保留期长（如「全部历史」）：余额侧只能覆盖保留期那一段，如实标注。
-  const clamped = (hist.window_sec || 0) > (hist.retention_sec || 0);
-  const effH = clamped ? clampH : winH;
+  // requested_sec 是客户端请求的窗口（0 = 全部历史）。它与实到窗口不同 = 用量侧比
+  // 余额历史宽（如「全部历史」覆盖 90 天，而历史只留 26h）：两侧覆盖区间不同，
+  // 必须显式说明，否则差额会被读成「记账漏了」。
+  const reqSec = Number(hist.requested_sec || 0);
+  const clamped = reqSec === 0 || reqSec > Number(hist.retention_sec || 0);
   const head = $('usReconDeltaHead');
-  if (head) head.textContent = '近 ' + effH + 'h Δ';
+  if (head) head.textContent = '近 ' + winH + 'h Δ';
 
+  const none = covered === 0;
   const diffOk = Math.abs(diffTotal) <= 0.5;
   $('usReconStats').innerHTML =
     usKpi(fmtCredit(creditedTotal), '计费用量', 'c-accent', 'Σ 上游 usage.credit（本窗口）') +
-    usKpi(fmtCredit(netTotal), '余额净变化', netTotal < 0 ? 'c-warn' : 'c-ok', 'Δ 余额合计（负 = 掉了）') +
-    usKpi((diffTotal > 0 ? '+' : '') + fmtCredit(diffTotal), '差额', diffOk ? 'c-ok' : 'c-warn',
-      '计费用量 + 余额净变化，正常 ≈ 0') +
+    usKpi(none ? '—' : fmtCredit(netTotal), '余额净变化',
+      none ? 'c-mute' : (netTotal < 0 ? 'c-warn' : 'c-ok'), 'Δ 余额合计（负 = 掉了）') +
+    usKpi(none ? '—' : (diffTotal > 0 ? '+' : '') + fmtCredit(diffTotal), '差额',
+      none ? 'c-mute' : (diffOk ? 'c-ok' : 'c-warn'), '计费用量 + 余额净变化，正常 ≈ 0') +
     usKpi(String(covered), '覆盖账号', 'c-mute', covered + ' / ' + hist.accounts.length + ' 个有足够历史');
 
   const hintWrap = $('usReconHintWrap');
   if (hintWrap) {
     let msg;
-    if (diffOk) {
+    if (none) {
+      // 没有账号算得出 Δ余额时，绝不能把「计费用量 + 0」当成差额去喊「积分过期」——
+      // 那只是还没有历史，不是真的多掉了。刚部署 / 刚重启后必然经过这个状态。
+      msg = '余额快照历史刚启用，或采样还不足（需至少 10 分钟覆盖）：' + hist.accounts.length
+        + ' 个账号都还没有可用的 Δ余额，暂不能对账。余额每 5 分钟刷新一次，'
+        + '下一轮刷新后这里会自动出现数字。';
+    } else if (diffOk) {
       msg = '✓ 对得上：本窗口计费用量合计 <b>' + fmtCredit(creditedTotal) + '</b>，余额净变化 <b>'
         + fmtCredit(netTotal) + '</b>，差额在 ±0.5 以内。';
     } else if (diffTotal > 0) {
@@ -3129,18 +3139,20 @@ function renderRecon(hist) {
       msg = '本窗口有 <b>' + fmtCredit(-diffTotal) + '</b> 分入账（签到奖励 / 充值），'
         + '所以余额掉得比计费用量少——不是记账漏了。';
     }
-    if (clamped) {
-      msg += '（余额快照历史只保留 ' + clampH + 'h，窗口更长时只对得上这一段；'
-        + '用量侧的窗口更宽，故两侧覆盖区间不同。）';
+    if (!none && covered < hist.accounts.length) {
+      msg += '（' + (hist.accounts.length - covered) + ' 个账号样本不足，未计入余额合计：'
+        + '上面的差额只覆盖 ' + covered + ' 个账号。）';
     }
-    if (covered < hist.accounts.length) {
-      msg += '（' + (hist.accounts.length - covered) + ' 个账号样本不足，未计入余额合计。）';
+    if (!none && clamped) {
+      msg += '（余额快照历史只保留 ' + clampH + 'h，而用量窗口更长：两侧覆盖区间不同，'
+        + '差额只反映这 ' + clampH + 'h 内的余额变化。）';
     }
     $('usReconHint').innerHTML = msg;
     hintWrap.hidden = false;
   }
 
-  $('usReconNote').textContent = '近 ' + effH + 'h · ' + covered + ' 个账号有足够历史 · 每 5 分钟一次采样';
+  $('usReconNote').textContent = '近 ' + winH + 'h · ' + covered + ' 个账号有足够历史 · 每 5 分钟一次采样'
+    + (clamped ? ' · ⚠ 用量窗口更长' : '');
   $('usReconBody').innerHTML = rows.map(r => {
     const h = r.h, meta = r.meta;
     const nick = meta.nickname ? esc(meta.nickname) : '<span style="color:var(--ink-3)">未命名</span>';

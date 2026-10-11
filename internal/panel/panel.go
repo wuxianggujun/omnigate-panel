@@ -1061,6 +1061,10 @@ func (p *Panel) creditsHistory(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	// 窗口非法 / 「全部历史」/ 超出保留期：能给的只有保留期那一段。
+	// requested 是客户端请求的窗口（0 = 全部历史），单独回给前端——用量侧的窗口
+	// 可以比保留期宽得多（如「全部历史」），此时两侧覆盖区间不同，前端必须能
+	// 如实说明「这个差额只反映最近 26h」，否则会被读成「记账漏了」。
+	requested := window
 	if window <= 0 || window > credithist.Retention {
 		window = credithist.Retention
 	}
@@ -1071,6 +1075,7 @@ func (p *Panel) creditsHistory(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"window_sec":    int64(window.Seconds()),
+		"requested_sec": int64(requested.Seconds()),
 		"retention_sec": int64(credithist.Retention.Seconds()),
 		"now":           now.Format(time.RFC3339),
 		"series_points": creditHistoryPoints,

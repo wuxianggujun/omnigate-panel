@@ -63,6 +63,9 @@ func TestCreditsHistoryWindowAndNet(t *testing.T) {
 	if got := out["window_sec"]; got != float64(86400) {
 		t.Fatalf("window_sec=%v want 86400", got)
 	}
+	if got := out["requested_sec"]; got != float64(86400) {
+		t.Fatalf("requested_sec=%v want 86400（未封顶）", got)
+	}
 	accts, _ := out["accounts"].([]any)
 	if len(accts) != 2 {
 		t.Fatalf("admin 应看到 2 个账号，得到 %d", len(accts))
@@ -90,13 +93,22 @@ func TestCreditsHistoryWindowAndNet(t *testing.T) {
 }
 
 // 「全部历史」（hours=0）只能给保留期那一段：window_sec 回落到 Retention，
-// 前端据此如实标注，不假装成无限窗口。
+// 但 requested_sec 必须如实回 0 —— 前端据此说明「用量窗口更长，两侧区间不同」。
 func TestCreditsHistoryClampsToRetention(t *testing.T) {
 	p := reconFixture(t)
 	out := getHistory(t, p, reqAs("alice", panelauth.RoleAdmin), "hours=0")
 	want := float64(int64(credithist.Retention.Seconds()))
 	if out["window_sec"] != want {
 		t.Fatalf("window_sec=%v want %v（保留期）", out["window_sec"], want)
+	}
+	if out["requested_sec"] != float64(0) {
+		t.Fatalf("requested_sec=%v want 0（全部历史）", out["requested_sec"])
+	}
+	// 显式 48h 同样被保留期封顶，但 requested_sec 如实回 48h。
+	out = getHistory(t, p, reqAs("alice", panelauth.RoleAdmin), "hours=48")
+	if out["window_sec"] != want || out["requested_sec"] != float64(48*3600) {
+		t.Fatalf("hours=48: window=%v requested=%v want %v / 172800",
+			out["window_sec"], out["requested_sec"], want)
 	}
 }
 

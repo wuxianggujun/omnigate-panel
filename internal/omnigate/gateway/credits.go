@@ -106,6 +106,33 @@ func (c *creditCache) endRefresh(prov string) {
 	c.mu.Unlock()
 }
 
+// copyFrom 把另一份缓存的快照搬进来（热重载时沿用旧网关的余额快照）。
+func (c *creditCache) copyFrom(old *creditCache) {
+	old.mu.Lock()
+	snap := make(map[string]creditSnapshot, len(old.m))
+	for k, v := range old.m {
+		snap[k] = v
+	}
+	old.mu.Unlock()
+	c.mu.Lock()
+	for k, v := range snap {
+		c.m[k] = v
+	}
+	c.mu.Unlock()
+}
+
+// ShareCreditsFrom 把旧网关的余额快照搬进本网关。
+//
+// 为什么需要：保存配置 / 改出站代理都会重建网关，而余额快照是进程内缓存——不搬运的话，
+// 每次保存配置后面板上的「快过期」角标与快过期优先选号都会短暂失效（直到下一个请求触发
+// 后台刷新）。角标恰好在用户盯着「积分快过期优先」卡片保存时消失，看起来像功能坏了。
+func (g *Gateway) ShareCreditsFrom(old *Gateway) {
+	if g == nil || old == nil || g.credits == nil || old.credits == nil {
+		return
+	}
+	g.credits.copyFrom(old.credits)
+}
+
 // expiryOf 推导一个钱包的到期时刻：daily → 下一个本地零点；monthly → 下月 1 日
 // 本地零点；none → 零值（无已知到期）。上游只给钱包金额、不给逐笔时间戳，所以到期
 // 时刻由「重置节奏 + 本地时区」推导（容器 TZ 决定本地时区）。

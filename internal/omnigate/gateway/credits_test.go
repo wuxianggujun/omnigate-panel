@@ -146,3 +146,23 @@ func TestCreditExpiringSnapshot(t *testing.T) {
 		t.Error("应返回最早到期时刻")
 	}
 }
+
+// 热重载（保存配置 / 改代理）会重建网关，快照必须被搬过来——否则面板角标会在
+// 用户盯着「积分快过期优先」卡片保存时消失，看起来像功能坏了。
+func TestShareCreditsFrom(t *testing.T) {
+	old := creditGateway(nil)
+	old.noteCredits("raccoon", "a", 472, []creditWallet{{Kind: creditDaily, Amount: 472}})
+	fresh := creditGateway(nil)
+	if _, _, ok := fresh.CreditExpiring("raccoon", "a"); ok {
+		t.Fatal("新网关不该有快照")
+	}
+	fresh.ShareCreditsFrom(old)
+	if exp, _, ok := fresh.CreditExpiring("raccoon", "a"); !ok || exp != 472 {
+		t.Fatalf("搬运后 expiring=%d ok=%v want 472/true", exp, ok)
+	}
+	// 搬的是快照副本：旧网关随后的写入不该影响新网关。
+	old.noteCredits("raccoon", "a", 1, []creditWallet{{Kind: creditDaily, Amount: 1}})
+	if exp, _, _ := fresh.CreditExpiring("raccoon", "a"); exp != 472 {
+		t.Fatalf("搬运后不应被旧网关的后续写入影响, got %d", exp)
+	}
+}

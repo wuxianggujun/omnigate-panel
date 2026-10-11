@@ -142,6 +142,11 @@ func (m *omniManager) build(cfg *omniconfig.Config) (*omniRuntime, error) {
 	if err != nil {
 		return nil, err
 	}
+	// 热重载会重建网关（余额快照是进程内缓存，随之清空）。把旧网关的快照搬过来，
+	// 否则每次保存配置后面板上的「快过期」角标与快过期优先选号都会短暂失效。
+	if prev := m.cur.Load(); prev != nil {
+		gw.ShareCreditsFrom(prev.gw)
+	}
 	sched := omnisched.New(cfg, gw, m.logger)
 	sched.Start()
 	srv := omnisrv.New(cfg, gw, m.logger)

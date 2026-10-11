@@ -120,6 +120,10 @@ type chatResult struct {
 	// sawData 表示本次流至少产生过一个「有效帧」（正文 / 思考 / 工具调用）。
 	// 全 false = 上游 200 但空流，按失败观测（与非流式空响应同语义）。
 	sawData bool
+	// sawFinish 表示上游真的发过 finish_reason 帧。注意 res.finish 默认就是
+	// "stop"（上游没发 finish 时客户端也要看到一个结束原因），所以判断「上游是否
+	// 正常收尾」只能看这个标记，不能看 res.finish 是否为空。
+	sawFinish bool
 	// sample 是上游「产生不了任何有效帧」的原始片段（非 SSE 的 JSON 体 / 无法识别
 	// 的帧）。只在 0 帧失败时用于日志与错误信息，让上游的真实说法不再被静默吞掉。
 	sample []byte
@@ -573,7 +577,7 @@ func (g *Gateway) HandleChat(ctx context.Context, req *openai.ChatRequest, w htt
 			flush()
 			return
 		}
-		if !res.sawData && res.finish == "" {
+		if !res.sawData && !res.sawFinish {
 			// 上游 200 但空流（0 有效帧）、且连 finish_reason 都没发：不是成功。写
 			// error 帧兜底，并用 502 观测（与非流式空响应同语义）。上游原文一并带出：
 			// 这类失败最常见的成因是上游用 200 回了一个非 SSE 的 JSON 错误体（限流 /
@@ -619,7 +623,7 @@ func (g *Gateway) HandleChat(ctx context.Context, req *openai.ChatRequest, w htt
 		writeJSON(w, 502, openai.ErrorJSON("upstream_error", err.Error()))
 		return
 	}
-	if !res.sawData && res.finish == "" {
+	if !res.sawData && !res.sawFinish {
 		// 上游 200 但空响应（0 有效帧）、且连 finish_reason 都没发：上游确实断了，不是
 		// 成功。上游原文一并带出，原因见流式分支的同名注释。
 		g.log.Error("对话失败 %s: 上游空响应 finish=%q%s", displayModel, res.finish, sampleSuffix(res.sample))
@@ -762,6 +766,7 @@ func (g *Gateway) runChat(ctx context.Context, provName string, prov provider.Pr
 				}
 			case provider.EventFinish:
 				res.finish = e.Finish
+				res.sawFinish = true
 			case provider.EventUsage:
 				res.usage = e.Usage
 			case provider.EventError:
@@ -844,6 +849,7 @@ func (g *Gateway) runChat(ctx context.Context, provName string, prov provider.Pr
 			res.toolCalls = append(res.toolCalls, e.ToolCalls...)
 		case provider.EventFinish:
 			res.finish = e.Finish
+			res.sawFinish = true
 		case provider.EventUsage:
 			res.usage = e.Usage
 		case provider.EventError:

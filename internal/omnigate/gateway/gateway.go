@@ -558,15 +558,10 @@ func (g *Gateway) HandleChat(ctx context.Context, req *openai.ChatRequest, w htt
 	id := openai.NewID()
 	created := time.Now().Unix()
 
-	// 预检：上游对单条 prompt 有字符数硬上限（runable = 8000，见 runable.MaxPromptChars）。
-	// 必须在写响应头之前判掉——流式请求一旦发出 200，就只能把错误塞进 SSE error 帧，
-	// 客户端只会看到「stream disconnected before completion」而不知道该改什么；提前
-	// 拒绝同时也省下一次注定失败的上游调用。
-	if err := g.checkPromptLimit(prov, upstreamModel, req, hasTools); err != nil {
-		g.log.Warn("拒绝超长请求 %s: %v", displayModel, err)
-		writeJSON(w, 400, openai.ErrorJSON("prompt_too_long", err.Error()))
-		return
-	}
+	// 上游对单条 prompt 有字符数硬上限（runable = 8000，见 runable.MaxPromptChars）。
+	// 超限不再整条拒掉，而是在 buildInput 里从中间截断后照跑：用户拿得到回答，
+	// 不用自己数字数（代价是静默丢一点上下文）。截断发生在拼 prompt 的那一步，
+	// 所以流式/非流式、工具路径/非工具路径走的是同一套口径。
 	in := g.buildInput(prov, upstreamModel, req, incognito, hasTools)
 
 	if req.Stream {
@@ -781,43 +776,34 @@ func (g *Gateway) runablePrompt(model string, msgs []openai.Message, advance boo
 	return prompt
 }
 
-// previewPromptChars 只读估算「这次请求会送给上游的 prompt 字符数」。第二个返回值
-// 为 false 表示该供应商不是单条 prompt 形态（长度无法用这个口径衡量，不预检）。
-func (g *Gateway) previewPromptChars(prov provider.Provider, model string, req *openai.ChatRequest, hasTools bool) (int, bool) {
-	switch {
-	case hasTools && prov.Type() == "runable":
-		return utf8.RuneCountInString(toolcall.BuildToolPrompt(req.Messages, req.Tools)), true
-	case prov.Type() == "runable":
-		return utf8.RuneCountInString(g.runablePrompt(model, req.Messages, false)), true
-	default:
-		return 0, false
+// clampPrompt 把单条 prompt 压到上游硬上限以内：超长时保留开头与结尾、从中间省略，
+// 并插入一条说明省略了多少字符的标记（见 util.ClipMiddle）。limit <= 0 表示不限制。
+// 第二个返回值是原始字符数，供日志使用。
+func clampPrompt(s string, limit int) (string, int) {
+	n := utf8.RuneCountInString(s)
+	if limit <= 0 || n <= limit {
+		return s, n
 	}
+	return util.ClipMiddle(s, limit), n
 }
 
-// checkPromptLimit 在写 HTTP 响应头之前预检单条 prompt 长度。超限时返回错误，调用方
-// 直接回 400：流式请求一旦发出 200 响应头，就只能把错误塞进 SSE error 帧，客户端表现
-// 为「流莫名断了」；提前判掉还能省下一次注定失败的上游调用。
-func (g *Gateway) checkPromptLimit(prov provider.Provider, model string, req *openai.ChatRequest, hasTools bool) error {
-	limit := g.promptLimit(prov)
-	if limit <= 0 {
-		return nil
-	}
-	n, ok := g.previewPromptChars(prov, model, req, hasTools)
-	if !ok || n <= limit {
-		return nil
-	}
-	return &promptTooLongErr{Provider: prov.Name(), Limit: limit, Actual: n}
-}
-
-// buildInput 组装发给上游的 ChatInput。原先内联在 runChat 里；提到调用上游之前是为了
-// 能先做 prompt 长度预检（见 checkPromptLimit）。
+// buildInput 组装发给上游的 ChatInput。单条 prompt 形态的供应商（runable）在这里
+// 统一套用上游字符上限：超长从中间截断后照跑（见 clampPrompt），而不是拒掉请求。
 func (g *Gateway) buildInput(prov provider.Provider, model string, req *openai.ChatRequest, incognito, hasTools bool) provider.ChatInput {
+	limit := g.promptLimit(prov)
+	clamp := func(s string) string {
+		out, raw := clampPrompt(s, limit)
+		if out != s {
+			g.log.Warn("截断超长请求 %s/%s: %d → %d 字符", prov.Name(), model, raw, utf8.RuneCountInString(out))
+		}
+		return out
+	}
 	// Prompt-based providers need emulated tool calling.
 	if hasTools && prov.Type() == "runable" {
 		return provider.ChatInput{
 			ChatID:    util.UUID(),
 			Model:     model,
-			Prompt:    toolcall.BuildToolPrompt(req.Messages, req.Tools),
+			Prompt:    clamp(toolcall.BuildToolPrompt(req.Messages, req.Tools)),
 			Incognito: incognito,
 			Mode:      g.cfg.Mode,
 		}
@@ -845,7 +831,7 @@ func (g *Gateway) buildInput(prov provider.Provider, model string, req *openai.C
 		in.Tools = req.Tools
 	} else if prov.Type() == "runable" {
 		in.ChatID = g.getConv(toolcall.ConvKey(model, req.Messages)).chatID
-		in.Prompt = g.runablePrompt(model, req.Messages, true)
+		in.Prompt = clamp(g.runablePrompt(model, req.Messages, true))
 	} else {
 		in.Messages = req.Messages
 	}

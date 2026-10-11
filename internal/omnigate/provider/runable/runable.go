@@ -26,8 +26,8 @@ const userAgent = "Mozilla/5.0 (compatible; omnigate/1.0)"
 // MaxPromptChars 是上游对「单条 prompt」的字符数硬上限。实测：/api/chat/text、
 // /api/chat/incognito、/api/chat/agent 三种模式同一个闸（在模式分发之前就拦），
 // 且与模型自报的上下文窗口无关（1M 窗口的 glm-5.3-flash 也一样）——8000 字符
-// 通过、8001 拒绝，超限时上游回 400 PROMPT_LIMIT_EXCEEDED。网关据此在调用上游
-// 之前预检，避免注定失败的请求白跑一趟上游。
+// 通过、8001 拒绝，超限时上游回 400 PROMPT_LIMIT_EXCEEDED。网关据此在拼 prompt
+// 时把超长内容从中间截断（见 gateway.clampPrompt），让请求照常跑完。
 const MaxPromptChars = 8000
 
 // Client talks to the Runable API.

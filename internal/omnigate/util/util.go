@@ -40,6 +40,39 @@ func Clip(s string, n int) string {
 	return s[:n] + "…(truncated)"
 }
 
+// clipMiddleReserve is the maximum rune budget reserved for the elision marker
+// ClipMiddle inserts. The marker itself is ~20 runes; the slack covers a very
+// long omitted-rune count so the result can never exceed the requested n.
+const clipMiddleReserve = 48
+
+// ClipMiddle truncates s to at most n runes by keeping the head and the tail and
+// eliding the middle, inserting a marker that says how many runes were dropped.
+// Unlike Clip it is rune-safe (never splits a multi-byte character), and it keeps
+// the end of the text — which is where the newest turn / tool instructions live
+// when a whole conversation is flattened into one prompt. n <= 0, or a string
+// that already fits, is returned unchanged.
+func ClipMiddle(s string, n int) string {
+	if n <= 0 {
+		return s
+	}
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	keep := n - clipMiddleReserve
+	if keep < 1 {
+		// Budget too small to fit the marker: hard-cut (still rune-safe).
+		return string(r[:n])
+	}
+	// Keep a third at the head (system prompt / opening question) and two thirds
+	// at the tail (latest turns / tool protocol).
+	head := keep / 3
+	tail := keep - head
+	omitted := len(r) - keep
+	marker := fmt.Sprintf("\n\n…（中间省略 %d 个字符）…\n\n", omitted)
+	return string(r[:head]) + marker + string(r[len(r)-tail:])
+}
+
 // Collapse collapses all runs of whitespace into single spaces and trims.
 func Collapse(s string) string {
 	out := make([]rune, 0, len(s))

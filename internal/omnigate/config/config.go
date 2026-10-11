@@ -159,8 +159,8 @@ type ProviderConfig struct {
 	Accounts  []AccountConfig `json:"accounts"`
 	// MaxPromptChars 是「单条 prompt 字符数」上限（上游硬限制，见 runable
 	// MaxPromptChars）。只对把整段对话拼成单条 prompt 的供应商（runable）生效：
-	// 超限时网关在调用上游之前直接回 400，不浪费一次上游请求。0 = 用该类型的
-	// 默认值，负数 = 关闭这项检查。
+	// 超限时网关保留开头与结尾、从中间省略后照跑（静默丢一点上下文），不再整条
+	// 拒绝。0 = 用该类型的默认值，负数 = 关闭这项限制（超长原样转发给上游）。
 	MaxPromptChars int `json:"max_prompt_chars,omitempty"`
 }
 

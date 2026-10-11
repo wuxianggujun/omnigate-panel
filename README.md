@@ -27,6 +27,7 @@ Runable、办公小浣熊（Raccoon）以及任意 OpenAI 兼容上游统一成�
   统一账号池（「账号池」页）聚合展示 WorkBuddy 与 OmniGate 全部账号（含「来源」列与来源筛选）。
   全部与主面板同源、共用同一把 API Key（旧地址 `/panel/omni/` 302 跳转到账号池）。
 - OmniGate 的 API 挂载在 **`/omni/`** 前缀下：`/omni/v1/models`、`/omni/v1/chat/completions`、
+  `/omni/v1/responses`（OpenAI Responses API，翻译层与 `/v1/responses` 共用）、
   `/omni/admin/raccoon/*`（浏览器授权、账号、余额、签到、移除）、`/omni/healthz`。
   `/omni/healthz` 与 WorkBuddy 侧同口径：**探活恒无鉴权**，但匿名只回最小身份标识
   （`{"status":"ok","service":"omnigate"}` + `X-Service` 头）；账号标签 / 冷却 / 会话绑定 /
@@ -743,6 +744,7 @@ omnigate-panel -set-admin-password
 | 端点 | 鉴权 | 说明 |
 |---|---|---|
 | `POST /v1/chat/completions` | Bearer（`api_key` 非空时） | OpenAI 兼容补全；流式/非流式；请求体上限 8 MiB |
+| `POST /v1/responses` | Bearer（`api_key` 非空时） | OpenAI Responses API（翻译成 chat 请求复用同一条流水线，翻译细节见 `internal/responses`）；`store` / `previous_response_id` 会话续写（进程内 30 分钟 TTL）。上游按 `max_output_tokens` 截断时（流式与非流式一致）终局 `status=incomplete` + `incomplete_details.reason=max_output_tokens`；流式终局**事件名仍是 `response.completed`**（OpenAI SDK 三种终止事件都认，但只等 `completed` 的手写客户端会挂住，故取「状态正确 + 不挂客户端」的折中） |
 | `GET /v1/models` | Bearer（`api_key` 非空时） | 模型列表（纯动态拉取，缓存 1h；失败返回空列表 + 5min 负缓存）；每模型带 `context_length`/`max_output_tokens`（四级查找链：上游目录 → 内置知识表 → model.json 缓存 → models.dev）、`reasoning_supported_efforts`/`reasoning_default_effort` 思考档位及描述/标签/倍率等全字段（上游有返回时） |
 | `GET /status` | Bearer（`api_key` 非空时） | 账号状态汇总 + 每账号详情（积分/冷却/熔断/在途/粘性）+ `model_locks`（按「域 + 模型」聚合的限流视图：可选 / 总数、锁定账号数、`state`、最早解锁与全池解锁时间、限流原因；无锁定为空） |
 | `GET /healthz` | 无 | 健康检查：有 healthy 且未占满账号返回 200，否则 503；响应带身份标识（见下） |

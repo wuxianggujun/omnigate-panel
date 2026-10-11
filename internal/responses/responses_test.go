@@ -348,6 +348,52 @@ func TestStreamEnvelopeEchoesRequestFields(t *testing.T) {
 	}
 }
 
+// TestStreamTruncatedMarksIncomplete 上游 finish_reason=length（max_output_tokens
+// 截断）时，流式终局必须是 status=incomplete + incomplete_details，与非流式路径
+// 一致。终止事件名保持 response.completed：只等 completed 的手写客户端不能挂住。
+func TestStreamTruncatedMarksIncomplete(t *testing.T) {
+	rec := httptest.NewRecorder()
+	tr := NewTranslator(rec, true, "m", nil, Echo{})
+	_, _ = tr.Write([]byte(`data: {"id":"c1","model":"m","choices":[{"index":0,"delta":{"content":"cut"},"finish_reason":"length"}]}` + "\n\n"))
+	_, _ = tr.Write([]byte("data: [DONE]\n\n"))
+	tr.Finish()
+	body := rec.Body.String()
+
+	idx := strings.LastIndex(body, "event: response.completed")
+	if idx < 0 {
+		t.Fatalf("终局事件必须仍是 response.completed（兼容只等 completed 的客户端）\n%s", body)
+	}
+	tail := body[idx:]
+	if !strings.Contains(tail, `"status":"incomplete"`) {
+		t.Errorf("截断时终局 status 应为 incomplete\n%s", tail)
+	}
+	if !strings.Contains(tail, `"incomplete_details":{"reason":"max_output_tokens"}`) {
+		t.Errorf("截断时缺少 incomplete_details\n%s", tail)
+	}
+}
+
+// TestStreamStoppedStaysCompleted 正常 stop 不受影响：status 仍 completed、不带原因。
+func TestStreamStoppedStaysCompleted(t *testing.T) {
+	rec := httptest.NewRecorder()
+	tr := NewTranslator(rec, true, "m", nil, Echo{})
+	_, _ = tr.Write([]byte(`data: {"id":"c1","model":"m","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}]}` + "\n\n"))
+	_, _ = tr.Write([]byte("data: [DONE]\n\n"))
+	tr.Finish()
+	body := rec.Body.String()
+
+	idx := strings.LastIndex(body, "event: response.completed")
+	if idx < 0 {
+		t.Fatalf("missing response.completed\n%s", body)
+	}
+	tail := body[idx:]
+	if !strings.Contains(tail, `"status":"completed"`) {
+		t.Errorf("正常收尾 status 应为 completed\n%s", tail)
+	}
+	if strings.Contains(tail, `"incomplete_details":{"reason"`) {
+		t.Errorf("正常收尾不应带 incomplete_details 原因\n%s", tail)
+	}
+}
+
 // TestStreamMultipleToolCallsOmittedIndex 一个 chunk 内多个 tool_call 且都省略
 // index（OmniGate 引擎的形态）：必须拆成多个 function_call 输出项，而不是合并。
 func TestStreamMultipleToolCallsOmittedIndex(t *testing.T) {

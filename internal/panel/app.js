@@ -3196,7 +3196,7 @@ function renderRecon(hist) {
       // 服务端会把窗口收窄到采样真正覆盖的桶数（见 creditsHistory 的 alignedHours）。
       msg += '（页面窗口比余额快照历史更长：本卡按余额历史<b>实际覆盖</b>'
         + (hasSpan ? '的近 ' + cover : '（窗口 ' + cover + '）')
-        + ' 对账——历史最多只保留 ' + clampH + 'h，用量侧也已收窄到同一区间。）';
+        + '对账——历史最多只保留 ' + clampH + 'h，用量侧也已收窄到同一区间。）';
     }
     $('usReconHint').innerHTML = msg;
     hintWrap.hidden = false;

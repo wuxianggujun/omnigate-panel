@@ -1054,6 +1054,10 @@ type streamState struct {
 	toolOrder    []*toolState
 
 	usage *chatUsage
+
+	// finishReason 上游给出的收尾原因（stop / length / tool_calls / content_filter…）。
+	// 只有 length 会改变终局状态：与非流式路径一致把 status 标成 incomplete。
+	finishReason string
 }
 
 func newStreamState(t *Translator, model string) *streamState {
@@ -1131,6 +1135,9 @@ func (s *streamState) consume(payload string) {
 		s.usage = chunk.Usage
 	}
 	for _, ch := range chunk.Choices {
+		if ch.FinishReason != nil && *ch.FinishReason != "" {
+			s.finishReason = *ch.FinishReason
+		}
 		if ch.Delta.ReasoningContent != "" {
 			s.onReasoning(ch.Delta.ReasoningContent)
 		}
@@ -1258,7 +1265,7 @@ func (s *streamState) lookupTool(tc toolCallDelta) *toolState {
 	return nil
 }
 
-// finish closes every output item and emits response.completed.
+// finish closes every output item and emits the terminal response event.
 func (s *streamState) finish() {
 	if s.finished {
 		return
@@ -1276,7 +1283,20 @@ func (s *streamState) finish() {
 	for _, st := range s.toolOrder {
 		s.closeTool(st, &output)
 	}
-	s.emit("response.completed", map[string]any{"response": s.envelopeWithUsage("completed", output)})
+	// 上游按 max_output_tokens 截断时，与**非流式**路径保持一致：status 标成
+	// incomplete 并带上 incomplete_details，客户端据此能提示「回答被截断」。
+	// 终止事件名仍用 response.completed —— OpenAI 的三种终止事件
+	// （completed / incomplete / failed）SDK 都认，但只等 completed 的手写客户端
+	// 会因为换成 response.incomplete 一直挂住；这里取「状态正确 + 不挂客户端」的折中。
+	status := "completed"
+	if s.finishReason == "length" {
+		status = "incomplete"
+	}
+	env := s.envelopeWithUsage(status, output)
+	if status == "incomplete" {
+		env["incomplete_details"] = map[string]any{"reason": "max_output_tokens"}
+	}
+	s.emit("response.completed", map[string]any{"response": env})
 }
 
 func (s *streamState) closeMessage(output *[]map[string]any) {

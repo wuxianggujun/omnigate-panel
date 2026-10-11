@@ -578,7 +578,7 @@ func (g *Gateway) HandleChat(ctx context.Context, req *openai.ChatRequest, w htt
 			// （与非流式空响应同语义，与 WorkBuddy 侧 empty stream 一致）。上游原文
 			// 一并带出：这类失败最常见的成因是上游用 200 回了一个非 SSE 的 JSON 错误体
 			// （限流 / 审核 / 参数错），只报 "empty" 会把真实原因彻底吞掉。
-			g.log.Error("对话失败 %s: 上游空流（200+0 帧）%s", displayModel, sampleSuffix(res.sample))
+			g.log.Error("对话失败 %s: 上游空流（200+0 帧）finish=%q%s", displayModel, res.finish, sampleSuffix(res.sample))
 			markStreamFailure(ctx, reqlog.OutcomeStreamError, http.StatusBadGateway)
 			fmt.Fprintf(ew, "data: %s\n\n", openai.ErrorJSON("upstream_error", "empty upstream stream"+sampleSuffix(res.sample)))
 			_ = openai.EmitFinish(ew, id, displayModel, created, "stop")
@@ -617,7 +617,7 @@ func (g *Gateway) HandleChat(ctx context.Context, req *openai.ChatRequest, w htt
 	if !res.sawData {
 		// 上游 200 但空响应（0 有效帧）：不是成功（与流式空流同语义）。上游原文一并
 		// 带出，原因见流式分支的同名注释。
-		g.log.Error("对话失败 %s: 上游空响应%s", displayModel, sampleSuffix(res.sample))
+		g.log.Error("对话失败 %s: 上游空响应 finish=%q%s", displayModel, res.finish, sampleSuffix(res.sample))
 		writeJSON(w, 502, openai.ErrorJSON("upstream_error", "empty upstream response"+sampleSuffix(res.sample)))
 		return
 	}

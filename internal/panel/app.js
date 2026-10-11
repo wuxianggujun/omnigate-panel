@@ -1519,8 +1519,16 @@ function reqTokenCell(e) {
 
 function reqCreditCell(e) {
   if (e && e.credit_known) {
-    const v = Number(e.credit);
-    return Number.isFinite(v) ? trimFixed(v.toFixed(2)) : '<span class="muted">—</span>';
+    // credit_known=true 意味着「上游回报过本次消耗」：0 是**真实值**（免费 / 零倍率
+    // 模型很常见），不是未知。后端 json:"credit" 未加 omitempty 前会把 0 省略掉，
+    // 旧归档里也可能没有这个键 —— 一律按 0 兜底；若直接 Number(undefined) 得到 NaN，
+    // 就会被判成未知显示成 —（这正是「请求记录里看不到积分」的原因）。
+    const v = Number(e.credit == null ? 0 : e.credit);
+    if (!Number.isFinite(v)) return '<span class="muted">—</span>';
+    if (v === 0) {
+      return '<span class="muted" title="上游回报本次消耗 0 积分（该模型免费 / 零倍率）">0</span>';
+    }
+    return trimFixed(v.toFixed(2));
   }
   // OmniGate 行：上游不回报本次实际消耗积分，退而显示该模型的积分价（价，不是耗）。
   const p = e && omPriceMap && e.model ? omPriceMap[e.model] : null;
@@ -1687,7 +1695,8 @@ function requestLogText(e) {
     (Number(e && e.prompt_tokens || 0) + Number(e && e.completion_tokens || 0));
   let credit = 'credit —';
   if (e && e.credit_known) {
-    const value = Number(e.credit);
+    // 同 reqCreditCell：0 是真实值（免费 / 零倍率），键缺失也按 0 兜底。
+    const value = Number(e.credit == null ? 0 : e.credit);
     if (Number.isFinite(value)) credit = String(Number(value.toFixed(2))) + ' credit';
   }
   // 实际思考程度：档位取网关注入 + 降级后真正发给模型的值（off = 显式关闭）；

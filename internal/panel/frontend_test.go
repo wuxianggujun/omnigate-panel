@@ -257,6 +257,11 @@ const withRealm = { ...good, request_id: 'req-4', realm: 'global' };
 const withEffort = { ...good, request_id: 'req-5', reasoning_effort: 'high', reasoning_tokens: 1234 };
 const withProvider = { ...good, request_id: 'req-6', provider: 'raccoon' };
 const withReasoning = { ...good, request_id: 'req-7', reasoning: true };
+// credit=0（免费/零倍率模型）与「键被 omitempty 省略」都必须显示 0 credit，不能显示
+// 成未知 —— 后者曾经是真实缺陷：Number(undefined)=NaN → 判成未知。
+const zeroCredit = { ...good, request_id: 'req-8', credit: 0 };
+const missingCredit = { ...good, request_id: 'req-9' };
+delete missingCredit.credit;
 process.stdout.write(JSON.stringify({
   good: ctx.requestLogText(good),
   noSource: ctx.requestLogText(noSource),
@@ -265,6 +270,8 @@ process.stdout.write(JSON.stringify({
   withEffort: ctx.requestLogText(withEffort),
   withProvider: ctx.requestLogText(withProvider),
   withReasoning: ctx.requestLogText(withReasoning),
+  zeroCredit: ctx.requestLogText(zeroCredit),
+  missingCredit: ctx.requestLogText(missingCredit),
 }));`
 	f, err := os.CreateTemp(t.TempDir(), "request-log-format-*.cjs")
 	if err != nil {
@@ -285,9 +292,64 @@ process.stdout.write(JSON.stringify({
 	withEffort := "14:05:06 | 200 成功 | glm-5.3 | 思考 high·1.2ktok | 账号(uid8) | 203.0.113.7 | python-requests/2.31.0 | 1.25s | 2.3k tok | 0.12 credit | req-5"
 	withProvider := "14:05:06 | 200 成功 | glm-5.3 | raccoon | 账号(uid8) | 203.0.113.7 | python-requests/2.31.0 | 1.25s | 2.3k tok | 0.12 credit | req-6"
 	withReasoning := "14:05:06 | 200 成功 | glm-5.3 | 有思考 | 账号(uid8) | 203.0.113.7 | python-requests/2.31.0 | 1.25s | 2.3k tok | 0.12 credit | req-7"
-	want := `{"good":` + strconv.Quote(text) + `,"noSource":` + strconv.Quote(noSource) + `,"cached":` + strconv.Quote(cached) + `,"withRealm":` + strconv.Quote(withRealm) + `,"withEffort":` + strconv.Quote(withEffort) + `,"withProvider":` + strconv.Quote(withProvider) + `,"withReasoning":` + strconv.Quote(withReasoning) + `}`
+	zeroCredit := "14:05:06 | 200 成功 | glm-5.3 | 账号(uid8) | 203.0.113.7 | python-requests/2.31.0 | 1.25s | 2.3k tok | 0 credit | req-8"
+	missingCredit := "14:05:06 | 200 成功 | glm-5.3 | 账号(uid8) | 203.0.113.7 | python-requests/2.31.0 | 1.25s | 2.3k tok | 0 credit | req-9"
+	want := `{"good":` + strconv.Quote(text) + `,"noSource":` + strconv.Quote(noSource) + `,"cached":` + strconv.Quote(cached) + `,"withRealm":` + strconv.Quote(withRealm) + `,"withEffort":` + strconv.Quote(withEffort) + `,"withProvider":` + strconv.Quote(withProvider) + `,"withReasoning":` + strconv.Quote(withReasoning) + `,"zeroCredit":` + strconv.Quote(zeroCredit) + `,"missingCredit":` + strconv.Quote(missingCredit) + `}`
 	if strings.TrimSpace(string(out)) != want {
 		t.Fatalf("request log formatting=%s want %s", out, want)
+	}
+}
+
+// 请求记录「积分」列：credit_known=true 且 credit=0、或键被 omitempty 省略（免费 /
+// 零倍率模型）必须显示 0，而不是未知。这曾经是真实缺陷：Number(undefined)=NaN 被
+// 判成未知显示成 —，于是「请求记录里根本看不到积分」。
+func TestAppJSRequestCreditCell(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; credit cell test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const fmtStart = src.indexOf('function fmtTok(');
+const fmtEnd = src.indexOf('function usStat(');
+const cellStart = src.indexOf('function reqCreditCell');
+const cellEnd = src.indexOf('function reqRealmCell');
+if ([fmtStart, fmtEnd, cellStart, cellEnd].some(v => v < 0)) throw new Error('credit cell helpers not found');
+const ctx = { Number, String, Math, RegExp };
+vm.createContext(ctx);
+vm.runInContext(
+  'var omPriceMap = null;\n' +
+  src.slice(fmtStart, fmtEnd) + src.slice(cellStart, cellEnd) +
+  '\nthis.reqCreditCell=reqCreditCell;',
+  ctx
+);
+const zero = { credit_known: true, credit: 0, model: 'deepseek-v4.1-flash' };
+const omitted = { credit_known: true, model: 'deepseek-v4.1-flash' };
+const known = { credit_known: true, credit: 1.25, model: 'glm-5.3' };
+const unknown = { credit_known: false, model: 'glm-5.3' };
+process.stdout.write(JSON.stringify({
+  zero: ctx.reqCreditCell(zero),
+  omitted: ctx.reqCreditCell(omitted),
+  known: ctx.reqCreditCell(known),
+  unknown: ctx.reqCreditCell(unknown),
+}));`
+	f, err := os.CreateTemp(t.TempDir(), "credit-cell-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("credit cell node test failed: %v\n%s", err, out)
+	}
+	zeroCell := `<span class=\"muted\" title=\"上游回报本次消耗 0 积分（该模型免费 / 零倍率）\">0</span>`
+	want := `{"zero":"` + zeroCell + `","omitted":"` + zeroCell + `","known":"1.25","unknown":"<span class=\"muted\">—</span>"}`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("credit cell=%s want %s", out, want)
 	}
 }
 

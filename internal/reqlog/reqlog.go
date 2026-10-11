@@ -77,7 +77,11 @@ type Event struct {
 	PromptTokens     int64     `json:"prompt_tokens,omitempty"`
 	CompletionTokens int64     `json:"completion_tokens,omitempty"`
 	TotalTokens      int64     `json:"total_tokens,omitempty"`
-	Credit           float64   `json:"credit,omitempty"`
+	// Credit 本次实际消耗积分（仅 WorkBuddy：上游 usage.credit）。**不能 omitempty**：
+	// 免费/零倍率模型回报的 0 是真实值，键被省略后前端 Number(undefined)=NaN，会把它
+	// 误判成「未知」显示成 —（实测过：deepseek-v4.1-flash 全被显示成空）。
+	// 「有没有值」由 HasCredit(credit_known) 表达，两者配对使用。
+	Credit           float64   `json:"credit"`
 	HasCredit        bool      `json:"credit_known"`
 	// CacheHitTokens / CacheMissTokens 上游前缀缓存命中/未命中 token（issue #92）。
 	// 上游未回该维度时两者皆零值省略；hit=0 + miss>0 即整段未命中。

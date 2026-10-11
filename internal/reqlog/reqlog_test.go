@@ -1,11 +1,37 @@
 package reqlog
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
+
+// Event 的 credit 键不能因 0 值被 omitempty 省略：免费 / 零倍率模型回报的 0 是**真实
+// 值**，键缺失时前端 Number(undefined)=NaN 会把它当成「未知」显示成 —（实测过：
+// deepseek-v4.1-flash 的积分列全是空）。「有没有值」由 credit_known 表达，两者配对。
+func TestEventCreditKeyAlwaysSerialized(t *testing.T) {
+	b, err := json.Marshal(Event{Status: 200, HasCredit: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"credit":0`) {
+		t.Fatalf("known-zero credit must be serialized, got %s", b)
+	}
+	if !strings.Contains(string(b), `"credit_known":true`) {
+		t.Fatalf("credit_known must be true, got %s", b)
+	}
+	// 未知时同样带 credit:0（零值），但 credit_known=false 表明它不可信。
+	b2, err := json.Marshal(Event{Status: 200})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b2), `"credit":0`) || strings.Contains(string(b2), `"credit_known":true`) {
+		t.Fatalf("unknown credit = %s, want credit:0 + credit_known:false", b2)
+	}
+}
 
 func TestRecorderMetricsAndRecent(t *testing.T) {
 	r := New(Config{})

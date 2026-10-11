@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/config"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/logx"
@@ -557,6 +558,17 @@ func (g *Gateway) HandleChat(ctx context.Context, req *openai.ChatRequest, w htt
 	id := openai.NewID()
 	created := time.Now().Unix()
 
+	// 预检：上游对单条 prompt 有字符数硬上限（runable = 8000，见 runable.MaxPromptChars）。
+	// 必须在写响应头之前判掉——流式请求一旦发出 200，就只能把错误塞进 SSE error 帧，
+	// 客户端只会看到「stream disconnected before completion」而不知道该改什么；提前
+	// 拒绝同时也省下一次注定失败的上游调用。
+	if err := g.checkPromptLimit(prov, upstreamModel, req, hasTools); err != nil {
+		g.log.Warn("拒绝超长请求 %s: %v", displayModel, err)
+		writeJSON(w, 400, openai.ErrorJSON("prompt_too_long", err.Error()))
+		return
+	}
+	in := g.buildInput(prov, upstreamModel, req, incognito, hasTools)
+
 	if req.Stream {
 		h := w.Header()
 		h.Set("Content-Type", "text/event-stream; charset=utf-8")
@@ -590,7 +602,7 @@ func (g *Gateway) HandleChat(ctx context.Context, req *openai.ChatRequest, w htt
 				flush()
 			}
 		}
-		res, err := g.runChat(ctx, provName, prov, upstreamModel, req, incognito, hasTools, onText, onReasoning)
+		res, err := g.runChat(ctx, provName, prov, in, hasTools, onText, onReasoning)
 		if err != nil {
 			// 分两类：ctx 取消 / 写失败 = 客户端断连（人已走，归 interrupted，不改
 			// 观测状态码）；其余 = 上游 error 帧 / 读失败（用 503 观测，与 WorkBuddy
@@ -647,7 +659,7 @@ func (g *Gateway) HandleChat(ctx context.Context, req *openai.ChatRequest, w htt
 		return
 	}
 
-	res, err := g.runChat(ctx, provName, prov, upstreamModel, req, incognito, hasTools, nil, nil)
+	res, err := g.runChat(ctx, provName, prov, in, hasTools, nil, nil)
 	if err != nil {
 		g.log.Error("对话失败 %s: %v", displayModel, err)
 		writeJSON(w, 502, openai.ErrorJSON("upstream_error", err.Error()))
@@ -688,6 +700,156 @@ func (g *Gateway) HandleChat(ctx context.Context, req *openai.ChatRequest, w htt
 // runable's bespoke protocol has no equivalent.
 func supportsEffort(provType string) bool {
 	return provType == "raccoon" || provType == "openai"
+}
+
+// defaultPromptLimit 是各供应商类型「单条 prompt 字符数」的默认上限（上游硬限制）。
+// 0 = 无默认上限。
+func defaultPromptLimit(provType string) int {
+	if provType == "runable" {
+		return runable.MaxPromptChars
+	}
+	return 0
+}
+
+// promptLimit 返回该 provider 的单条 prompt 字符上限（0 = 不检查）。供应商配置里的
+// max_prompt_chars 优先（负数表示显式关闭），未设置时用该类型的默认值。
+func (g *Gateway) promptLimit(prov provider.Provider) int {
+	if prov == nil {
+		return 0
+	}
+	for i := range g.cfg.Providers {
+		p := &g.cfg.Providers[i]
+		if p.Name != prov.Name() {
+			continue
+		}
+		if p.MaxPromptChars < 0 {
+			return 0
+		}
+		if p.MaxPromptChars > 0 {
+			return p.MaxPromptChars
+		}
+		break
+	}
+	return defaultPromptLimit(prov.Type())
+}
+
+// promptTooLongErr 表示请求因单条 prompt 超过上游上限被拒。Actual == 0 表示长度
+// 未知（是上游回绝的，不是本地预检算出来的）。错误文案会原样透给客户端，所以必须
+// 是「用户看得懂 + 知道怎么办」的说法。
+type promptTooLongErr struct {
+	Provider string
+	Limit    int
+	Actual   int
+}
+
+func (e *promptTooLongErr) Error() string {
+	msg := fmt.Sprintf("请求过长：%s 上游限制单次 prompt 最多 %d 字符", e.Provider, e.Limit)
+	if e.Actual > 0 {
+		msg += fmt.Sprintf("，本次约 %d 字符", e.Actual)
+	}
+	return msg + "。请缩短本次消息（或精简系统提示词 / 工具定义）后重试，长上下文建议改用其它分组。"
+}
+
+// friendlyUpstreamErr 把上游的技术性错误码换成用户能理解的说法。目前只处理
+// PROMPT_LIMIT_EXCEEDED：原样透出时客户端只会报 "stream disconnected before
+// completion: upstream HTTP 400: PROMPT_LIMIT_EXCEEDED"，看不出该改什么。
+func friendlyUpstreamErr(provName string, limit int, err error) error {
+	if err == nil || !strings.Contains(err.Error(), "PROMPT_LIMIT_EXCEEDED") {
+		return err
+	}
+	return &promptTooLongErr{Provider: provName, Limit: limit}
+}
+
+// runablePrompt 组装本轮发给 runable 的单条 prompt。advance=true 时推进会话状态
+// （标记 system 已发送）；advance=false 只算不改，供写响应头之前的长度预检使用——
+// 被拒的首轮绝不能把 systemSent 置位，否则下一轮就漏发 system 了。
+// runable 侧按 chatID 保存历史，所以每轮只发「最后一条用户消息」，首轮附带 system。
+func (g *Gateway) runablePrompt(model string, msgs []openai.Message, advance bool) string {
+	c := g.getConv(toolcall.ConvKey(model, msgs))
+	prompt := toolcall.LastUserText(msgs)
+	if !c.systemSent {
+		if sys := toolcall.SystemText(msgs); sys != "" {
+			prompt = sys + "\n\n" + prompt
+		}
+		if advance {
+			c.systemSent = true
+		}
+	}
+	if strings.TrimSpace(prompt) == "" {
+		prompt = "你好"
+	}
+	return prompt
+}
+
+// previewPromptChars 只读估算「这次请求会送给上游的 prompt 字符数」。第二个返回值
+// 为 false 表示该供应商不是单条 prompt 形态（长度无法用这个口径衡量，不预检）。
+func (g *Gateway) previewPromptChars(prov provider.Provider, model string, req *openai.ChatRequest, hasTools bool) (int, bool) {
+	switch {
+	case hasTools && prov.Type() == "runable":
+		return utf8.RuneCountInString(toolcall.BuildToolPrompt(req.Messages, req.Tools)), true
+	case prov.Type() == "runable":
+		return utf8.RuneCountInString(g.runablePrompt(model, req.Messages, false)), true
+	default:
+		return 0, false
+	}
+}
+
+// checkPromptLimit 在写 HTTP 响应头之前预检单条 prompt 长度。超限时返回错误，调用方
+// 直接回 400：流式请求一旦发出 200 响应头，就只能把错误塞进 SSE error 帧，客户端表现
+// 为「流莫名断了」；提前判掉还能省下一次注定失败的上游调用。
+func (g *Gateway) checkPromptLimit(prov provider.Provider, model string, req *openai.ChatRequest, hasTools bool) error {
+	limit := g.promptLimit(prov)
+	if limit <= 0 {
+		return nil
+	}
+	n, ok := g.previewPromptChars(prov, model, req, hasTools)
+	if !ok || n <= limit {
+		return nil
+	}
+	return &promptTooLongErr{Provider: prov.Name(), Limit: limit, Actual: n}
+}
+
+// buildInput 组装发给上游的 ChatInput。原先内联在 runChat 里；提到调用上游之前是为了
+// 能先做 prompt 长度预检（见 checkPromptLimit）。
+func (g *Gateway) buildInput(prov provider.Provider, model string, req *openai.ChatRequest, incognito, hasTools bool) provider.ChatInput {
+	// Prompt-based providers need emulated tool calling.
+	if hasTools && prov.Type() == "runable" {
+		return provider.ChatInput{
+			ChatID:    util.UUID(),
+			Model:     model,
+			Prompt:    toolcall.BuildToolPrompt(req.Messages, req.Tools),
+			Incognito: incognito,
+			Mode:      g.cfg.Mode,
+		}
+	}
+
+	var in provider.ChatInput
+	in.Model = model
+	in.Incognito = incognito
+	in.Mode = g.cfg.Mode
+	in.ReasoningEffort = req.ReasoningEffort
+	// 标准采样/结构控制字段：不转发就等于静默丢弃（ChatRequest 解析时就没字段）。
+	in.Temperature = req.Temperature
+	in.TopP = req.TopP
+	in.MaxTokens = req.MaxTokens
+	if in.MaxTokens == nil {
+		in.MaxTokens = req.MaxCompletionTokens // OpenAI 的新别名
+	}
+	in.Stop = req.Stop
+	in.ParallelToolCalls = req.ParallelToolCalls
+	in.ToolChoice = req.ToolChoice
+	in.ResponseFormat = req.ResponseFormat
+	in.User = req.User
+	if hasTools {
+		in.Messages = req.Messages
+		in.Tools = req.Tools
+	} else if prov.Type() == "runable" {
+		in.ChatID = g.getConv(toolcall.ConvKey(model, req.Messages)).chatID
+		in.Prompt = g.runablePrompt(model, req.Messages, true)
+	} else {
+		in.Messages = req.Messages
+	}
+	return in
 }
 
 // markStreamFailure 回填流式请求的失败观测。HTTP 头（200）在首字节前已发出、无法
@@ -759,16 +921,17 @@ func usageMap(u *provider.Usage) map[string]any {
 	return m
 }
 
-func (g *Gateway) runChat(ctx context.Context, provName string, prov provider.Provider, model string, req *openai.ChatRequest, incognito, hasTools bool, onText, onReasoning func(string)) (*chatResult, error) {
+func (g *Gateway) runChat(ctx context.Context, provName string, prov provider.Provider, in provider.ChatInput, hasTools bool, onText, onReasoning func(string)) (*chatResult, error) {
 	res := &chatResult{finish: "stop"}
+	// 上游对单条 prompt 的字符上限（0 = 不检查）。正常路径已在 HandleChat 里预检过，
+	// 这里只用于把上游回绝的错误码换成用户看得懂的说法。
+	limit := g.promptLimit(prov)
 
 	// Prompt-based providers need emulated tool calling.
 	if hasTools && prov.Type() == "runable" {
-		prompt := toolcall.BuildToolPrompt(req.Messages, req.Tools)
-		in := provider.ChatInput{ChatID: util.UUID(), Model: model, Prompt: prompt, Incognito: incognito, Mode: g.cfg.Mode}
 		stream, err := g.openStream(ctx, provName, prov, in)
 		if err != nil {
-			return nil, err
+			return nil, friendlyUpstreamErr(provName, limit, err)
 		}
 		defer stream.Close()
 		parser := toolcall.NewParser(
@@ -805,10 +968,10 @@ func (g *Gateway) runChat(ctx context.Context, provName string, prov provider.Pr
 		})
 		parser.Flush()
 		if err != nil {
-			return nil, err
+			return nil, friendlyUpstreamErr(provName, limit, err)
 		}
 		if res.errText != "" {
-			return nil, fmt.Errorf("%s", res.errText)
+			return nil, friendlyUpstreamErr(provName, limit, fmt.Errorf("%s", res.errText))
 		}
 		if len(res.toolCalls) > 0 {
 			res.finish = "tool_calls"
@@ -816,47 +979,9 @@ func (g *Gateway) runChat(ctx context.Context, provName string, prov provider.Pr
 		return res, nil
 	}
 
-	var in provider.ChatInput
-	in.Model = model
-	in.Incognito = incognito
-	in.Mode = g.cfg.Mode
-	in.ReasoningEffort = req.ReasoningEffort
-	// 标准采样/结构控制字段：不转发就等于静默丢弃（ChatRequest 解析时就没字段）。
-	in.Temperature = req.Temperature
-	in.TopP = req.TopP
-	in.MaxTokens = req.MaxTokens
-	if in.MaxTokens == nil {
-		in.MaxTokens = req.MaxCompletionTokens // OpenAI 的新别名
-	}
-	in.Stop = req.Stop
-	in.ParallelToolCalls = req.ParallelToolCalls
-	in.ToolChoice = req.ToolChoice
-	in.ResponseFormat = req.ResponseFormat
-	in.User = req.User
-	if hasTools {
-		in.Messages = req.Messages
-		in.Tools = req.Tools
-	} else if prov.Type() == "runable" {
-		c := g.getConv(toolcall.ConvKey(model, req.Messages))
-		prompt := toolcall.LastUserText(req.Messages)
-		if !c.systemSent {
-			if sys := toolcall.SystemText(req.Messages); sys != "" {
-				prompt = sys + "\n\n" + prompt
-			}
-			c.systemSent = true
-		}
-		if strings.TrimSpace(prompt) == "" {
-			prompt = "你好"
-		}
-		in.ChatID = c.chatID
-		in.Prompt = prompt
-	} else {
-		in.Messages = req.Messages
-	}
-
 	stream, err := g.openStream(ctx, provName, prov, in)
 	if err != nil {
-		return nil, err
+		return nil, friendlyUpstreamErr(provName, limit, err)
 	}
 	defer stream.Close()
 
@@ -887,7 +1012,7 @@ func (g *Gateway) runChat(ctx context.Context, provName string, prov provider.Pr
 		}
 	})
 	if err != nil {
-		return nil, err
+		return nil, friendlyUpstreamErr(provName, limit, err)
 	}
 	// 上游「无有效帧」时的原文样本（诊断用；实现 provider.Sampler 的流才有）。
 	// 放在 drain 之后：样本是边读边攒的。

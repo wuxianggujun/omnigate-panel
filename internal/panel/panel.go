@@ -1116,11 +1116,12 @@ func (p *Panel) creditsHistory(w http.ResponseWriter, r *http.Request) {
 // 每个账号的净变化取自「窗口内最早的采样点 → 最新采样点」，所以 N 的上限由**历史最短的
 // 那个账号**决定：它的最早采样点若晚于窗口左边界，它那一小段净变化就会被掺进整窗口的
 // 合计里（用量按整桶算、余额只算了一小截 → 虚报「积分过期」）。
-// 取所有账号里**最晚**的 From 就是这个约束。另外给 15 分钟余量（桶的 1/4）：采样是
-// 5 分钟粒度，左边界落在两个采样点之间是常态，否则每遇到桶边界没采样就白丢一整桶。
+// 取所有账号里**最晚**的 From 就是这个约束。另外给 20 分钟余量（桶的 1/3，与前端
+// 的对账容差同口径）：采样是 5 分钟粒度、历史起点又常落在桶中间，不留余量的话每遇到
+// 桶边界没采样就白丢一整桶——刚上线时窗口会一直卡在 1 小时。
 // 返回 0 表示连一个整点桶都覆盖不了（刚上线几分钟的状态）。
 func alignedHours(snap []credithist.Account, now time.Time) int {
-	const slack = 15 * time.Minute
+	const slack = 20 * time.Minute
 	anchor := now.Truncate(time.Hour)
 	var newest time.Time
 	for _, a := range snap {

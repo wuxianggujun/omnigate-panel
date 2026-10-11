@@ -3134,10 +3134,11 @@ function renderRecon(hist) {
 
   const none = covered === 0;
   // 口径容差：两侧窗口已按整点对齐（见 creditsHistory 的说明），残差只剩「余额取的是
-  // 采样点、用量取的是整桶」的边界误差——采样间隔 5 分钟，两侧各约 5 分钟。取 15 分钟
-  // 的用量作为容差，既盖得住边界噪声，又不会把真正的过期吞掉。
+  // 采样点、用量取的是整桶」的边界误差——采样间隔 5 分钟，历史起点还可能落在桶中间
+  // （服务端允许 20 分钟余量）。取桶的 1/3（≈20 分钟）的用量作为容差：盖得住边界噪声，
+  // 又不会把真正的过期吞掉（快过期那批 296 分，20 分钟的热模型用量才 ~30 分）。
   const hourSpan = Math.max(1, winSec / 3600);
-  const slop = creditedTotal > 0 ? Math.max(0.5, creditedTotal / hourSpan / 4) : 0.5;
+  const slop = creditedTotal > 0 ? Math.max(0.5, creditedTotal / hourSpan / 3) : 0.5;
   const diffOk = Math.abs(diffTotal) <= slop;
   $('usReconStats').innerHTML =
     usKpi(canCompare ? fmtCredit(creditedTotal) : '—', '计费用量', 'c-accent',
@@ -3168,7 +3169,7 @@ function renderRecon(hist) {
     } else if (diffOk) {
       msg = '✓ 对得上：本窗口计费用量合计 <b>' + fmtCredit(creditedTotal) + '</b>，余额净变化 <b>'
         + fmtCredit(netTotal) + '</b>，差额 <b>' + fmtCredit(diffTotal) + '</b> 在口径容差 ±'
-        + fmtCredit(slop) + ' 内（用量按小时桶聚合、余额按 5 分钟采样点取，边界差不超过 15 分钟）。';
+        + fmtCredit(slop) + ' 内（用量按小时桶聚合、余额按 5 分钟采样点取，边界差不超过 20 分钟）。';
     } else if (diffTotal > 0) {
       msg = '⚠ 余额比计费用量多掉了 <b>' + fmtCredit(diffTotal) + '</b> 分（超出容差 ±'
         + fmtCredit(slop) + '）：多半是<b>积分过期</b>（到期批次没被消耗就归零），'
@@ -3184,8 +3185,10 @@ function renderRecon(hist) {
         + '上面的差额只覆盖 ' + covered + ' 个账号。）';
     }
     if (canCompare && reconNarrowed) {
-      msg += '（余额快照历史只保留 ' + clampH + 'h，而页面窗口更长：本卡按这 ' + clampH
-        + 'h 对账，用量侧也已收窄到同一区间。）';
+      // 说「实际覆盖的近 X」而不是「按 26h 对账」：历史可能只活了几十分钟，
+      // 服务端会把窗口收窄到采样真正覆盖的桶数（见 creditsHistory 的 alignedHours）。
+      msg += '（页面窗口比余额快照历史更长：本卡按余额历史<b>实际覆盖</b>的近 ' + cover
+        + ' 对账——历史最多只保留 ' + clampH + 'h，用量侧也已收窄到同一区间。）';
     }
     $('usReconHint').innerHTML = msg;
     hintWrap.hidden = false;
@@ -3208,8 +3211,8 @@ function renderRecon(hist) {
       ? '实际覆盖近 ' + fmtSpan(h.span_sec) + '（' + String(h.from || '').replace('T', ' ').slice(0, 16)
         + ' → ' + String(h.to || '').replace('T', ' ').slice(0, 16) + '），' + h.samples + ' 个采样点'
       : '样本不足（需至少 10 分钟覆盖），暂时算不出净变化';
-    // 逐行容差同样按「采样边界误差」估：这个号在本窗口烧了多少，就按比例给多少余量。
-    const rowSlop = Math.max(0.5, r.use / hourSpan / 4);
+    // 逐行容差与总容差同口径（桶的 1/3）：这个号在本窗口烧了多少，就按比例给多少余量。
+    const rowSlop = Math.max(0.5, r.use / hourSpan / 3);
     const diffTxt = h.ok ? fmtCredit(r.diff) : '—';
     const diffCls = h.ok && Math.abs(r.diff) > rowSlop ? 'gap warn' : 'gap';
     const diffTip = h.ok

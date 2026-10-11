@@ -177,7 +177,7 @@ func TestAlignedHours(t *testing.T) {
 		from time.Time
 		want int
 	}{
-		{"采样晚于锚点（刚上线）", anchor.Add(16 * time.Minute), 0},
+		{"采样晚于锚点太多（刚上线）", anchor.Add(35 * time.Minute), 0},
 		{"刚好压在锚点上", anchor, 1},
 		{"覆盖到 5 小时前", anchor.Add(-5 * time.Hour), 6},
 		{"覆盖到 25 小时前", anchor.Add(-25 * time.Hour), 26},
@@ -195,6 +195,13 @@ func TestAlignedHours(t *testing.T) {
 	}
 	if got := alignedHours(mixed, now); got != 3 {
 		t.Errorf("应被历史最短的账号约束（3 个桶），得到 %d", got)
+	}
+	// 余量 20 分钟：采样晚于锚点 16 分钟仍在余量内（对齐到当前桶），超过就放弃对齐。
+	if got := alignedHours(snap(anchor.Add(16*time.Minute)), now); got != 1 {
+		t.Errorf("锚点后 16 分钟应在余量内得 1，得到 %d", got)
+	}
+	if got := alignedHours(snap(anchor.Add(25*time.Minute)), now); got != 0 {
+		t.Errorf("锚点后 25 分钟超出余量应得 0，得到 %d", got)
 	}
 	// 没有可解析的采样时间 → 0。
 	if got := alignedHours([]credithist.Account{{UID: "u", OK: true}}, now); got != 0 {

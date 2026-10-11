@@ -73,14 +73,15 @@ async function api(path, opts = {}) {
   if (opts.body && !(opts.body instanceof FormData)) h['Content-Type'] = 'application/json';
   const r = await fetch('/panel/api/' + path, Object.assign({}, opts, { headers: h }));
   const d = await r.json().catch(() => ({}));
-  if (r.status === 401) { showAuthGate(); throw new Error('未登录或会话已过期'); }
+  if (r.status === 401) throw authLost('未登录或会话已过期');
   if (r.status === 403) {
     const e = d.error || '';
-    throw new Error(e === 'admin_required' ? '需要管理员权限'
+    throw httpErr(e === 'admin_required' ? '需要管理员权限'
       : (e === 'not_your_account' ? '这不是你的账号，无权操作'
-      : (e === 'tenant_required' ? '只读账号不能执行写操作' : (e || 'HTTP 403'))));
+      : (e === 'tenant_required' ? '只读账号不能执行写操作'
+      : (e === 'forbidden' ? '没有权限：该功能仅管理员可用' : (e || 'HTTP 403')))), 403);
   }
-  if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+  if (!r.ok) throw httpErr(d.error || ('HTTP ' + r.status), r.status);
   return d;
 }
 function toast(msg, cls) {
@@ -89,6 +90,22 @@ function toast(msg, cls) {
   el.textContent = msg;
   $('toasts').appendChild(el);
   setTimeout(() => el.remove(), 3600);
+}
+
+/* httpErr / authLost：让错误带上 HTTP 状态码，轮询循环据此判断「会话失效」并停表，
+   而不是每 3 秒把登录弹窗顶回来一次（用户关掉又弹，看起来就是「一直让我登录」）。
+   authLost 统一处理 401：已登录 → 收敛为未登录并提示一次；本来没登录 → 直接引导。 */
+function httpErr(msg, status) { const e = new Error(msg); e.status = status; return e; }
+function authLost(msg) {
+  if (authState.authenticated) {
+    authState.authenticated = false;
+    authState.username = '';
+    authState.role = '';
+    applyRole();
+    toast('登录已过期，请重新登录', 'err');
+  }
+  showAuthGate();
+  return httpErr(msg, 401);
 }
 // esc 文本/属性双安全转义。不能只用 div.innerHTML（它转义 <>& 但不转义引号），
 // 否则字符串拼进 HTML 属性（如 title="uid: ..."）时引号可闭合属性并注入事件处理器。
@@ -354,12 +371,18 @@ function showAuthGate() {
   if (authState.configured) openLogin(); else openSetup();
 }
 function openLogin() {
+  // 已经开着就直接返回：轮询/并发请求可能反复触发登录门，重开会把焦点从用户
+  // 正在输入的框里抢走（表现为「一直弹窗、没法输入」）。
+  if ($('loginVeil').classList.contains('on')) return;
   if (authMode !== 'register') setAuthMode('login');
   fillRememberedUsers();
   $('loginVeil').classList.add('on');
   setTimeout(() => $('loginUser').focus(), 60);
 }
-function openSetup() { $('setupVeil').classList.add('on'); }
+function openSetup() {
+  if ($('setupVeil').classList.contains('on')) return;
+  $('setupVeil').classList.add('on');
+}
 function closeGates() { $('loginVeil').classList.remove('on'); $('setupVeil').classList.remove('on'); }
 $('btnSetupReload').onclick = () => location.reload();
 
@@ -398,6 +421,47 @@ function fillRememberedUsers() {
   if (!dl) return;
   dl.innerHTML = rememberedUsers().map(u => '<option value="' + esc(u) + '"></option>').join('');
 }
+
+/* ── 密码框「显示 / 隐藏」（眼睛图标）──────────────────────────────────
+   统一给页面上所有 input[type=password] 套一层 .pw 并插入眼睛按钮，省得每个
+   表单各写一遍。网关密钥框 #cfgKey 已有自己的 #btnEye，跳过不重复。 */
+const PW_EYE_SVG = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+  + '<path class="i-open" d="M2.5 12S6 6 12 6s9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"/>'
+  + '<circle class="i-open" cx="12" cy="12" r="2.6"/>'
+  + '<path class="i-off" d="M2.5 12S6 6 12 6s9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"/>'
+  + '<circle class="i-off" cx="12" cy="12" r="2.6"/>'
+  + '<path class="i-off" d="M4 4.5 20 19.5"/>'
+  + '</svg>';
+function addPwEyes() {
+  document.querySelectorAll('input[type=password]').forEach(el => {
+    if (el.dataset.pwEye === '1' || el.id === 'cfgKey') return;
+    el.dataset.pwEye = '1';
+    const wrap = document.createElement('span');
+    wrap.className = 'pw';
+    el.parentNode.insertBefore(wrap, el);
+    wrap.appendChild(el);
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'eye';
+    b.innerHTML = PW_EYE_SVG;
+    b.title = '显示密码';
+    b.setAttribute('aria-label', '显示密码');
+    b.setAttribute('aria-pressed', 'false');
+    // 按钮在 <label> 里：preventDefault 避免点按钮顺带激活 label（把焦点丢回输入框）。
+    b.addEventListener('click', ev => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      const show = el.type === 'password';
+      el.type = show ? 'text' : 'password';
+      b.classList.toggle('on', show);
+      b.title = show ? '隐藏密码' : '显示密码';
+      b.setAttribute('aria-label', b.title);
+      b.setAttribute('aria-pressed', show ? 'true' : 'false');
+    });
+    wrap.appendChild(b);
+  });
+}
+addPwEyes();
 
 /* setAuthMode 在「登录 / 注册」两种形态间切换（同一个弹窗、同一套字段）。
    未开放自助注册时隐藏标签行并强制回到登录。 */
@@ -2577,7 +2641,11 @@ function startQueuePolling() {
   if (queueTimer) clearInterval(queueTimer);
   queueTimer = setInterval(async () => {
     let q;
-    try { q = await api('tasks/queue'); } catch (e) { return; }
+    try { q = await api('tasks/queue'); } catch (e) {
+      // 会话失效（401）就停表，别每 3 秒空转一次 401。
+      if (e && e.status === 401) { clearInterval(queueTimer); queueTimer = null; }
+      return;
+    }
     if (!q.started) return;
     // 只渲染本页启动过的那轮队列（刷新页面后不再接管旧队列）。
     if (lastQueueSeq && q.seq !== lastQueueSeq) return;
@@ -3745,10 +3813,10 @@ async function apiAbs(path, opts = {}) {
   const text = await r.text();
   let d = null;
   try { d = text ? JSON.parse(text) : null; } catch (e) { d = { raw: text }; }
-  if (r.status === 401) { showAuthGate(); throw new Error('未登录或会话已过期'); }
+  if (r.status === 401) throw authLost('未登录或会话已过期');
   if (!r.ok) {
     const em = d && d.error && d.error.message;
-    throw new Error(em || (d && d.error) || (d && d.raw) || ('HTTP ' + r.status));
+    throw httpErr(em || (d && d.error) || (d && d.raw) || ('HTTP ' + r.status), r.status);
   }
   return d;
 }
@@ -4033,7 +4101,16 @@ function startAutoPoll(label, isTrae) {
         await loadOverview(true);
         setTimeout(closeAdd, 1600);
       }
-    } catch (e) { /* 继续轮询 */ }
+    } catch (e) {
+      // 会话失效（401）立刻停表：否则每 3 秒把登录弹窗顶回来一次，用户关都关不掉。
+      if (e && e.status === 401) {
+        stopAutoPoll();
+        $('ogAuthPoll').hidden = true;
+        ogMsg('authMsg', '登录已过期：请重新登录后再发起授权。', 'err');
+        return;
+      }
+      /* 其它错误（网络抖动等）继续轮询 */
+    }
   }, 3000);
 }
 

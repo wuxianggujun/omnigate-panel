@@ -341,3 +341,53 @@ func TestDeletePanelUserClearsOwnership(t *testing.T) {
 		t.Fatal("其它用户的归属不应受影响")
 	}
 }
+
+// ── OmniGate 管理代理 ─────────────────────────────────────────────────────
+
+// 上游 401（网关 api_key 不匹配）必须改写成 502，绝不能原样回传：前端把 401 当
+// 「面板会话失效」处理并弹登录门，而授权轮询每 3 秒一次 → 弹窗反复被顶回来。
+func TestOmniAdminProxyMapsUpstream401(t *testing.T) {
+	p := New(Config{
+		Version: "test",
+		APIKey:  "k",
+		OmniAdmin: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if got := r.Header.Get("Authorization"); got != "Bearer k" {
+				t.Errorf("未注入网关 api_key，得到 %q", got)
+			}
+			if r.URL.Path != "/admin/raccoon/accounts" {
+				t.Errorf("转发路径 = %q want /admin/raccoon/accounts", r.URL.Path)
+			}
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":{"message":"unauthorized"}}`))
+		}),
+	})
+	r := reqAs("alice", panelauth.RoleUser)
+	r.Method = "GET"
+	r.URL.Path = "/panel/api/omni/admin/raccoon/accounts"
+	r.URL.RawQuery = "provider=raccoon"
+	w := httptest.NewRecorder()
+	p.omniAdminProxy(w, r)
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("上游 401 应改写成 502，得到 %d", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "omnigate_unauthorized") {
+		t.Fatalf("响应体应带 omnigate_unauthorized，得到 %q", w.Body.String())
+	}
+}
+
+// 白名单外的子路径一律 404（不转发给 OmniGate）。
+func TestOmniAdminProxyRejectsUnknownSubpath(t *testing.T) {
+	called := false
+	p := New(Config{Version: "test", APIKey: "k",
+		OmniAdmin: http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true })})
+	r := reqAs("alice", panelauth.RoleUser)
+	r.URL.Path = "/panel/api/omni/admin/raccoon/redirect"
+	w := httptest.NewRecorder()
+	p.omniAdminProxy(w, r)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("白名单外子路径应 404，得到 %d", w.Code)
+	}
+	if called {
+		t.Fatal("白名单外子路径不应被转发")
+	}
+}

@@ -12,8 +12,10 @@ package panelauth
 import (
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -281,6 +283,9 @@ type Store struct {
 	maxFail  int
 	lockFor  time.Duration
 	now      func() time.Time
+	// 会话落盘（可选）：让「部署/重启容器」不再把所有已登录用户踢下线。
+	persistPath string
+	lastPersist time.Time
 }
 
 // New 用账号集合构造 Store。ttl<=0 回落 72h，maxFail<=0 回落 5，lockFor<=0 回落 15m。
@@ -321,6 +326,106 @@ func (s *Store) Reconfigure(users []User, ttl time.Duration, maxFail int, lockFo
 	s.lockFor = lockFor
 }
 
+// ---------------------------------------------------------------------------
+// 会话落盘（可选）：容器重启不掉线
+// ---------------------------------------------------------------------------
+//
+// 会话表本身是纯内存的，进程一重启（部署新版本 / 重启容器）所有浏览器会话就
+// 失效，用户表现为「刚登录完，过一会儿又弹登录框」。EnableSessionPersistence
+// 让会话表落到 data 目录，重启后自动载回：
+//   - 落盘内容只有「随机令牌 → 用户名/角色/过期时间」，不含密码、无法反推密码；
+//   - 令牌是 crypto/rand 的 32 字节，敏感度与 config.json 里的密码哈希同级，
+//     文件按 0600 写入、原子替换（tmp + rename）；
+//   - 滑动续期（每次请求都会刷新 expires）按 sessionPersistInterval 节流写盘，
+//     Login/Logout 立即写盘，避免每请求一次磁盘写。
+//
+// 未调用本方法（或路径为空）时行为与从前完全一致：纯内存、重启即失效。
+const sessionPersistInterval = time.Minute
+
+// sessionDiskRec 是 sessionRec 的可序列化形态（sessionRec 字段未导出，不能直接
+// JSON 编码；两者分开也避免落盘格式被内部重构牵动）。
+type sessionDiskRec struct {
+	Username string    `json:"username"`
+	Role     Role      `json:"role"`
+	Expires  time.Time `json:"expires"`
+}
+
+// EnableSessionPersistence 指定会话落盘文件并载入其中仍然有效的会话。
+// 文件缺失按「没有历史会话」处理；文件损坏返回错误（调用方决定是否忽略）。
+func (s *Store) EnableSessionPersistence(path string) error {
+	s.mu.Lock()
+	s.persistPath = path
+	s.mu.Unlock()
+	if path == "" {
+		return nil
+	}
+	return s.loadSessions()
+}
+
+// loadSessions 载入落盘会话：丢掉已过期与「账号已不存在」的条目。
+func (s *Store) loadSessions() error {
+	s.mu.Lock()
+	path := s.persistPath
+	s.mu.Unlock()
+	if path == "" {
+		return nil
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	var recs map[string]sessionDiskRec
+	if err := json.Unmarshal(b, &recs); err != nil {
+		return fmt.Errorf("panelauth: 解析会话文件 %s: %w", path, err)
+	}
+	now := s.now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for tok, rec := range recs {
+		if tok == "" || now.After(rec.Expires) {
+			continue
+		}
+		if _, ok := s.users[rec.Username]; !ok {
+			continue
+		}
+		s.sessions[tok] = sessionRec{username: rec.Username, role: rec.Role, expires: rec.Expires}
+	}
+	return nil
+}
+
+// saveSessionsLocked 落盘（调用方须持锁）。force=false 时按 sessionPersistInterval
+// 节流；顺带清掉已过期条目，避免文件只增不减。
+func (s *Store) saveSessionsLocked(force bool) {
+	if s.persistPath == "" {
+		return
+	}
+	now := s.now()
+	if !force && !s.lastPersist.IsZero() && now.Sub(s.lastPersist) < sessionPersistInterval {
+		return
+	}
+	s.lastPersist = now
+	out := make(map[string]sessionDiskRec, len(s.sessions))
+	for tok, rec := range s.sessions {
+		if now.After(rec.expires) {
+			delete(s.sessions, tok)
+			continue
+		}
+		out[tok] = sessionDiskRec{Username: rec.username, Role: rec.role, Expires: rec.expires}
+	}
+	b, err := json.Marshal(out)
+	if err != nil {
+		return
+	}
+	tmp := s.persistPath + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+		return
+	}
+	_ = os.Rename(tmp, s.persistPath)
+}
+
 // HasUsers 是否已配置面板账号（false = 未配置；面板鉴权已与网关 api_key 彻底解耦，
 // 未配置账号时 /panel/api/* 一律 401，登录端点返回 panel_auth_not_configured）。
 func (s *Store) HasUsers() bool {
@@ -359,6 +464,7 @@ func (s *Store) Login(username, password, clientKey string) (Session, string, er
 	}
 	exp := now.Add(s.ttl)
 	s.sessions[token] = sessionRec{username: u.Username, role: u.Role, expires: exp}
+	s.saveSessionsLocked(true)
 	return Session{Username: u.Username, Role: u.Role, Expires: exp}, token, nil
 }
 
@@ -423,6 +529,7 @@ func (s *Store) Authenticate(token string) (Session, bool) {
 	}
 	exp := now.Add(s.ttl)
 	s.sessions[token] = sessionRec{username: u.Username, role: u.Role, expires: exp}
+	s.saveSessionsLocked(false)
 	return Session{Username: u.Username, Role: u.Role, Expires: exp}, true
 }
 
@@ -434,6 +541,7 @@ func (s *Store) Logout(token string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.sessions, token)
+	s.saveSessionsLocked(true)
 }
 
 // SessionTTL 当前会话有效期（供 Set-Cookie Max-Age）。

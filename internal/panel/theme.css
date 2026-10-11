@@ -171,6 +171,20 @@ label.fld { display: block; margin-bottom: 14px; }
 label.fld > .lb { display: block; font-size: 12.5px; color: var(--ink-2); margin-bottom: 5px; }
 label.fld > .hint { display: block; font-size: 11.5px; color: var(--ink-3); margin-top: 4px; }
 .inline { display: flex; align-items: center; gap: 9px; }
+/* 密码框眼睛按钮（app.js 自动给 input[type=password] 套 .pw 并插入 .eye）：
+   .i-open/.i-off 两个图标按 .on 切换，默认显示「眼睛」。 */
+.pw { position: relative; display: block; }
+.pw > input { padding-right: 44px; }
+.pw > .eye {
+  position: absolute; top: 50%; right: 6px; transform: translateY(-50%);
+  display: flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px; padding: 0; border: none; border-radius: 6px;
+  background: transparent; color: var(--ink-3); cursor: pointer;
+}
+.pw > .eye:hover { background: var(--surface); color: var(--ink); }
+.pw > .eye .i-off { display: none; }
+.pw > .eye.on .i-open { display: none; }
+.pw > .eye.on .i-off { display: block; }
 
 /* ── 统计条（观测区）──────────────────────────────────────────────── */
 .stats {

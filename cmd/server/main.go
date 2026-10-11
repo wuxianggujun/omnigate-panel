@@ -307,6 +307,11 @@ func main() {
 	// 账号管理页保存后 Reconfigure 热重建（会话保留，按当前账号集合即时校验）。
 	authStore := panelauth.New(cfg.PanelAuth.Users, cfg.PanelAuth.SessionTTL(),
 		cfg.PanelAuth.MaxFail(), cfg.PanelAuth.LockDuration())
+	// 会话落盘：部署/重启容器后已登录用户不掉线（与 state 文件同目录，
+	// 缺省 data/panel_sessions.json）。失败只记日志——纯内存会话仍可正常工作。
+	if err := authStore.EnableSessionPersistence(stateSibling(cfg.StateFile, "panel_sessions.json")); err != nil {
+		log.Printf("panel: 会话持久化未启用：%v", err)
+	}
 
 	pcfg := panel.Config{
 		Pool:        p,

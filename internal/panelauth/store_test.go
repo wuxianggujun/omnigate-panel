@@ -2,6 +2,8 @@ package panelauth
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -266,5 +268,84 @@ func TestStoreVerifyNoSession(t *testing.T) {
 	}
 	if _, err := s2.Verify("boss", "pw123456", "ip2"); err == nil {
 		t.Fatal("Verify should be locked out after repeated failures")
+	}
+}
+
+// 会话落盘：容器重启（用同一文件重建 Store）后已登录用户不掉线；登出、账号被删、
+// 文件损坏三种情况都按「没有历史会话」退化，不会放出幽灵会话。
+func TestStoreSessionPersistence(t *testing.T) {
+	admin := mkUser(t, "admin", RoleAdmin, "pw123456")
+	file := filepath.Join(t.TempDir(), "panel_sessions.json")
+
+	s, _ := newTestStore(t, []User{admin}, 5, time.Minute)
+	if err := s.EnableSessionPersistence(file); err != nil {
+		t.Fatalf("enable: %v", err)
+	}
+	_, tok, err := s.Login("admin", "pw123456", "ip")
+	if err != nil {
+		t.Fatalf("login: %v", err)
+	}
+
+	// 模拟重启：同一文件重建 Store（账号集合相同）。
+	s2, _ := newTestStore(t, []User{admin}, 5, time.Minute)
+	if err := s2.EnableSessionPersistence(file); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if got, ok := s2.Authenticate(tok); !ok || got.Username != "admin" || !got.IsAdmin() {
+		t.Fatalf("session did not survive restart: %+v ok=%v", got, ok)
+	}
+
+	// 登出后立即落盘：重启不再有效。
+	s2.Logout(tok)
+	s3, _ := newTestStore(t, []User{admin}, 5, time.Minute)
+	if err := s3.EnableSessionPersistence(file); err != nil {
+		t.Fatalf("reload2: %v", err)
+	}
+	if _, ok := s3.Authenticate(tok); ok {
+		t.Error("logged-out session came back after restart")
+	}
+
+	// 账号被删除：会话不再载入。
+	_, tok2, _ := s3.Login("admin", "pw123456", "ip")
+	s4, _ := newTestStore(t, nil, 5, time.Minute)
+	if err := s4.EnableSessionPersistence(file); err != nil {
+		t.Fatalf("reload3: %v", err)
+	}
+	if _, ok := s4.Authenticate(tok2); ok {
+		t.Error("session of a removed user came back after restart")
+	}
+
+	// 文件损坏：返回错误，但 Store 仍可用（视为空会话表）。
+	if err := os.WriteFile(file, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s5, _ := newTestStore(t, []User{admin}, 5, time.Minute)
+	if err := s5.EnableSessionPersistence(file); err == nil {
+		t.Error("corrupt session file should report an error")
+	}
+	if _, ok := s5.Authenticate(tok2); ok {
+		t.Error("corrupt file produced a live session")
+	}
+}
+
+// 已过期的会话不会被载回（TTL=1h，时间前进 2h）。
+func TestStoreSessionPersistenceDropsExpired(t *testing.T) {
+	admin := mkUser(t, "admin", RoleAdmin, "pw123456")
+	file := filepath.Join(t.TempDir(), "panel_sessions.json")
+
+	s, now := newTestStore(t, []User{admin}, 5, time.Minute)
+	if err := s.EnableSessionPersistence(file); err != nil {
+		t.Fatal(err)
+	}
+	_, tok, _ := s.Login("admin", "pw123456", "ip")
+
+	*now = now.Add(2 * time.Hour)
+	s2, _ := newTestStore(t, []User{admin}, 5, time.Minute)
+	s2.now = func() time.Time { return *now }
+	if err := s2.EnableSessionPersistence(file); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := s2.Authenticate(tok); ok {
+		t.Error("expired session came back after restart")
 	}
 }

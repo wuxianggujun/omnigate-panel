@@ -117,6 +117,14 @@ func (p *Panel) omniAdminProxy(w http.ResponseWriter, r *http.Request) {
 	}
 	body := cw.body.Bytes()
 
+	// 上游 401 = 网关 api_key 不匹配，**不是**「面板会话失效」。原样回传会被前端
+	// 当成掉线并弹登录门（授权轮询每 3 秒一次，会反复弹），这里改写成 502 +
+	// 明确错误码，前端只当普通失败处理。
+	if status == http.StatusUnauthorized {
+		status = http.StatusBadGateway
+		body = []byte(`{"ok":false,"error":"omnigate_unauthorized"}`)
+	}
+
 	// 成功后的归属维护。
 	if status >= 200 && status < 300 {
 		switch sub {

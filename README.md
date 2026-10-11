@@ -28,6 +28,9 @@ Runable、办公小浣熊（Raccoon）以及任意 OpenAI 兼容上游统一成�
   全部与主面板同源、共用同一把 API Key（旧地址 `/panel/omni/` 302 跳转到账号池）。
 - OmniGate 的 API 挂载在 **`/omni/`** 前缀下：`/omni/v1/models`、`/omni/v1/chat/completions`、
   `/omni/admin/raccoon/*`（浏览器授权、账号、余额、签到、移除）、`/omni/healthz`。
+  `/omni/healthz` 与 WorkBuddy 侧同口径：**探活恒无鉴权**，但匿名只回最小身份标识
+  （`{"status":"ok","service":"omnigate"}` + `X-Service` 头）；账号标签 / 冷却 / 会话绑定 /
+  运行日志 / 内网地址 / 代理池等明细需带 `api_key`（未配置 `api_key` 时网关本就开放，按开放处理）。
 - **浣熊账号**支持浏览器授权登录（生成授权链接 → 粘贴 `office-raccoon://auth/callback?...` 回调），
   也支持直接粘贴 access/refresh token；账号与刷新后的 token 落盘在 `data/omnigate/state.json`。
 - OmniGate 使用**独立配置文件** `omnigate.json`（示例见 `omnigate.example.json`），与面板的

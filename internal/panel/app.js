@@ -3127,11 +3127,14 @@ function renderRecon(hist) {
   const winH = Math.max(1, Math.round(winSec / 3600));
   const clampH = Math.max(1, Math.round((hist.retention_sec || 0) / 3600));
   // 实际覆盖区间：刚上线时只有几分钟，如实显示，不拿「近 24h」冒充。
+  // cover 只放**时长文案**（不含「近」），「近/窗口」由调用处按有无可用历史决定——
+  // 之前把「近」拼进 cover，没有可用历史时就会渲染出「近 近 24h」。
   let maxSpan = 0;
   rows.forEach(r => { if (r.h.ok) maxSpan = Math.max(maxSpan, Number(r.h.span_sec || 0)); });
-  const cover = maxSpan > 0 ? fmtSpan(maxSpan) : ('近 ' + winH + 'h');
+  const hasSpan = maxSpan > 0;
+  const cover = hasSpan ? fmtSpan(maxSpan) : (winH + ' 小时');
   const head = $('usReconDeltaHead');
-  if (head) head.textContent = '近 ' + cover + ' Δ';
+  if (head) head.textContent = (hasSpan ? '近 ' + cover : cover) + ' Δ';
 
   const none = covered === 0;
   // 口径容差：两侧窗口已按整点对齐（见 creditsHistory 的说明），残差只剩「余额取的是
@@ -3191,15 +3194,16 @@ function renderRecon(hist) {
     if (canCompare && reconNarrowed) {
       // 说「实际覆盖的近 X」而不是「按 26h 对账」：历史可能只活了几十分钟，
       // 服务端会把窗口收窄到采样真正覆盖的桶数（见 creditsHistory 的 alignedHours）。
-      msg += '（页面窗口比余额快照历史更长：本卡按余额历史<b>实际覆盖</b>的近 ' + cover
+      msg += '（页面窗口比余额快照历史更长：本卡按余额历史<b>实际覆盖</b>'
+        + (hasSpan ? '的近 ' + cover : '（窗口 ' + cover + '）')
         + ' 对账——历史最多只保留 ' + clampH + 'h，用量侧也已收窄到同一区间。）';
     }
     $('usReconHint').innerHTML = msg;
     hintWrap.hidden = false;
   }
 
-  $('usReconNote').textContent = '覆盖近 ' + cover + ' · ' + covered
-    + ' 个账号有足够历史 · 每 5 分钟一次采样'
+  $('usReconNote').textContent = (hasSpan ? '覆盖近 ' + cover : '窗口 ' + cover + ' · 暂无可用余额变化')
+    + ' · ' + covered + ' 个账号有足够历史 · 每 5 分钟一次采样'
     + (reconHoursUsed <= 0 ? ' · 待满 1 个整点小时'
       : (reconNarrowed ? ' · 已按实际覆盖收窄（上限 ' + clampH + 'h）' : ''));
   $('usReconBody').innerHTML = rows.map(r => {
@@ -3467,7 +3471,10 @@ async function loadUsage() {
   const ph = q.get('hours');
   // 对账窗口的上限：页面选「全部历史」/自定义区间时收敛到保留期（26h）。
   const wantHours = ph === null ? 26 : Math.min(Math.max(Number(ph) || 26, 1), 26);
-  reconNarrowed = ph !== null && (Number(ph) === 0 || Number(ph) > 26);
+  // 收窄判定不能只看请求值：服务端还会按「余额采样实际覆盖的整点桶数」再收窄一次
+  // （见 creditsHistory 的 alignedHours）。页面选自定义区间时 ph 为 null，只有比对
+  // 服务端回的 hours 才知道有没有被收窄，否则会漏掉那句「本卡按实际覆盖对账」。
+  let narrowedByRequest = ph !== null && (Number(ph) === 0 || Number(ph) > 26);
   try {
     await warmUsageModelRates();
     // 先取余额历史：响应里的 hours 是**服务端实际能对齐的整点桶数**（可能被保留期或
@@ -3476,6 +3483,8 @@ async function loadUsage() {
     const hist = await api('credits/history?hours=' + wantHours).catch(() => null);
     const useHours = hist ? Number(hist.hours || 0) : 0;
     reconHoursUsed = useHours;
+    // 请求窗口 > 服务端实际生效的桶数 = 被收窄（保留期或采样覆盖），提示文案据此追加。
+    reconNarrowed = narrowedByRequest || useHours < wantHours;
     const [d, ru] = await Promise.all([
       api('usage?' + q.toString()),
       useHours > 0 ? api('usage?hours=' + useHours).catch(() => null) : Promise.resolve(null),

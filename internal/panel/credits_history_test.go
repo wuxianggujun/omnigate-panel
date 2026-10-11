@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 	"time"
 
@@ -130,6 +131,39 @@ func TestCreditsHistoryClampsToRetention(t *testing.T) {
 		if ws <= float64(25*3600) || ws > float64(26*3600) {
 			t.Fatalf("%s → window_sec=%v 应落在 (25h, 26h]", q, ws)
 		}
+	}
+}
+
+// 显式区间（from/to）：窗口超过保留期时会被收敛到 26h，此时响应里的 hours 必须跟着
+// 重算——前端就是拿这个 hours 去拉同口径用量的。hours 比 window_sec 大 = 让用量侧
+// 多算几个小时，差额会被读成「积分过期」（最坏的那种假警报）。
+func TestCreditsHistoryExplicitWindowClampsHours(t *testing.T) {
+	p := reconFixture(t)
+	now := time.Now()
+	unix := func(d time.Duration) string { return strconv.FormatInt(now.Add(d).Unix(), 10) }
+
+	// 超保留期：48h 收敛到 26h，hours 必须同步收敛。
+	out := getHistory(t, p, reqAs("alice", panelauth.RoleAdmin),
+		"from="+unix(-48*time.Hour)+"&to="+unix(0))
+	ws, _ := out["window_sec"].(float64)
+	wantSec := float64(int(credithist.Retention / time.Second))
+	if ws != wantSec {
+		t.Fatalf("window_sec=%v want %v（超保留期应收敛）", ws, wantSec)
+	}
+	wantH := float64(int(credithist.Retention / time.Hour))
+	if out["hours"] != wantH {
+		t.Fatalf("hours=%v want %v（必须与 window_sec 同口径，不能回请求的 48h）",
+			out["hours"], wantH)
+	}
+
+	// 保留期内：原样生效，hours 与 window_sec 依旧一致。
+	out = getHistory(t, p, reqAs("alice", panelauth.RoleAdmin),
+		"from="+unix(-3*time.Hour)+"&to="+unix(0))
+	if out["hours"] != float64(3) {
+		t.Fatalf("hours=%v want 3", out["hours"])
+	}
+	if ws, _ = out["window_sec"].(float64); ws != float64(3*3600) {
+		t.Fatalf("window_sec=%v want %v", ws, 3*3600)
 	}
 }
 

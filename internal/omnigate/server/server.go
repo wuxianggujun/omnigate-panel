@@ -331,22 +331,34 @@ func (lw *logWriter) ttfbMs() int64 {
 	return lw.firstByte.Sub(lw.start).Milliseconds()
 }
 
-// authorized enforces the optional API-key gate.
-func (s *Server) authorized(w http.ResponseWriter, r *http.Request) bool {
+// apiKeyFrom 取请求携带的网关密钥（Authorization: Bearer / x-api-key 两种都认）。
+func apiKeyFrom(r *http.Request) string {
+	if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
+		return strings.TrimSpace(strings.TrimPrefix(h, "Bearer "))
+	}
+	return strings.TrimSpace(r.Header.Get("x-api-key"))
+}
+
+// keyOK 报告请求是否携带了合法的网关密钥，**不写响应**——用于「同一端点按鉴权
+// 程度给不同详细度」的场景（见 handleHealth）。未配置 api_key 时与 authorized
+// 同口径：网关本就开放，直接视为通过。
+func (s *Server) keyOK(r *http.Request) bool {
 	if len(s.cfg.APIKeys) == 0 {
 		return true
 	}
-	key := ""
-	if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
-		key = strings.TrimSpace(strings.TrimPrefix(h, "Bearer "))
-	}
-	if key == "" {
-		key = r.Header.Get("x-api-key")
-	}
+	key := apiKeyFrom(r)
 	for _, k := range s.cfg.APIKeys {
 		if k != "" && k == key {
 			return true
 		}
+	}
+	return false
+}
+
+// authorized enforces the optional API-key gate.
+func (s *Server) authorized(w http.ResponseWriter, r *http.Request) bool {
+	if s.keyOK(r) {
+		return true
 	}
 	writeJSON(w, 401, openai.ErrorJSON("invalid_api_key", "invalid or missing API key"))
 	return false
@@ -698,7 +710,18 @@ func decodeBody(r *http.Request, v any) error {
 	return json.Unmarshal(body, v)
 }
 
+// handleHealth serves GET /healthz (and GET /). 探活恒无鉴权（编排/负载均衡只
+// 需要 2xx 语义），但**明细**只给持 api_key 的调用方：providers 里带全部账号
+// 标签、cooldowns/sessions 是调度状态、recent 是运行日志、addresses 是内网地址、
+// proxy_pools 是出站代理池——匿名放出去等于把账号清单和调度全貌挂在公网上
+// （WorkBuddy 侧同口径：/metrics 要求 api_key，/healthz 只回计数）。
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("X-Service", "omnigate")
+	if !s.keyOK(r) {
+		// 最小身份标识：够探活与「是不是本服务」判别，不泄露任何运营数据。
+		writeJSON(w, 200, []byte(`{"status":"ok","service":"omnigate"}`))
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 	info := s.gw.Info(ctx)

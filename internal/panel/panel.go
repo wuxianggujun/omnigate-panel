@@ -1080,7 +1080,13 @@ func (p *Panel) creditsHistory(w http.ResponseWriter, r *http.Request) {
 		window = now.Sub(now.Truncate(time.Hour).Add(-time.Duration(hours-1) * time.Hour))
 	}
 	if window <= 0 || window > credithist.Retention {
+		// 超保留期：窗口收敛到保留期。显式区间（from/to）的 hours 是按原窗口算出来的，
+		// 必须跟着重算——否则响应里 hours 比 window_sec 大，前端拿这个 hours 去拉同口径
+		// 用量就会拉到比余额历史更长的窗口，差额立刻变成「积分过期」的假警报。
 		window = credithist.Retention
+		if explicit {
+			hours = int(window / time.Hour)
+		}
 	}
 	owned, all := p.ownFilter(r)
 	var allow func(uid string) bool

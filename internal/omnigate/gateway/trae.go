@@ -23,8 +23,13 @@ func (g *Gateway) traeProvider(name string) (*trae.Provider, error) {
 
 // TraeAuthorize starts a browser login: it mints a per-account machine/device
 // fingerprint, remembers it under a state id, and returns the login URL for the
-// user to open. The tokens come back via TraeCompleteCallback (paste-the-URL).
-func (g *Gateway) TraeAuthorize(providerName, label string) (map[string]string, error) {
+// user to open.
+//
+// When redirectBase is non-empty the callback is pointed at it (typically the
+// panel's public /omni/admin/trae/redirect) so TRAE lands on a page we control
+// and the account is captured automatically. Otherwise the fallback localhost
+// callback is used and the user must paste the URL back (TraeCompleteCallback).
+func (g *Gateway) TraeAuthorize(providerName, label, redirectBase string) (map[string]string, error) {
 	if _, err := g.traeProvider(providerName); err != nil {
 		return nil, err
 	}
@@ -40,6 +45,10 @@ func (g *Gateway) TraeAuthorize(providerName, label string) (map[string]string, 
 		return nil, err
 	}
 	stateID := util.UUID()
+	callbackURL := strings.TrimSpace(redirectBase)
+	if callbackURL == "" {
+		callbackURL = trae.DefaultCallbackURL
+	}
 
 	g.traePendMu.Lock()
 	for k, v := range g.traePend {
@@ -56,14 +65,48 @@ func (g *Gateway) TraeAuthorize(providerName, label string) (map[string]string, 
 	}
 	g.traePendMu.Unlock()
 
-	return map[string]string{
+	out := map[string]string{
 		"provider":      providerName,
 		"label":         label,
 		"state":         stateID,
 		"mode":          "manual",
-		"authorize_url": trae.BuildLoginURL(machineID, deviceID, trae.DefaultCallbackURL),
+		"authorize_url": trae.BuildLoginURL(machineID, deviceID, callbackURL),
 		"callback_hint": "http://127.0.0.1:18080/authorize?refreshToken=..&userInfo=..",
-	}, nil
+	}
+	if strings.TrimSpace(redirectBase) != "" {
+		out["mode"] = "auto"
+		out["redirect_url"] = callbackURL
+	}
+	return out, nil
+}
+
+// takeTraePending finds and removes an in-flight TRAE login by explicit state id,
+// or by the login_trace_id TRAE echoes back (== MachineTraceID(machine, device)).
+// The trace-id path is what makes the public-redirect flow work, since TRAE
+// never returns our own state id.
+func (g *Gateway) takeTraePending(stateID, traceID string) (traePending, bool) {
+	g.traePendMu.Lock()
+	defer g.traePendMu.Unlock()
+	for k, v := range g.traePend {
+		if time.Since(v.at) > 15*time.Minute {
+			delete(g.traePend, k)
+		}
+	}
+	if stateID != "" {
+		if p, ok := g.traePend[stateID]; ok {
+			delete(g.traePend, stateID)
+			return p, true
+		}
+	}
+	if traceID != "" {
+		for k, v := range g.traePend {
+			if trae.MachineTraceID(v.machineID, v.deviceID) == traceID {
+				delete(g.traePend, k)
+				return v, true
+			}
+		}
+	}
+	return traePending{}, false
 }
 
 // TraeLoginResult is the outcome of adding a TRAE account.
@@ -82,17 +125,36 @@ func (g *Gateway) TraeCompleteCallback(ctx context.Context, providerName, stateI
 	if err != nil {
 		return nil, err
 	}
+	return g.finishTraeLogin(ctx, providerName, stateID, info)
+}
 
+// TraeCompleteRedirect finishes the public-redirect flow: TRAE sent the user's
+// browser straight to our callback URL, so the credentials are in the request
+// query. No copy/paste required.
+func (g *Gateway) TraeCompleteRedirect(ctx context.Context, providerName, stateID, rawQuery string) (*TraeLoginResult, error) {
+	cb := "http://redirect.local/authorize"
+	if rawQuery != "" {
+		cb += "?" + rawQuery
+	}
+	info, err := trae.ParseCallback(cb)
+	if err != nil {
+		return nil, err
+	}
+	return g.finishTraeLogin(ctx, providerName, stateID, info)
+}
+
+// finishTraeLogin resolves the pending fingerprint, exchanges the refresh token,
+// resolves the user and stores the account.
+func (g *Gateway) finishTraeLogin(ctx context.Context, providerName, stateID string, info *trae.CallbackInfo) (*TraeLoginResult, error) {
 	var pend traePending
 	ok := false
-	if stateID != "" {
-		g.traePendMu.Lock()
-		pend, ok = g.traePend[stateID]
-		delete(g.traePend, stateID)
-		g.traePendMu.Unlock()
+	if stateID != "" || info.TraceID != "" {
+		pend, ok = g.takeTraePending(stateID, info.TraceID)
 	}
-	if ok && time.Since(pend.at) > 15*time.Minute {
-		ok = false
+	if ok && pend.provider != "" {
+		// The pending session is authoritative: it records which provider the
+		// login was started for (the redirect callback carries no provider).
+		providerName = pend.provider
 	}
 	if !ok {
 		// 无 pending（或已过期）：新生成指纹。deviceId 只用于签到（须互异且
@@ -102,7 +164,7 @@ func (g *Gateway) TraeCompleteCallback(ctx context.Context, providerName, stateI
 		pend = traePending{provider: providerName, machineID: machineID, deviceID: deviceID}
 	}
 	if providerName == "" {
-		providerName = pend.provider
+		return nil, fmt.Errorf("无法确定 trae provider（登录会话可能已过期，请重新发起登录）")
 	}
 	tp, err := g.traeProvider(providerName)
 	if err != nil {

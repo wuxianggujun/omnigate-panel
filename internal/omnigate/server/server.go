@@ -118,6 +118,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// here — the browser navigates to it directly. Safety comes from the
 		// one-time, state-validated authorization session.
 		s.handleRaccoonRedirect(w, r)
+	case r.Method == http.MethodGet && path == "/admin/trae/redirect":
+		// Browser callback for the TRAE login redirect flow: TRAE sends the user
+		// here after login (no API key — the browser navigates directly). Safety
+		// comes from the one-time pending session keyed by the echoed trace id.
+		s.handleTraeRedirect(w, r)
 	case strings.HasPrefix(path, "/admin/raccoon/"):
 		if !s.authorized(w, r) {
 			return
@@ -484,19 +489,43 @@ func (s *Server) handleRaccoonRedirect(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
-		_, _ = io.WriteString(w, raccoonRedirectPage(false, err.Error()))
+		_, _ = io.WriteString(w, authRedirectPage(false, err.Error()))
 		return
 	}
 	name := res.Label
 	if res.Name != "" {
 		name = res.Name + "（" + res.Label + "）"
 	}
-	_, _ = io.WriteString(w, raccoonRedirectPage(true, "账号已添加："+name))
+	_, _ = io.WriteString(w, authRedirectPage(true, "账号已添加："+name))
 }
 
-// raccoonRedirectPage renders a tiny self-contained result page (inline styles,
+// handleTraeRedirect is the unauthenticated browser callback for the TRAE login
+// redirect flow. TRAE sends the browser here after login with refreshToken /
+// userInfo / loginTraceID in the query; we validate the pending session (matched
+// by the echoed trace id), exchange the token and render a result page.
+func (s *Server) handleTraeRedirect(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	state := strings.TrimSpace(q.Get("state"))
+	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	defer cancel()
+	res, err := s.gw.TraeCompleteRedirect(ctx, s.traeProviderOrDefault(q.Get("provider")), state, r.URL.RawQuery)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, authRedirectPage(false, err.Error()))
+		return
+	}
+	name := res.Label
+	if res.Name != "" {
+		name = res.Name + "（" + res.Label + "）"
+	}
+	_, _ = io.WriteString(w, authRedirectPage(true, "账号已添加："+name))
+}
+
+// authRedirectPage renders a tiny self-contained result page (inline styles,
 // no external resources) shown in the tab the authorize page opened.
-func raccoonRedirectPage(ok bool, text string) string {
+func authRedirectPage(ok bool, text string) string {
 	title, color, icon := "授权成功", "#3fb950", "✅"
 	if !ok {
 		title, color, icon = "授权失败", "#f85149", "⚠️"
@@ -546,7 +575,7 @@ func (s *Server) handleTraeAdmin(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/admin/trae/")
 	switch {
 	case r.Method == http.MethodGet && path == "authorize":
-		res, err := s.gw.TraeAuthorize(s.traeProviderOrDefault(r.URL.Query().Get("provider")), r.URL.Query().Get("label"))
+		res, err := s.gw.TraeAuthorize(s.traeProviderOrDefault(r.URL.Query().Get("provider")), r.URL.Query().Get("label"), r.URL.Query().Get("redirect_base"))
 		if err != nil {
 			s.adminError(w, err)
 			return

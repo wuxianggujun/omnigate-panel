@@ -130,6 +130,23 @@ func TestParseCallbackEmpty(t *testing.T) {
 	}
 }
 
+func TestParseCallbackTraceID(t *testing.T) {
+	trace := MachineTraceID("m1", "d1")
+	raw := "https://panel.example/omni/admin/trae/redirect?refreshToken=RT&loginTraceID=" + trace
+	info, err := ParseCallback(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.TraceID != trace {
+		t.Errorf("trace=%q want %q", info.TraceID, trace)
+	}
+	// login_trace_id (snake case) is also accepted.
+	raw2 := "https://panel.example/x?refreshToken=RT&login_trace_id=" + trace
+	if info2, err := ParseCallback(raw2); err != nil || info2.TraceID != trace {
+		t.Errorf("snake trace: %+v err=%v", info2, err)
+	}
+}
+
 func TestBuildLoginURL(t *testing.T) {
 	u := BuildLoginURL("m1", "d1", "http://127.0.0.1:18080/authorize")
 	for _, want := range []string{

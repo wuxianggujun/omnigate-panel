@@ -3817,11 +3817,11 @@ function ogNextLabel() {
   return base + (ogAcctCount() + 1);
 }
 
-// setOgAuthCopy 让「浏览器登录」面板适配 raccoon（自动捕获）与 trae（粘贴回调链接）。
+// setOgAuthCopy 让「浏览器登录」面板适配 raccoon / trae（均为自动捕获，带回退粘贴）。
 function setOgAuthCopy(isTrae) {
   if ($('btnStartOgAuth')) $('btnStartOgAuth').textContent = isTrae ? '生成登录链接并打开登录页' : '生成授权链接并打开登录页';
   if ($('ogAuthHint')) $('ogAuthHint').innerHTML = isTrae
-    ? '登录后 TRAE 会跳到一个打不开的本机地址（<code>127.0.0.1</code>）。把浏览器地址栏里的整条 URL（含 <code>refreshToken</code> / <code>userInfo</code>）复制到下面提交即可。可重复添加多个账号。'
+    ? '登录成功后会自动跳回本面板并添加账号。若浏览器未自动跳回：把地址栏里的整条 URL（含 <code>refreshToken</code> / <code>userInfo</code>）复制到下面提交即可。可重复添加多个账号。'
     : '若浏览器没有自动跳回：登录后把地址栏里的整段 <code>office-raccoon://auth/callback?code=...&amp;state=...</code>（或只把 <code>code</code>）粘到下面提交即可。可重复添加多个账号。';
   if ($('callback')) $('callback').placeholder = isTrae
     ? 'http://127.0.0.1:18080/authorize?refreshToken=...&userInfo=...'
@@ -3846,8 +3846,10 @@ async function authorizeOmni() {
   try {
     let data;
     if (isTrae) {
+      const redirectBase = location.origin + '/omni/admin/trae/redirect';
       data = await apiAbs('/omni/admin/trae/authorize?provider=' + encodeURIComponent(provName())
-        + '&label=' + encodeURIComponent($('authLabel').value));
+        + '&label=' + encodeURIComponent($('authLabel').value)
+        + '&redirect_base=' + encodeURIComponent(redirectBase));
       ogAuthState = data.state || '';
     } else {
       const redirectBase = location.origin + '/omni/admin/raccoon/redirect';
@@ -3860,18 +3862,16 @@ async function authorizeOmni() {
     $('ogAuthUrl').textContent = url;
     $('ogAuthLoad').hidden = true;
     $('ogAuthReady').hidden = false;
-    if (isTrae || data.mode !== 'auto') {
+    if (data.mode !== 'auto') {
       $('authMode').textContent = '手动粘贴回调';
       $('ogAuthPoll').hidden = true;
-      ogMsg('authMsg', isTrae
-        ? '已生成登录链接；登录后把浏览器地址栏里的整条 URL 粘到下方「手动粘贴回调」提交。'
-        : '已生成授权链接；登录后请展开下方「手动粘贴回调（备选）」提交。', 'ok');
+      ogMsg('authMsg', '已生成授权链接；登录后请展开下方「手动粘贴回调（备选）」提交。', 'ok');
       const det = $('addTabOgAuth') ? $('addTabOgAuth').querySelector('details.og-adv') : null;
       if (det) det.open = true;
     } else {
       $('authMode').textContent = '自动捕获';
       $('ogAuthPoll').hidden = false;
-      startAutoPoll($('authLabel').value);
+      startAutoPoll($('authLabel').value, isTrae);
     }
     if (url) window.open(url, '_blank', 'noopener');
   } catch (e) {
@@ -3881,8 +3881,9 @@ async function authorizeOmni() {
   }
 }
 
-function startAutoPoll(label) {
+function startAutoPoll(label, isTrae) {
   const before = ogAcctCount();
+  const acctPath = isTrae ? '/omni/admin/trae/accounts' : '/omni/admin/raccoon/accounts';
   let tries = 0;
   autoPollTimer = setInterval(async () => {
     tries++;
@@ -3893,7 +3894,7 @@ function startAutoPoll(label) {
       return;
     }
     try {
-      const data = await apiAbs('/omni/admin/raccoon/accounts?provider=' + encodeURIComponent(provName()));
+      const data = await apiAbs(acctPath + '?provider=' + encodeURIComponent(provName()));
       const list = (data && data.accounts) || [];
       if (list.length > before || list.some(a => a.label === label)) {
         stopAutoPoll();

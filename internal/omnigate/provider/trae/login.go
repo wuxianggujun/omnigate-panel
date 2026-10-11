@@ -15,9 +15,12 @@ import (
 	"time"
 )
 
-// DefaultCallbackURL is the redirect target TRAE sends the user back to. It is
-// intentionally a localhost address the user's browser cannot reach: the point
-// is that the tokens appear in the address bar so the user can copy the URL.
+// DefaultCallbackURL is the fallback redirect target TRAE sends the user back
+// to when no explicit callback is supplied. It is a localhost address the
+// user's browser cannot reach: the point is that the tokens appear in the
+// address bar so the user can copy the URL. The panel normally supplies its own
+// public callback (…/omni/admin/trae/redirect) so the account is captured
+// automatically without any copy/paste.
 const DefaultCallbackURL = "http://127.0.0.1:18080/authorize"
 
 // loginTraceIDHexLen is the hex length of login_trace_id (matching login.sh).
@@ -64,6 +67,10 @@ type CallbackInfo struct {
 	Nickname     string
 	EnterpriseID string
 	ExpiresAt    int64
+	// TraceID is TRAE's echoed login_trace_id (= MachineTraceID(machine, device)).
+	// The redirect flow uses it to recover the pending machine/device fingerprint
+	// because TRAE never echoes our own state id.
+	TraceID string
 }
 
 // parseJSONParam decodes a URL-encoded JSON query parameter (with one extra
@@ -141,6 +148,10 @@ func ParseCallback(rawURL string) (*CallbackInfo, error) {
 	}
 	q := u.Query()
 	info := &CallbackInfo{RefreshToken: q.Get("refreshToken")}
+	info.TraceID = q.Get("loginTraceID")
+	if info.TraceID == "" {
+		info.TraceID = q.Get("login_trace_id")
+	}
 
 	userInfo := parseJSONParam(q.Get("userInfo"))
 	info.UID = getString(userInfo, "UserID")

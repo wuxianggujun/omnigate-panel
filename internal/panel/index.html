@@ -29,13 +29,13 @@
       <li><a href="#models" data-view="models">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M8 1.8 14 5v6L8 14.2 2 11V5z"/><path d="M2 5l6 3.2L14 5M8 8.2v6"/></svg>
         模型与档位</a></li>
-      <li><a href="#providers" data-view="providers">
+      <li data-user-hide><a href="#providers" data-view="providers">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="8" r="5.8"/><path d="M2.2 8h11.6M8 2.2c1.9 1.9 1.9 9.7 0 11.6M8 2.2c-1.9 1.9-1.9 9.7 0 11.6"/></svg>
         上游供应商</a></li>
-      <li><a href="#outbound" data-view="outbound">
+      <li data-user-hide><a href="#outbound" data-view="outbound">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="3.5" cy="8" r="1.8"/><circle cx="12.5" cy="4" r="1.8"/><circle cx="12.5" cy="12" r="1.8"/><path d="M5.2 7.2 10.8 4.6M5.2 8.8l5.6 2.6"/></svg>
         出站代理</a></li>
-      <li><a href="#config" data-view="config">
+      <li data-user-hide><a href="#config" data-view="config">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.6v1.9M8 12.5v1.9M1.6 8h1.9M12.5 8h1.9M3.5 3.5l1.3 1.3M11.2 11.2l1.3 1.3M12.5 3.5l-1.3 1.3M4.8 11.2l-1.3 1.3"/></svg>
         配置</a></li>
       <li><a href="#logs" data-view="logs">
@@ -63,7 +63,7 @@
       </button>
       <button id="btnRefresh">刷新</button>
       <button id="btnExportAccounts" data-admin title="导出全部账号（WorkBuddy + OmniGate，含凭证，请妥善保管）">导出账号</button>
-      <button class="primary" id="btnAdd" data-admin>添加账号</button>
+      <button class="primary" id="btnAdd" data-write>添加账号</button>
       <button class="ghost" id="btnTopLogin" hidden title="登录后可修改配置、运维账号">登录</button>
       <button class="ghost" id="btnLogout" hidden>退出登录</button>
     </div>
@@ -990,12 +990,12 @@
   </div>
 </div>
 
-<!-- 登录（配置了面板账号后） -->
+<!-- 登录 / 注册（配置了面板账号后） -->
 <div class="veil" id="loginVeil" data-lock="1">
   <div class="dlg" style="width:420px">
     <header>
-      <h3>登录面板</h3>
-      <div class="hint">面板账号与网关 api_key 相互独立。<b>未登录时面板为只读</b>（可看账号池 / 用量 / 请求记录 / 模型，凭证只显示前缀与长度）；登录后才能修改配置、运维账号。</div>
+      <h3 id="authTitle">登录面板</h3>
+      <div class="hint" id="authHint">面板账号与网关 api_key 相互独立。<b>未登录时面板为只读</b>（可看账号数/健康度等汇总与模型目录，凭证与账号明细不可见）；登录后才能添加/运维自己的账号。</div>
     </header>
     <div class="body">
       <form id="loginForm">
@@ -1003,10 +1003,13 @@
           <input id="loginUser" autocomplete="username" placeholder="账号"></label>
         <label class="fld" style="margin-top:8px"><span class="lb">密码</span>
           <input id="loginPass" type="password" autocomplete="current-password" placeholder="密码"></label>
+        <label class="fld" id="loginPass2Wrap" style="margin-top:8px;display:none"><span class="lb">确认密码</span>
+          <input id="loginPass2" type="password" autocomplete="new-password" placeholder="再次输入密码"></label>
       </form>
       <div class="state err" id="loginErr" hidden style="margin-top:10px">账号或密码不正确。</div>
     </div>
     <footer>
+      <a href="#" id="btnToggleAuth" hidden style="font-size:12px;text-decoration:underline">没有账号？注册</a>
       <span class="grow"></span>
       <button class="primary" id="btnLogin">登录</button>
     </footer>

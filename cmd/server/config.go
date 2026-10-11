@@ -29,6 +29,14 @@ type PanelAuthConfig struct {
 	LockMinutes int `json:"lock_minutes"`
 	// Users 账号列表（含 PBKDF2 密码哈希）。空 = 未配置（面板不可登录，需命令行引导）。
 	Users []panelauth.User `json:"users"`
+	// AllowRegistration 是否开放自助注册（访客可在登录门注册一个 user 角色账号）。
+	// nil = 未显式配置 = 允许（面板「多租户」默认开启，管理员可在面板关掉）。
+	AllowRegistration *bool `json:"allow_registration,omitempty"`
+}
+
+// RegistrationAllowed 自助注册是否开启（未配置时默认允许）。
+func (p PanelAuthConfig) RegistrationAllowed() bool {
+	return p.AllowRegistration == nil || *p.AllowRegistration
 }
 
 // SessionTTL 会话有效期（SessionHours<=0 时回落 72h）。

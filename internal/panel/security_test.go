@@ -205,14 +205,21 @@ func TestValidUID(t *testing.T) {
 	}
 }
 
-// 只读接口默认公开（无需登录）；写接口未登录一律 401；网关 api_key 已不能打开面板。
+// 公开只读接口（账号池统计 / 模型目录）默认公开（无需登录）；平台配置与写接口未登录
+// 一律 401；网关 api_key 已不能打开面板。
 func TestAuthLayerBehavior(t *testing.T) {
 	p := newTestPanel()
-	// 只读公开：GET 通过鉴权层（无 LoadConfig → 501，而非 401）。
+	// 公开只读：GET 通过鉴权层（无 OmniModels → 501，而非 401）。
 	rec := httptest.NewRecorder()
-	p.ServeHTTP(rec, httptest.NewRequest("GET", "/panel/api/config", nil))
+	p.ServeHTTP(rec, httptest.NewRequest("GET", "/panel/api/omni/models", nil))
 	if rec.Code == http.StatusUnauthorized {
-		t.Fatalf("anon read must not be 401: code=%d", rec.Code)
+		t.Fatalf("anon read (public) must not be 401: code=%d", rec.Code)
+	}
+	// 平台配置不公开：未登录 401（多租户收紧为「匿名只看统计与模型目录」）。
+	recCfg := httptest.NewRecorder()
+	p.ServeHTTP(recCfg, httptest.NewRequest("GET", "/panel/api/config", nil))
+	if recCfg.Code != http.StatusUnauthorized {
+		t.Fatalf("anon read config: code=%d want 401", recCfg.Code)
 	}
 	// 写接口未登录 → 401。
 	recW := httptest.NewRecorder()

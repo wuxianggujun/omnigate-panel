@@ -551,6 +551,14 @@ func (r *Recorder) SnapshotWithRates(hours int, nicks map[string]string, current
 // 生效"，已废弃）。小时桶按整点入窗；日桶（Rollup 折叠出的长期数据）按日起点入窗，
 // 故小时窗口天然不含更早的日桶。
 func (r *Recorder) SnapshotWindow(w Window, nicks map[string]string, currentRate func(realm, model string) string) Snapshot {
+	return r.SnapshotWindowFiltered(w, nicks, currentRate, nil)
+}
+
+// SnapshotWindowFiltered 与 SnapshotWindow 相同，但只聚合 allowUID(uid)==true 的
+// 账号分片（nil = 全部账号）。用于多租户：普通用户只看自己账号的用量——在分片
+// 层面过滤，卡片汇总 / 按域 / 按账号 / 按模型 / 时序口径随之**一致**变化，不会
+// 出现"明细是自己、汇总却是全站"的错位。
+func (r *Recorder) SnapshotWindowFiltered(w Window, nicks map[string]string, currentRate func(realm, model string) string, allowUID func(uid string) bool) Snapshot {
 	if r == nil {
 		return Snapshot{Generated: time.Now().Format(time.RFC3339)}
 	}
@@ -582,6 +590,9 @@ func (r *Recorder) SnapshotWindow(w Window, nicks map[string]string, currentRate
 	matched := 0
 	for i := range bs {
 		b := &bs[i]
+		if allowUID != nil && !allowUID(b.UID) {
+			continue
+		}
 		if b.Scope < since || since == "" {
 			since = b.Scope
 		}

@@ -3,7 +3,7 @@
 const LS_KEY = 'wb2api.key', LS_THEME = 'wb2api.theme';
 /* 面板登录态（GET /panel/api/session）：{authenticated, configured, mode, username, role}。
    mode：session（账号登录）/ legacy（未配置账号时的 api_key 门）/ open（都未启用）。 */
-let authState = { authenticated: false, configured: false, mode: '', username: '', role: '' };
+let authState = { authenticated: false, configured: false, mode: '', username: '', role: '', allowRegistration: false };
 let theme = localStorage.getItem(LS_THEME) || 'auto';   // auto | light | dark
 let view = 'accounts';
 let overviewData = null, cfgLoaded = null;
@@ -65,7 +65,7 @@ async function api(path, opts = {}) {
   // 公开只读：未登录时写操作不发请求，直接引导登录（服务端本来也会 401）。
   // 登录端点本身例外。
   const method = (opts.method || 'GET').toUpperCase();
-  if (method !== 'GET' && path !== 'session' && !authState.authenticated) {
+  if (method !== 'GET' && path !== 'session' && path !== 'register' && !authState.authenticated) {
     showAuthGate();
     throw new Error('未登录：面板为只读模式，请先登录再操作');
   }
@@ -75,7 +75,10 @@ async function api(path, opts = {}) {
   const d = await r.json().catch(() => ({}));
   if (r.status === 401) { showAuthGate(); throw new Error('未登录或会话已过期'); }
   if (r.status === 403) {
-    throw new Error(d.error === 'admin_required' ? '需要管理员权限（当前为只读账号）' : (d.error || 'HTTP 403'));
+    const e = d.error || '';
+    throw new Error(e === 'admin_required' ? '需要管理员权限'
+      : (e === 'not_your_account' ? '这不是你的账号，无权操作'
+      : (e === 'tenant_required' ? '只读账号不能执行写操作' : (e || 'HTTP 403'))));
   }
   if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
   return d;
@@ -344,32 +347,73 @@ function formatRate(rate) {
   return n.toFixed(1) + 'tok/s';
 }
 
-/* ── 鉴权门（账号登录 / 未配置账号引导）──────────────────────────────── */
+/* ── 鉴权门（账号登录 / 自助注册 / 未配置账号引导）──────────────────── */
+let authMode = 'login'; // login | register
+
 function showAuthGate() {
   if (authState.configured) openLogin(); else openSetup();
 }
-function openLogin() { $('loginVeil').classList.add('on'); setTimeout(() => $('loginUser').focus(), 60); }
+function openLogin() {
+  if (authMode !== 'register') setAuthMode('login');
+  $('loginVeil').classList.add('on');
+  setTimeout(() => $('loginUser').focus(), 60);
+}
 function openSetup() { $('setupVeil').classList.add('on'); }
 function closeGates() { $('loginVeil').classList.remove('on'); $('setupVeil').classList.remove('on'); }
 $('btnSetupReload').onclick = () => location.reload();
 
-/* 账号登录。 */
+/* setAuthMode 在「登录 / 注册」两种形态间切换（同一个弹窗、同一套字段）。 */
+function setAuthMode(mode) {
+  authMode = mode === 'register' ? 'register' : 'login';
+  const reg = authMode === 'register';
+  if ($('authTitle')) $('authTitle').textContent = reg ? '注册面板账号' : '登录面板';
+  if ($('btnLogin')) $('btnLogin').textContent = reg ? '注册并登录' : '登录';
+  if ($('loginPass2Wrap')) $('loginPass2Wrap').style.display = reg ? '' : 'none';
+  if ($('loginPass')) $('loginPass').setAttribute('autocomplete', reg ? 'new-password' : 'current-password');
+  const t = $('btnToggleAuth');
+  if (t) {
+    t.hidden = reg ? false : !authState.allowRegistration;
+    t.textContent = reg ? '已有账号？登录' : '没有账号？注册';
+  }
+  if ($('loginErr')) $('loginErr').hidden = true;
+}
+if ($('btnToggleAuth')) $('btnToggleAuth').onclick = e => {
+  e.preventDefault();
+  setAuthMode(authMode === 'register' ? 'login' : 'register');
+};
+
+/* 账号登录 / 自助注册（同一表单，按 authMode 分流）。 */
 async function doLogin() {
   const u = $('loginUser').value.trim(), p = $('loginPass').value;
   if (!u || !p) return;
+  const reg = authMode === 'register';
+  if (reg && p !== $('loginPass2').value) {
+    $('loginErr').textContent = '两次输入的密码不一致。';
+    $('loginErr').hidden = false;
+    return;
+  }
   const btn = $('btnLogin');
   btn.disabled = true;
   try {
-    await api('session', { method: 'POST', body: JSON.stringify({ username: u, password: p }) });
+    if (reg) {
+      await api('register', { method: 'POST', body: JSON.stringify({ username: u, password: p }) });
+    } else {
+      await api('session', { method: 'POST', body: JSON.stringify({ username: u, password: p }) });
+    }
     $('loginErr').hidden = true;
     $('loginPass').value = '';
+    $('loginPass2').value = '';
     closeGates();
     await bootstrapAuth();
   } catch (e) {
     const msg = String(e.message);
     $('loginPass').value = '';
     $('loginErr').textContent = msg.includes('too_many') ? '尝试次数过多，请稍后再试。'
-      : (msg.includes('invalid_credentials') ? '账号或密码不正确。' : '登录失败：' + msg);
+      : (msg.includes('invalid_credentials') ? '账号或密码不正确。'
+      : (msg.includes('已存在') ? '该账号名已被注册，请换一个。'
+      : (msg.includes('registration_disabled') ? '本面板未开放自助注册。'
+      : (msg.includes('panel_auth_not_configured') ? '面板尚未初始化，无法注册。'
+      : (reg ? '注册失败：' : '登录失败：') + msg))));
     $('loginErr').hidden = false;
   } finally { btn.disabled = false; }
 }
@@ -377,6 +421,7 @@ $('loginForm').addEventListener('submit', e => { e.preventDefault(); doLogin(); 
 $('btnLogin').addEventListener('click', doLogin);
 $('loginUser').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); doLogin(); } });
 $('loginPass').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); doLogin(); } });
+$('loginPass2').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); doLogin(); } });
 
 /* 顶部「登录」：未登录时打开登录门（未配置账号则给命令行引导）。 */
 $('btnTopLogin').onclick = () => { if (authState.configured) openLogin(); else openSetup(); };
@@ -387,8 +432,16 @@ $('btnLogout').onclick = async () => {
   location.reload();
 };
 
-/* 应用身份到界面：未登录 = 公开只读（public），与 viewer 一样隐藏所有 [data-admin]
-   写控件，但顶部给出「登录」入口。服务端仍强校验写接口。 */
+/* roleLabel 面板角色 → 中文名。 */
+function roleLabel(r) {
+  return r === 'admin' ? '管理员' : (r === 'user' ? '用户' : '只读');
+}
+
+/* applyRole 应用身份到界面：
+     public  未登录 → 公开只读（只看匿名汇总 + 模型目录），顶部给「登录/注册」入口；
+     user    普通用户 → 只看/管自己的账号，平台配置页隐藏；
+     viewer  只读全部；admin 全权。
+   服务端仍强校验写接口，这里只是 UI 收敛。 */
 function applyRole() {
   const role = authState.authenticated ? (authState.role || 'viewer') : 'public';
   document.body.dataset.role = role;
@@ -396,12 +449,19 @@ function applyRole() {
   if (w) {
     const show = !!(authState.authenticated && authState.username);
     w.hidden = !show;
-    if (show) w.textContent = authState.username + ' · ' + (authState.role || 'viewer');
+    if (show) w.textContent = authState.username + ' · ' + roleLabel(role);
   }
   const lo = $('btnLogout');
   if (lo) lo.hidden = !authState.authenticated;
   const li = $('btnTopLogin');
-  if (li) li.hidden = authState.authenticated;
+  if (li) {
+    li.hidden = authState.authenticated;
+    li.textContent = authState.allowRegistration ? '登录 / 注册' : '登录';
+  }
+  const t = $('btnToggleAuth');
+  if (t) t.hidden = authMode === 'register' ? false : !authState.allowRegistration;
+  // 普通用户看不到平台配置页：若当前停在这些页，退回账号池。
+  if (role === 'user' && ['providers', 'outbound', 'config'].indexOf(view) >= 0) go('accounts');
 }
 
 /* 启动引导：查会话 → 无论是否登录都直接进入面板（默认公开只读）；未登录只显示
@@ -410,7 +470,9 @@ async function bootstrapAuth() {
   let s;
   try { s = await (await fetch('/panel/api/session')).json(); }
   catch (e) { s = { authenticated: false, configured: false, mode: '' }; }
-  authState = Object.assign({ authenticated: false, configured: false, mode: '', username: '', role: '' }, s);
+  authState = Object.assign({ authenticated: false, configured: false, mode: '', username: '', role: '', allowRegistration: false }, s);
+  if (!authState.configured) authState.allowRegistration = false;
+  setAuthMode('login');
   applyRole();
   closeGates();
   start();
@@ -3625,15 +3687,20 @@ async function ensureOmniKey() {
   return '';
 }
 
+// apiAbs 调 OmniGate 的「登录类管理端点」（/omni/admin/raccoon|trae/*）。
+//
+// 多租户后不再直连 /omni/*（普通用户没有网关 api_key），改由面板代理：
+// /omni/admin/<...> → /panel/api/omni/admin/<...>，面板在服务端注入 api_key 转发，
+// 并按归属打标/过滤（见 internal/panel/omni_admin_proxy.go）。鉴权走同源会话 Cookie。
 async function apiAbs(path, opts = {}) {
+  const p = path.replace(/^\/omni\/admin\//, '/panel/api/omni/admin/');
   const h = Object.assign({}, opts.headers || {});
-  const k = await ensureOmniKey();
-  if (k) h['Authorization'] = 'Bearer ' + k;
   if (opts.body) h['Content-Type'] = 'application/json';
-  const r = await fetch(path, Object.assign({}, opts, { headers: h }));
+  const r = await fetch(p, Object.assign({}, opts, { headers: h }));
   const text = await r.text();
   let d = null;
   try { d = text ? JSON.parse(text) : null; } catch (e) { d = { raw: text }; }
+  if (r.status === 401) { showAuthGate(); throw new Error('未登录或会话已过期'); }
   if (!r.ok) {
     const em = d && d.error && d.error.message;
     throw new Error(em || (d && d.error) || (d && d.raw) || ('HTTP ' + r.status));
@@ -4016,20 +4083,17 @@ async function loginOgCreds() {
   if (btn) { btn.disabled = true; btn.textContent = '校验中…'; }
   ogMsg('ogCredsMsg', '');
   try {
-    // 服务端校验会话（get-session）+ 取积分，返回规范化的 Cookie。
+    // 服务端校验会话（get-session）+ 取积分，返回规范化的 Cookie；随后由面板
+    // 服务端定向写入 omnigate.json（普通用户无需、也不该整份保存配置）。
     const res = await api('omni/account/login', {
       method: 'POST',
       body: JSON.stringify({ provider: addSource, cookie }),
     });
     const info = (res && res.account) || {};
-    const cfg = await fetchOmniCfg();
-    const prov = (cfg.providers || []).find(p => p.name === addSource);
-    if (!prov) throw new Error('找不到供应商 ' + addSource);
-    const acct = { label, cookie: info.cookie || cookie };
-    prov.accounts = prov.accounts || [];
-    const idx = prov.accounts.findIndex(a => (a.label || '') === label);
-    if (idx >= 0) prov.accounts[idx] = acct; else prov.accounts.push(acct);
-    await api('omni/config', { method: 'POST', body: JSON.stringify(normalizeOmniForSave(cfg)) });
+    await api('omni/account/add', {
+      method: 'POST',
+      body: JSON.stringify({ provider: addSource, label, cookie: info.cookie || cookie }),
+    });
     const msg = '已保存：' + (info.name || info.email || label)
       + (typeof info.available === 'number' ? ' · 积分 ' + info.available : '') + '，已载入池中';
     ogMsg('ogCredsMsg', msg, 'ok');
@@ -4047,15 +4111,13 @@ function openRunableLogin() {
   window.open('https://runable.com/', '_blank', 'noopener');
 }
 
-// removeOmniAccountFromConfig 删除 runable 类账号（静态配置，改 omnigate.json 后热生效）。
+// removeOmniAccountFromConfig 删除配置型账号（runable 等，改 omnigate.json 后热生效）。
+// 由面板服务端定向删除（普通用户无需整份保存配置，也就看不到别人的账号）。
 async function removeOmniAccountFromConfig(provider, label) {
-  const cfg = await fetchOmniCfg();
-  const prov = (cfg.providers || []).find(p => p.name === provider);
-  if (!prov) throw new Error('找不到供应商 ' + provider);
-  const before = (prov.accounts || []).length;
-  prov.accounts = (prov.accounts || []).filter(a => (a.label || '') !== label);
-  if (prov.accounts.length === before) throw new Error('未找到账号「' + label + '」（可能由配置默认命名）');
-  await api('omni/config', { method: 'POST', body: JSON.stringify(normalizeOmniForSave(cfg)) });
+  await api('omni/account/remove', {
+    method: 'POST',
+    body: JSON.stringify({ provider, label }),
+  });
 }
 
 /* ── 上游模型目录 ── */

@@ -110,9 +110,13 @@ func TestPanelAuthSessionLoginLogout(t *testing.T) {
 		!strings.Contains(rec.Body.String(), `"authenticated":false`) {
 		t.Fatalf("session state (anon) = %d %s", rec.Code, rec.Body.String())
 	}
-	// 只读接口默认公开：未登录 GET 通过鉴权层（无 LoadConfig → 501，而非 401）。
-	if rec := do(p, "GET", "/panel/api/config", "", nil, nil); rec.Code != http.StatusNotImplemented {
-		t.Fatalf("anon read config = %d want 501 (public read passed auth)", rec.Code)
+	// 公开只读接口默认公开：未登录 GET 通过鉴权层（无 OmniModels → 501，而非 401）。
+	if rec := do(p, "GET", "/panel/api/omni/models", "", nil, nil); rec.Code != http.StatusNotImplemented {
+		t.Fatalf("anon read (public) = %d want 501 (public read passed auth)", rec.Code)
+	}
+	// 平台配置不公开：未登录 401（多租户收紧）。
+	if rec := do(p, "GET", "/panel/api/config", "", nil, nil); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("anon read config = %d want 401", rec.Code)
 	}
 	// 写接口仍要求登录：未登录 POST → 401。
 	if rec := do(p, "POST", "/panel/api/config", `{}`, nil, nil); rec.Code != http.StatusUnauthorized {
@@ -155,13 +159,17 @@ func TestPanelAuthAPIKeyRejectedWhenUsersConfigured(t *testing.T) {
 	}
 }
 
-// 未配置任何面板账号时：只读接口默认公开（无需登录），写接口一律 401——
+// 未配置任何面板账号时：公开只读接口默认公开（无需登录），平台配置与写接口一律 401——
 // 网关 api_key 不再能打开面板（已与 api_key 彻底解耦）。
 func TestPanelAuthNoLegacyFallbackWithoutUsers(t *testing.T) {
 	p, _ := newAuthPanel(t, nil, "test-key")
-	// 只读公开：GET 通过鉴权层（无 LoadConfig → 501，而非 401）。
-	if rec := do(p, "GET", "/panel/api/config", "", nil, nil); rec.Code != http.StatusNotImplemented {
-		t.Fatalf("anon read without users = %d want 501 (public read)", rec.Code)
+	// 公开只读：GET 通过鉴权层（无 OmniModels → 501，而非 401）。
+	if rec := do(p, "GET", "/panel/api/omni/models", "", nil, nil); rec.Code != http.StatusNotImplemented {
+		t.Fatalf("anon read (public) without users = %d want 501", rec.Code)
+	}
+	// 平台配置不公开：未登录 401。
+	if rec := do(p, "GET", "/panel/api/config", "", nil, nil); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("anon read config without users = %d want 401", rec.Code)
 	}
 	// 写接口：api_key / 匿名都拒绝。
 	if rec := do(p, "POST", "/panel/api/config", `{}`, nil, map[string]string{"Authorization": "Bearer test-key"}); rec.Code != http.StatusUnauthorized {
@@ -176,11 +184,13 @@ func TestPanelAuthNoLegacyFallbackWithoutUsers(t *testing.T) {
 	}
 }
 
-// 匿名只读不得泄漏可用网关密钥：GET /panel/api/config 对未登录访问者必须把顶层
-// api_key / api_keys 一并脱敏；已登录（admin）仍拿到明文 api_key（面板前端要用它
-// 调 /omni/*），但嵌套凭证一律脱敏。
-func TestPublicReadMasksGatewayKeys(t *testing.T) {
-	users := []panelauth.User{pwUser(t, "admin", panelauth.RoleAdmin, "pw123456")}
+// 网关密钥只回显给管理员：viewer（只读全部）拿不到可用 api_key，嵌套凭证对所有
+// 角色一律脱敏；admin 仍拿到明文顶层 api_key（面板前端要用它调 /omni/*）。
+func TestGatewayKeysMaskedForNonAdmin(t *testing.T) {
+	users := []panelauth.User{
+		pwUser(t, "admin", panelauth.RoleAdmin, "pw123456"),
+		pwUser(t, "guest", panelauth.RoleViewer, "pw123456"),
+	}
 	p, _ := newAuthPanel(t, users, "gw-secret-1234567890")
 	p.cfg.LoadConfig = func() (any, error) {
 		return map[string]any{
@@ -190,20 +200,21 @@ func TestPublicReadMasksGatewayKeys(t *testing.T) {
 		}, nil
 	}
 
-	// 匿名：密钥全部脱敏。
-	rec := do(p, "GET", "/panel/api/config", "", nil, nil)
+	// viewer（只读全部）：密钥全部脱敏。
+	ckv := login(t, p, "guest", "pw123456")
+	rec := do(p, "GET", "/panel/api/config", "", ckv, nil)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("anon config = %d want 200", rec.Code)
+		t.Fatalf("viewer config = %d want 200", rec.Code)
 	}
 	body := rec.Body.String()
 	if strings.Contains(body, "gw-secret-1234567890") || strings.Contains(body, "dev-secret-abcdef") {
-		t.Fatalf("匿名响应泄漏明文密钥：%s", body)
+		t.Fatalf("viewer 响应泄漏明文密钥：%s", body)
 	}
 	if !strings.Contains(body, maskMarker) {
-		t.Fatalf("匿名响应应含脱敏掩码：%s", body)
+		t.Fatalf("viewer 响应应含脱敏掩码：%s", body)
 	}
 
-	// 已登录：顶层 api_key 仍明文（面板前端要用它调 /omni/*），嵌套凭证仍脱敏。
+	// admin：顶层 api_key 仍明文（面板前端要用它调 /omni/*），嵌套凭证仍脱敏。
 	ck := login(t, p, "admin", "pw123456")
 	rec = do(p, "GET", "/panel/api/config", "", ck, nil)
 	if rec.Code != http.StatusOK {
@@ -211,7 +222,7 @@ func TestPublicReadMasksGatewayKeys(t *testing.T) {
 	}
 	authedBody := rec.Body.String()
 	if !strings.Contains(authedBody, "gw-secret-1234567890") {
-		t.Fatalf("已登录应保留顶层 api_key 明文：%s", authedBody)
+		t.Fatalf("admin 应保留顶层 api_key 明文：%s", authedBody)
 	}
 	if strings.Contains(authedBody, "dev-secret-abcdef") {
 		t.Fatalf("嵌套 device_token 应脱敏：%s", authedBody)

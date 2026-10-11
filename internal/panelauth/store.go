@@ -19,16 +19,27 @@ import (
 	"time"
 )
 
-// Role 面板角色：admin 可读写，viewer 只读。
+// Role 面板角色：
+//   - admin  管理员：全权（平台配置 + 所有账号 + 面板账号管理）；
+//   - user   普通用户：只能新增/删除/运维**自己**的账号（账号归属由面板层
+//     ownership 决定），看不到别人的账号明细；
+//   - viewer 只读：看得到全部（含别人的账号标签），但不能写。
 type Role string
 
 const (
 	RoleAdmin  Role = "admin"
+	RoleUser   Role = "user"
 	RoleViewer Role = "viewer"
 )
 
 // ValidRole 角色是否合法。
-func ValidRole(r Role) bool { return r == RoleAdmin || r == RoleViewer }
+func ValidRole(r Role) bool { return r == RoleAdmin || r == RoleUser || r == RoleViewer }
+
+// IsAdmin 是否管理员（角色维度；会话对象另有同名方法）。
+func (r Role) IsAdmin() bool { return r == RoleAdmin }
+
+// IsUser 是否普通用户（受限写：仅自己的账号）。
+func (r Role) IsUser() bool { return r == RoleUser }
 
 // User 一个面板账号（含密码哈希，可与 config.json 直接序列化）。
 type User struct {
@@ -70,7 +81,7 @@ var (
 	ErrUserExists  = errors.New("用户名已存在")
 	ErrUserMissing = errors.New("用户名不存在")
 	ErrBadUsername = errors.New("用户名不能为空、不能含空白字符，且不超过 64 字符")
-	ErrBadRole     = errors.New("角色只能是 admin 或 viewer")
+	ErrBadRole     = errors.New("角色只能是 admin、user 或 viewer")
 	ErrWeakPass    = errors.New("密码至少 6 个字符")
 )
 
@@ -163,6 +174,33 @@ func UpsertUser(users []User, username string, role Role, plainPassword string) 
 		}
 		out = append(out, User{Username: username, Role: role, PasswordHash: h})
 	}
+	if err := ValidateUsers(out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// Register 自助注册：新增一个 **user 角色** 账号。
+//
+// 与 UpsertUser 的关键差别：用户名已存在时直接返回 ErrUserExists，绝不覆盖既有
+// 账号的角色/密码（否则任何访客都能用别人的用户名「注册」并接管该账号）。
+// 新集合仍走 ValidateUsers——面板未配置（0 账号）时注册会因缺管理员被拒，
+// 调用方应先判 HasUsers()。
+func Register(users []User, username, plainPassword string) ([]User, error) {
+	if !validUsername(username) {
+		return nil, ErrBadUsername
+	}
+	if _, _, ok := FindUser(users, username); ok {
+		return nil, ErrUserExists
+	}
+	if err := checkPassword(plainPassword); err != nil {
+		return nil, err
+	}
+	h, err := HashPassword(plainPassword)
+	if err != nil {
+		return nil, err
+	}
+	out := append(append([]User(nil), users...), User{Username: username, Role: RoleUser, PasswordHash: h})
 	if err := ValidateUsers(out); err != nil {
 		return nil, err
 	}

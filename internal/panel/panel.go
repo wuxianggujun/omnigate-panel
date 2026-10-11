@@ -68,6 +68,10 @@ type Config struct {
 	// 只读展示：网关不解析、不依赖其内容做任何路由/出站决策。
 	ProbeFile string
 
+	// OwnershipFile 账号归属表文件（多租户：谁拥有哪个账号，见 ownership.go）。
+	// 空 = 纯内存（测试）；不存在时退化为「全部无主」，不影响账号本身。
+	OwnershipFile string
+
 	// OmniConfigPath 内置 OmniGate 引擎的配置文件（omnigate.json）路径与读写器
 	// （OmniGate 供应商配置页用）。LoadOmniConfig 返回解析后的供应商配置对象；
 	// SaveOmniConfig 完成「校验 → 落盘 → 进程内热重载」，返回需重启字段列表。
@@ -128,6 +132,10 @@ type Config struct {
 	// 面板「浏览器登录」调用：runable 只支持 Google/Facebook 登录，会话是 httpOnly
 	// Cookie（网页读不到），只能由用户粘贴 session_token；nil 时对应接口返回 501。
 	OmniLogin func(provider, email, password, cookie string) (any, error)
+	// OmniAdmin 是进程内 OmniGate 的 HTTP 入口（同 /omni/ 挂载点）。面板的
+	// 「OmniGate 管理端点代理」（omni_admin_proxy.go）用它转发 raccoon/TRAE 的
+	// 授权/回调/账号列表/签到/移除，并注入网关 api_key。nil 时对应接口返回 501。
+	OmniAdmin http.Handler
 }
 
 // Panel 管理面板 handler。挂载方式：外层 mux Handle("/panel/", panel)，
@@ -153,6 +161,11 @@ type Panel struct {
 	// 任务中心执行队列（taskcenter.go）。
 	queueOnce sync.Once
 	q         *queueState
+
+	// ownership 账号归属（多租户）：谁拥有哪个账号，见 ownership.go。
+	ownership *ownershipStore
+	// regLimit 自助注册限流（同 IP 固定窗口计数）。
+	regLimit *regLimiter
 }
 
 // tryLockAccount 尝试锁定账号的任务执行；已在执行返回 false。
@@ -196,11 +209,13 @@ func New(cfg Config) *Panel {
 		cfg.RedisMode = "noop"
 	}
 	p := &Panel{
-		cfg:     cfg,
-		mux:     http.NewServeMux(),
-		started: time.Now(),
-		logs:    NewRing(500),
-		logins:  map[string]loginSession{},
+		cfg:      cfg,
+		mux:      http.NewServeMux(),
+		started:  time.Now(),
+		logs:     NewRing(500),
+		logins:   map[string]loginSession{},
+		ownership: newOwnershipStore(cfg.OwnershipFile),
+		regLimit:  newRegLimiter(5, time.Hour),
 	}
 	p.routes()
 	return p
@@ -219,10 +234,12 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/omni/{$}", p.omniRedirect)
 
 	// 登录会话：GET 查询登录态（前端启动判定）、POST 登录、DELETE 登出。
-	// 这三个端点本身不鉴权（登录态未知），其余接口一律走 auth/admin。
+	// 这三个端点本身不鉴权（登录态未知），其余接口一律走 auth/admin/tenant。
 	p.mux.HandleFunc("GET /panel/api/session", p.sessionState)
 	p.mux.HandleFunc("POST /panel/api/session", p.login)
 	p.mux.HandleFunc("DELETE /panel/api/session", p.logout)
+	// 自助注册（公开，同 IP 限流）：注册一个 user 角色账号并直接登录。
+	p.mux.HandleFunc("POST /panel/api/register", p.register)
 	// 已登录用户自助改密（任意角色）。
 	p.mux.HandleFunc("POST /panel/api/password", p.auth(p.changeOwnPassword))
 	// 账号管理（仅管理员）。
@@ -230,14 +247,21 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("POST /panel/api/admin/users", p.admin(p.savePanelUser))
 	p.mux.HandleFunc("POST /panel/api/admin/users/password", p.admin(p.resetPanelUserPassword))
 	p.mux.HandleFunc("POST /panel/api/admin/users/delete", p.admin(p.deletePanelUser))
+	// 自助注册开关（仅管理员）。
+	p.mux.HandleFunc("POST /panel/api/admin/registration", p.admin(p.setRegistration))
 	// 重新生成网关 api_key（仅管理员）：轮换密钥防泄漏被滥用。
 	p.mux.HandleFunc("POST /panel/api/regenerate_key", p.admin(p.regenerateKey))
 
-	// 只读接口：**默认公开**（无需登录）——面板默认只读，凭证由 maskSecrets 脱敏，
-	// 匿名请求还会额外抹掉网关 api_key/api_keys（见 secret.go）。写接口仍要求登录。
-	p.mux.HandleFunc("GET /panel/api/omni/config", p.read(p.getOmniConfig))
-	p.mux.HandleFunc("GET /panel/api/omni/outbound", p.read(p.getOutbound))
-	p.mux.HandleFunc("GET /panel/api/realm_routing", p.read(p.getRealmRouting))
+	// 平台配置类只读接口（admin / viewer）：即便脱敏也会暴露全部供应商与账号
+	// 标签，不属于「自己的账号」，普通 user 与未登录访客一律 403。
+	p.mux.HandleFunc("GET /panel/api/omni/config", p.privileged(p.getOmniConfig))
+	p.mux.HandleFunc("GET /panel/api/omni/outbound", p.privileged(p.getOutbound))
+	p.mux.HandleFunc("GET /panel/api/realm_routing", p.privileged(p.getRealmRouting))
+	p.mux.HandleFunc("GET /panel/api/config", p.privileged(p.getConfig))
+
+	// 只读接口：默认公开（无需登录），但**按身份过滤账号明细**——admin/viewer
+	// 看全部，普通 user 只看自己拥有的账号，未登录访客只看到匿名统计（账号明细
+	// 为空）。凭证由 maskSecrets 脱敏，匿名请求额外抹掉网关 api_key/api_keys。
 	p.mux.HandleFunc("GET /panel/api/omni/accounts", p.read(p.omniAccounts))
 	// OmniGate 模型目录（含积分价）：面板侧只读代理，匿名可用，不暴露网关 api_key。
 	p.mux.HandleFunc("GET /panel/api/omni/models", p.read(p.omniModels))
@@ -252,41 +276,51 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/api/packages", p.read(p.packages))
 	p.mux.HandleFunc("GET /panel/api/usage", p.read(p.usage))
 	p.mux.HandleFunc("GET /panel/api/model_probes", p.read(p.modelProbes))
-	p.mux.HandleFunc("GET /panel/api/config", p.read(p.getConfig))
-	// 添加账号的 OAuth 轮询属于管理员流程，仍需登录。
-	p.mux.HandleFunc("GET /panel/api/login/poll", p.auth(p.loginPoll))
-	p.mux.HandleFunc("GET /panel/api/login/regions", p.auth(p.loginRegions))
+	// 添加账号的 OAuth 轮询：登录即可（普通用户也能给自己加号）。
+	p.mux.HandleFunc("GET /panel/api/login/poll", p.tenant(p.loginPoll))
+	p.mux.HandleFunc("GET /panel/api/login/regions", p.tenant(p.loginRegions))
 
-	// 写操作 / 敏感读取（仅管理员）：改配置、账号运维、任务执行、导出凭证。
+	// 平台配置写操作（仅管理员）：改配置、出站、域路由。
 	p.mux.HandleFunc("POST /panel/api/omni/config", p.admin(p.saveOmniConfig))
 	p.mux.HandleFunc("POST /panel/api/omni/outbound", p.admin(p.saveOutbound))
 	p.mux.HandleFunc("POST /panel/api/realm_routing", p.admin(p.saveRealmRouting))
-	p.mux.HandleFunc("POST /panel/api/omni/account/checkin", p.admin(p.omniAccountCheckin))
-	p.mux.HandleFunc("POST /panel/api/omni/account/remove", p.admin(p.omniAccountRemove))
-	p.mux.HandleFunc("POST /panel/api/omni/account/login", p.admin(p.omniAccountLogin))
-	p.mux.HandleFunc("POST /panel/api/login/start", p.admin(p.loginStart))
+
+	// 账号级写操作（admin 全量 / user 仅自己的账号，归属校验在 handler 内）：
+	// 添加、运维、移除账号。批量入口对 user 只作用于自己的账号。
+	p.mux.HandleFunc("POST /panel/api/omni/account/checkin", p.tenant(p.omniAccountCheckin))
+	p.mux.HandleFunc("POST /panel/api/omni/account/remove", p.tenant(p.omniAccountRemove))
+	p.mux.HandleFunc("POST /panel/api/omni/account/add", p.tenant(p.omniAccountAdd))
+	p.mux.HandleFunc("POST /panel/api/omni/account/login", p.tenant(p.omniAccountLogin))
+	// OmniGate 登录类管理端点代理（raccoon/trae 的 authorize/callback/token/
+	// accounts/checkin/remove）：面板注入 api_key 转发到进程内 OmniGate，并按归属
+	// 打标/过滤/校验。前端不再直连 /omni/admin/*，普通 user 无需持有 api_key。
+	p.mux.HandleFunc("/panel/api/omni/admin/raccoon/", p.tenant(p.omniAdminProxy))
+	p.mux.HandleFunc("/panel/api/omni/admin/trae/", p.tenant(p.omniAdminProxy))
+	p.mux.HandleFunc("POST /panel/api/login/start", p.tenant(p.loginStart))
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/revive", p.tenant(p.accountRevive))
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/disable", p.tenant(p.accountDisable))
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/pause", p.tenant(p.accountPause))
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/resume", p.tenant(p.accountResume))
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/checkin", p.tenant(p.accountCheckin))
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/balance", p.tenant(p.accountBalance))
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/remove", p.tenant(p.accountRemove))
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/tasks/accept", p.tenant(p.accountTaskAccept))
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/tasks/accept_all", p.tenant(p.taskAcceptAll))
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/tasks/claim", p.tenant(p.accountTaskClaim))
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/tasks/auto", p.tenant(p.accountTaskAuto))
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/tasks/auto_all", p.tenant(p.accountTaskAutoAll))
+
+	// 迁移 / 批量 / 全局：仅管理员（跨账号或含全部凭证，不属于「自己的账号」）。
 	p.mux.HandleFunc("POST /panel/api/import/cockpit", p.admin(p.importCockpit))
 	p.mux.HandleFunc("GET /panel/api/accounts/export", p.admin(p.exportAccounts))
 	p.mux.HandleFunc("POST /panel/api/accounts/import", p.admin(p.importAccounts))
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/revive", p.admin(p.accountRevive))
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/disable", p.admin(p.accountDisable))
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/pause", p.admin(p.accountPause))
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/resume", p.admin(p.accountResume))
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/checkin", p.admin(p.accountCheckin))
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/balance", p.admin(p.accountBalance))
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/remove", p.admin(p.accountRemove))
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/tasks/accept", p.admin(p.accountTaskAccept))
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/tasks/accept_all", p.admin(p.taskAcceptAll))
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/tasks/claim", p.admin(p.accountTaskClaim))
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/tasks/auto", p.admin(p.accountTaskAuto))
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/tasks/auto_all", p.admin(p.accountTaskAutoAll))
 	p.mux.HandleFunc("POST /panel/api/tasks/scan_all", p.admin(p.tasksScanAll))
 	p.mux.HandleFunc("POST /panel/api/tasks/run_queue", p.admin(p.tasksRunQueue))
-	p.mux.HandleFunc("POST /panel/api/checkin_all", p.admin(p.checkinAll))
-	p.mux.HandleFunc("POST /panel/api/travel_all", p.admin(p.travelAll))
-	p.mux.HandleFunc("POST /panel/api/activity_all", p.admin(p.activityAll))
-	p.mux.HandleFunc("POST /panel/api/keepalive_all", p.admin(p.keepaliveAll))
-	p.mux.HandleFunc("POST /panel/api/balance_all", p.admin(p.balanceAll))
+	p.mux.HandleFunc("POST /panel/api/checkin_all", p.tenant(p.checkinAll))
+	p.mux.HandleFunc("POST /panel/api/travel_all", p.tenant(p.travelAll))
+	p.mux.HandleFunc("POST /panel/api/activity_all", p.tenant(p.activityAll))
+	p.mux.HandleFunc("POST /panel/api/keepalive_all", p.tenant(p.keepaliveAll))
+	p.mux.HandleFunc("POST /panel/api/balance_all", p.tenant(p.balanceAll))
 	p.mux.HandleFunc("POST /panel/api/usage/save", p.admin(p.usageSave))
 	p.mux.HandleFunc("POST /panel/api/config", p.admin(p.saveConfig))
 }
@@ -322,6 +356,10 @@ func (p *Panel) expiringSoonWindow() time.Duration {
 // ---------------------------------------------------------------------------
 
 // overview 总览：池计数 + 每账号状态 + 面板元信息。
+//
+// 计数（total/healthy/...）对所有人都是全局口径（= 「别人的匿名统计」）；账号
+// 明细按身份过滤：admin/viewer 全部，普通 user 只返回自己拥有的账号，未登录
+// 访客返回空数组（只看得到汇总数字）。
 func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
 	// 用 WithPaused 而不是 CountsDetailed：后者把暂停号并进 disabled（/status 的
 	// 「不可用」口径），而概况卡片要分开展示（issue #125）。
@@ -329,6 +367,13 @@ func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
 	sticky := 0
 	if p.cfg.StickyCount != nil {
 		sticky = p.cfg.StickyCount()
+	}
+	owned, all := p.ownFilter(r)
+	accounts := make([]pool.Status, 0, 8)
+	for _, st := range p.cfg.Pool.List() {
+		if all || owned[wbOwnerKey(st.UID)] {
+			accounts = append(accounts, st)
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"version":         p.cfg.Version,
@@ -342,7 +387,7 @@ func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
 		"disabled":        disabled,
 		"paused":          paused,
 		"in_flight_full":  inFlightFull,
-		"accounts":        p.cfg.Pool.List(),
+		"accounts":        accounts,
 		// model_locks 模型级限流全清单（哪些模型不能用、锁了几个号、还要锁多久）：
 		// 与 accounts 的账号池视图互补，前端「模型锁池」表直接渲染。无锁时为 null。
 		"model_locks": p.cfg.Pool.ModelLockView(),
@@ -350,17 +395,39 @@ func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
 }
 
 // logsHandler 返回日志环形缓冲快照（时间升序，含频道标记 chat/task/sys）。
+// 按身份过滤：普通用户只保留提到自己账号的行，未登录访客为空。
 func (p *Panel) logsHandler(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"entries": p.logs.Snapshot()})
+	entries := p.logs.Snapshot()
+	if visible, all := p.logLineVisible(r); !all {
+		filtered := make([]LogEntry, 0, len(entries))
+		for _, e := range entries {
+			if visible(e.Text) {
+				filtered = append(filtered, e)
+			}
+		}
+		entries = filtered
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"entries": entries})
 }
 
 // requestMetrics 返回进程内请求指标、最近 100 条与归档状态。
+// Recent 按身份过滤；计数类指标是全局匿名统计（所有角色可见）。
 func (p *Panel) requestMetrics(w http.ResponseWriter, r *http.Request) {
 	if p.cfg.RequestLog == nil {
 		writeErr(w, http.StatusNotImplemented, "request logger not available")
 		return
 	}
-	writeJSON(w, http.StatusOK, p.cfg.RequestLog.Snapshot())
+	snap := p.cfg.RequestLog.Snapshot()
+	if visible, all := p.reqlogVisible(r); !all {
+		recent := make([]reqlog.Event, 0, len(snap.Recent))
+		for _, e := range snap.Recent {
+			if visible(e) {
+				recent = append(recent, e)
+			}
+		}
+		snap.Recent = recent
+	}
+	writeJSON(w, http.StatusOK, snap)
 }
 
 // requestLogs 从 JSONL 归档读取最近请求；limit 默认 200、最大 1000。
@@ -395,6 +462,18 @@ func (p *Panel) requestLogs(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	// 归属过滤：普通用户只保留自己账号服务的请求（admin/viewer 不过滤）。
+	// 归档读取按 limit 取「最近 N 条」，此处再过滤——极端情况下自己账号的请求
+	// 可能落在 N 条之外（前端可缩小筛选条件/调大 limit 再看）。
+	if visible, all := p.reqlogVisible(r); !all {
+		filtered := make([]reqlog.Event, 0, len(rows))
+		for _, e := range rows {
+			if visible(e) {
+				filtered = append(filtered, e)
+			}
+		}
+		rows = filtered
 	}
 	// 空结果回 []（而不是 JSON null）：前端把 null 与"归档关闭"混在一起会走错分支，
 	// 显示成不满足筛选条件的最近请求。
@@ -557,6 +636,9 @@ func (p *Panel) modelProbes(w http.ResponseWriter, r *http.Request) {
 // accountRevive 手动复活：清禁用 + 冷却 + 熔断（运维口径无条件恢复）。
 func (p *Panel) accountRevive(w http.ResponseWriter, r *http.Request) {
 	uid := r.PathValue("uid")
+	if !p.requireWB(w, r, uid) {
+		return
+	}
 	if _, ok := p.cfg.Pool.Status(uid); !ok {
 		writeErr(w, http.StatusNotFound, "account not found")
 		return
@@ -569,6 +651,9 @@ func (p *Panel) accountRevive(w http.ResponseWriter, r *http.Request) {
 // accountDisable 人工禁用（不再参与选号，需面板 revive 或重登恢复）。
 func (p *Panel) accountDisable(w http.ResponseWriter, r *http.Request) {
 	uid := r.PathValue("uid")
+	if !p.requireWB(w, r, uid) {
+		return
+	}
 	if _, ok := p.cfg.Pool.Status(uid); !ok {
 		writeErr(w, http.StatusNotFound, "account not found")
 		return
@@ -583,6 +668,9 @@ func (p *Panel) accountDisable(w http.ResponseWriter, r *http.Request) {
 // 让位」而非「判死」，点「恢复选号」即可立刻回到池子（无需重登或解冻）。
 func (p *Panel) accountPause(w http.ResponseWriter, r *http.Request) {
 	uid := r.PathValue("uid")
+	if !p.requireWB(w, r, uid) {
+		return
+	}
 	if !p.cfg.Pool.Pause(uid) {
 		writeErr(w, http.StatusNotFound, "account not found")
 		return
@@ -594,6 +682,9 @@ func (p *Panel) accountPause(w http.ResponseWriter, r *http.Request) {
 // accountResume 解除暂停选号（幂等，对未暂停账号为空操作）。
 func (p *Panel) accountResume(w http.ResponseWriter, r *http.Request) {
 	uid := r.PathValue("uid")
+	if !p.requireWB(w, r, uid) {
+		return
+	}
 	if !p.cfg.Pool.Resume(uid) {
 		writeErr(w, http.StatusNotFound, "account not found")
 		return
@@ -606,6 +697,9 @@ func (p *Panel) accountResume(w http.ResponseWriter, r *http.Request) {
 // 与 scheduler.RunCheckinNow 的单号语义一致。
 func (p *Panel) accountCheckin(w http.ResponseWriter, r *http.Request) {
 	uid := r.PathValue("uid")
+	if !p.requireWB(w, r, uid) {
+		return
+	}
 	a := p.cfg.Pool.AuthByUID(uid)
 	if a == nil {
 		writeErr(w, http.StatusNotFound, "account not found")
@@ -653,6 +747,9 @@ func (p *Panel) accountCheckin(w http.ResponseWriter, r *http.Request) {
 // accountBalance 单号余额刷新：更新余额与到期快照，不触碰冷却状态。
 func (p *Panel) accountBalance(w http.ResponseWriter, r *http.Request) {
 	uid := r.PathValue("uid")
+	if !p.requireWB(w, r, uid) {
+		return
+	}
 	a := p.cfg.Pool.AuthByUID(uid)
 	if a == nil {
 		writeErr(w, http.StatusNotFound, "account not found")
@@ -670,11 +767,15 @@ func (p *Panel) accountBalance(w http.ResponseWriter, r *http.Request) {
 // accountRemove 移除账号：先出池（立即落盘 state），再删 auth 文件。
 func (p *Panel) accountRemove(w http.ResponseWriter, r *http.Request) {
 	uid := r.PathValue("uid")
+	if !p.requireWB(w, r, uid) {
+		return
+	}
 	a := p.cfg.Pool.Remove(uid)
 	if a == nil {
 		writeErr(w, http.StatusNotFound, "account not found")
 		return
 	}
+	p.ownership.Remove(wbOwnerKey(uid))
 	fileMsg := ""
 	if a.FilePath != "" {
 		if err := os.Remove(a.FilePath); err != nil && !os.IsNotExist(err) {
@@ -694,59 +795,75 @@ func (p *Panel) accountRemove(w http.ResponseWriter, r *http.Request) {
 // 批量任务
 // ---------------------------------------------------------------------------
 
-// checkinAll 手动触发全量签到（异步执行，进度看日志区/账号状态变化）。
+// checkinAll 手动触发签到（异步执行，进度看日志区/账号状态变化）。
 // 覆盖两个来源：WorkBuddy 池（含猫猫旅行）+ OmniGate 各 raccoon 供应商。
+// 多租户：普通用户只作用于自己名下的账号（WorkBuddy 按 uid 过滤，OmniGate 逐个
+// 自己的账号签到）；管理员为全量。
 func (p *Panel) checkinAll(w http.ResponseWriter, r *http.Request) {
-	if p.cfg.Scheduler == nil && p.cfg.OmniCheckinAll == nil {
+	if p.cfg.Scheduler == nil && p.cfg.OmniCheckinAll == nil && p.cfg.OmniCheckin == nil {
 		writeErr(w, http.StatusNotImplemented, "scheduler not available")
 		return
 	}
+	allow := p.wbAllow(r)
 	if p.cfg.Scheduler != nil {
-		go p.cfg.Scheduler.RunCheckinNow()
-		log.Printf("panel: 手动全量签到已触发（WorkBuddy，含猫猫旅行）")
+		go p.cfg.Scheduler.RunCheckinNowFiltered(allow)
+		log.Printf("panel: 手动签到已触发（WorkBuddy，含猫猫旅行；范围=%s）", scopeDesc(r))
 	}
-	if p.cfg.OmniCheckinAll != nil {
+	if allow == nil {
+		if p.cfg.OmniCheckinAll != nil {
+			go func() {
+				if _, err := p.cfg.OmniCheckinAll(); err != nil {
+					log.Printf("panel: OmniGate 全量签到失败: %v", err)
+				} else {
+					log.Printf("panel: OmniGate 全量签到已完成")
+				}
+			}()
+		}
+	} else if p.cfg.OmniCheckin != nil {
+		accts := p.ownedOmniAccounts(r)
 		go func() {
-			if _, err := p.cfg.OmniCheckinAll(); err != nil {
-				log.Printf("panel: OmniGate 全量签到失败: %v", err)
-			} else {
-				log.Printf("panel: OmniGate 全量签到已完成")
+			for _, ac := range accts {
+				if _, err := p.cfg.OmniCheckin(ac[0], ac[1]); err != nil {
+					log.Printf("panel: OmniGate 签到 %s/%s 失败: %v", ac[0], ac[1], err)
+				}
 			}
+			log.Printf("panel: OmniGate 个人签到完成（%d 个账号）", len(accts))
 		}()
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "started": true})
 }
 
-// travelAll 手动触发全量猫猫旅行巡检（异步执行）。
+// travelAll 手动触发旅行巡检（异步执行）。普通用户只作用于自己的账号。
 func (p *Panel) travelAll(w http.ResponseWriter, r *http.Request) {
 	if p.cfg.Scheduler == nil {
 		writeErr(w, http.StatusNotImplemented, "scheduler not available")
 		return
 	}
-	go p.cfg.Scheduler.RunTravelNow()
-	log.Printf("panel: 手动全量旅行巡检已触发")
+	go p.cfg.Scheduler.RunTravelNowFiltered(p.wbAllow(r))
+	log.Printf("panel: 手动旅行巡检已触发（范围=%s）", scopeDesc(r))
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "started": true})
 }
 
-// activityAll 手动触发全量活跃上报（异步执行；点亮连登 + 解锁领养前置）。
+// activityAll 手动触发活跃上报（异步执行；点亮连登 + 解锁领养前置）。
+// 普通用户只作用于自己的账号。
 func (p *Panel) activityAll(w http.ResponseWriter, r *http.Request) {
 	if p.cfg.Scheduler == nil {
 		writeErr(w, http.StatusNotImplemented, "scheduler not available")
 		return
 	}
-	go p.cfg.Scheduler.RunActivityNow()
-	log.Printf("panel: 手动全量活跃上报已触发")
+	go p.cfg.Scheduler.RunActivityNowFiltered(p.wbAllow(r))
+	log.Printf("panel: 手动活跃上报已触发（范围=%s）", scopeDesc(r))
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "started": true})
 }
 
-// keepaliveAll 手动触发全量 token 保活（异步执行）。
+// keepaliveAll 手动触发 token 保活（异步执行）。普通用户只作用于自己的账号。
 func (p *Panel) keepaliveAll(w http.ResponseWriter, r *http.Request) {
 	if p.cfg.Scheduler == nil {
 		writeErr(w, http.StatusNotImplemented, "scheduler not available")
 		return
 	}
-	go p.cfg.Scheduler.RunKeepaliveNow()
-	log.Printf("panel: 手动全量保活已触发")
+	go p.cfg.Scheduler.RunKeepaliveNowFiltered(p.wbAllow(r))
+	log.Printf("panel: 手动保活已触发（范围=%s）", scopeDesc(r))
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "started": true})
 }
 
@@ -758,24 +875,28 @@ func (p *Panel) balanceAll(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotImplemented, "scheduler not available")
 		return
 	}
-	p.cfg.Scheduler.RunBalanceRefreshNow()
-	p.syncNicknames()
-	log.Printf("panel: 手动全量余额刷新完成")
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "accounts": p.cfg.Pool.List()})
+	allow := p.wbAllow(r)
+	p.cfg.Scheduler.RunBalanceRefreshNowFiltered(allow)
+	p.syncNicknames(allow)
+	log.Printf("panel: 手动余额刷新完成（范围=%s）", scopeDesc(r))
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "accounts": p.visibleWB(r)})
 }
 
 // syncNicknames 手动刷新时的昵称同步（issue #94：上游改名免重登）。
 // 只在面板手动「刷新」路径调用——后台余额定时器不触发（用户明确要求资料接口
 // 仅手动触达）。逐号拉 /console/account，只取 nickname（手机号等敏感字段在
 // upstream.FetchAccountProfile 内即被丢弃）；单号失败静默跳过，不打断余额刷新
-// 的既有结果。
-func (p *Panel) syncNicknames() {
+// 的既有结果。allow != nil 时只同步 allow(uid)==true 的账号（多租户）。
+func (p *Panel) syncNicknames(allow func(uid string) bool) {
 	type job struct {
 		uid string
 		a   *auth.Auth
 	}
 	var jobs []job
 	for _, st := range p.cfg.Pool.List() {
+		if allow != nil && !allow(st.UID) {
+			continue
+		}
 		if st.Disabled {
 			continue
 		}
@@ -860,7 +981,14 @@ func (p *Panel) usage(w http.ResponseWriter, r *http.Request) {
 	if p.cfg.Upstream != nil {
 		currentRate = p.cfg.Upstream.ModelRate
 	}
-	writeJSON(w, http.StatusOK, p.cfg.Usage.SnapshotWindow(win, nicks, currentRate))
+	// 归属过滤：普通用户只看自己账号的用量（在分片层面过滤，汇总口径一致）；
+	// admin/viewer 不过滤；未登录访客的空集合 → 空用量。
+	owned, all := p.ownFilter(r)
+	var allowUID func(uid string) bool
+	if !all {
+		allowUID = func(uid string) bool { return owned[wbOwnerKey(uid)] }
+	}
+	writeJSON(w, http.StatusOK, p.cfg.Usage.SnapshotWindowFiltered(win, nicks, currentRate, allowUID))
 }
 
 // parseTimeParam 解析时间查询参数：unix 秒（前端默认）或 RFC3339（便于手工调
@@ -905,7 +1033,7 @@ func (p *Panel) usageSave(w http.ResponseWriter, r *http.Request) {
 // 逐个账号向上游查（并发有上限，避免瞬时打满上游限流），失败只在对应账号上
 // 标 error，不影响其它账号——一个号 token 失效不该让整页空白。
 func (p *Panel) packages(w http.ResponseWriter, r *http.Request) {
-	accts := p.cfg.Pool.List()
+	accts := p.visibleWB(r)
 	type row struct {
 		UID      string                   `json:"uid"`
 		Nickname string                   `json:"nickname"`

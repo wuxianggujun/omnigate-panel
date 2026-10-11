@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -38,6 +39,14 @@ type PanelAuthSection struct {
 	MaxFailures  int              `json:"max_failures"`
 	LockMinutes  int              `json:"lock_minutes"`
 	Users        []panelauth.User `json:"users"`
+	// AllowRegistration 是否开放自助注册（nil = 未配置 = 允许）。与 cmd/server 的
+	// PanelAuthConfig 同名字段一一对应，整段回写时不丢配置。
+	AllowRegistration *bool `json:"allow_registration,omitempty"`
+}
+
+// RegistrationAllowed 自助注册是否开启（nil/未配置 = 允许）。
+func (s PanelAuthSection) RegistrationAllowed() bool {
+	return s.AllowRegistration == nil || *s.AllowRegistration
 }
 
 // authMode 认证来源。面板只有一种：登录会话（Cookie 或 Bearer 令牌）。
@@ -132,6 +141,14 @@ func (p *Panel) sessionState(w http.ResponseWriter, r *http.Request) {
 		"configured":    configured,
 		"mode":          string(ar.mode),
 	}
+	// 自助注册是否开放：前端据此决定登录门里是否显示「注册」入口。
+	allowReg := false
+	if configured && p.cfg.LoadPanelAuth != nil {
+		if section, err := p.cfg.LoadPanelAuth(); err == nil {
+			allowReg = section.RegistrationAllowed()
+		}
+	}
+	resp["allow_registration"] = allowReg
 	if ar.ok {
 		resp["username"] = ar.session.Username
 		resp["role"] = ar.session.Role
@@ -260,12 +277,41 @@ func (p *Panel) listPanelUsers(w http.ResponseWriter, r *http.Request) {
 		users = append(users, panelauth.UserView{Username: u.Username, Role: u.Role})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":            true,
-		"users":         users,
-		"session_hours": section.SessionHours,
-		"max_failures":  section.MaxFailures,
-		"lock_minutes":  section.LockMinutes,
+		"ok":                 true,
+		"users":              users,
+		"session_hours":      section.SessionHours,
+		"max_failures":       section.MaxFailures,
+		"lock_minutes":       section.LockMinutes,
+		"allow_registration": section.RegistrationAllowed(),
 	})
+}
+
+// setRegistration POST /panel/api/admin/registration：开关自助注册（仅管理员）。
+func (p *Panel) setRegistration(w http.ResponseWriter, r *http.Request) {
+	if p.cfg.LoadPanelAuth == nil || p.cfg.SavePanelAuth == nil {
+		writeErr(w, http.StatusNotImplemented, "panel auth not available")
+		return
+	}
+	var body struct {
+		Allow bool `json:"allow"`
+	}
+	if err := decodeBody(r, &body); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad_request")
+		return
+	}
+	section, err := p.cfg.LoadPanelAuth()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "load panel auth: "+err.Error())
+		return
+	}
+	allow := body.Allow
+	section.AllowRegistration = &allow
+	if _, err := p.cfg.SavePanelAuth(section); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	log.Printf("panel: 自助注册已%s（操作人 %s）", map[bool]string{true: "开启", false: "关闭"}[allow], usernameOf(r))
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "allow_registration": allow})
 }
 
 // savePanelUser POST /panel/api/admin/users：新增/更新账号（{username,role,password}）。
@@ -377,6 +423,9 @@ func (p *Panel) deletePanelUser(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// 归属清理：被删用户的账号变为无主（仅管理员可见），不会跟着账号残留。
+	p.ownership.DeleteUser(username)
+	log.Printf("panel: 面板账号 %q 已删除（其名下账号归属已清空）", username)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 

@@ -652,11 +652,22 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
 .og-pre { white-space: pre-wrap; word-break: break-all; background: var(--surface-2); border: 1px solid var(--line-soft); border-radius: 8px; padding: 10px; font-family: var(--mono); font-size: 12px; color: var(--ink-2); margin-top: 8px; }
 
 /* ── 面板鉴权（登录 / 角色）────────────────────────────────────────────
-   viewer 只读、public（未登录）公开只读：都隐藏所有写操作控件（[data-admin]）。
-   这只是 UI 收敛，真正的权限由服务端 /panel/api/* 的 admin 中间件强制
-   （未登录 401 / viewer 403 admin_required）。 */
+   角色与可见性：
+     admin   全权：平台配置 + 所有账号 + 面板账号管理；
+     user    普通用户：只看/管自己的账号（平台配置页隐藏，服务端 403）；
+     viewer  只读全部：看得到全部账号（含别人的标签），但不能写；
+     public  未登录访客：只看到匿名汇总与模型目录。
+   这只是 UI 收敛，真正的权限由服务端 /panel/api/* 的 admin/tenant/privileged
+   中间件强制。 */
 body[data-role="viewer"] [data-admin],
-body[data-role="public"] [data-admin] { display: none !important; }
+body[data-role="public"] [data-admin],
+body[data-role="user"] [data-admin] { display: none !important; }
+/* 平台配置页（上游供应商 / 出站代理 / 配置）：普通用户与访客都看不到。 */
+body[data-role="user"] [data-user-hide],
+body[data-role="public"] [data-user-hide] { display: none !important; }
+/* 账号写操作（添加账号等）：viewer 与访客不可用（普通用户可用）。 */
+body[data-role="viewer"] [data-write],
+body[data-role="public"] [data-write] { display: none !important; }
 /* 未登录时给「登录」按钮一点存在感（它是公开只读视图里唯一的操作入口）。 */
 body[data-role="public"] #btnTopLogin { border-color: var(--accent, var(--line)); }
 .whoami {

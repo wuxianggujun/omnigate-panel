@@ -17,7 +17,12 @@ import (
 var acceptBatchGap = 1050 * time.Millisecond
 
 // accountByUID 取账号凭证；不存在时写 404 并返回 nil。
-func (p *Panel) accountByUID(w http.ResponseWriter, uid string) *auth.Auth {
+// accountByUID 取账号并做归属校验（普通用户只能操作自己的账号）。无权/不存在
+// 时已写响应并返回 nil，调用方直接 return。
+func (p *Panel) accountByUID(w http.ResponseWriter, r *http.Request, uid string) *auth.Auth {
+	if !p.requireWB(w, r, uid) {
+		return nil
+	}
 	a := p.cfg.Pool.AuthByUID(uid)
 	if a == nil {
 		writeErr(w, http.StatusNotFound, "account not found")
@@ -29,7 +34,7 @@ func (p *Panel) accountByUID(w http.ResponseWriter, uid string) *auth.Auth {
 // accountTasks 查询单账号全量任务（进度/状态/可领取）。
 func (p *Panel) accountTasks(w http.ResponseWriter, r *http.Request) {
 	uid := r.PathValue("uid")
-	a := p.accountByUID(w, uid)
+	a := p.accountByUID(w, r, uid)
 	if a == nil {
 		return
 	}
@@ -58,7 +63,7 @@ func (p *Panel) accountTasks(w http.ResponseWriter, r *http.Request) {
 // accountTaskAccept 接受任务（报名；幂等）。
 func (p *Panel) accountTaskAccept(w http.ResponseWriter, r *http.Request) {
 	uid := r.PathValue("uid")
-	a := p.accountByUID(w, uid)
+	a := p.accountByUID(w, r, uid)
 	if a == nil {
 		return
 	}
@@ -85,7 +90,7 @@ func (p *Panel) accountTaskAccept(w http.ResponseWriter, r *http.Request) {
 // 批量提交会分片（上游对 task_codes 数组长度无公开上限，保守每批 20 个）。
 func (p *Panel) taskAcceptAll(w http.ResponseWriter, r *http.Request) {
 	uid := r.PathValue("uid")
-	a := p.accountByUID(w, uid)
+	a := p.accountByUID(w, r, uid)
 	if a == nil {
 		return
 	}
@@ -152,7 +157,7 @@ func (p *Panel) taskAcceptAll(w http.ResponseWriter, r *http.Request) {
 // accountTaskClaim 领取任务奖励（未达标时上游返回业务错误，原样透出给前端提示）。
 func (p *Panel) accountTaskClaim(w http.ResponseWriter, r *http.Request) {
 	uid := r.PathValue("uid")
-	a := p.accountByUID(w, uid)
+	a := p.accountByUID(w, r, uid)
 	if a == nil {
 		return
 	}

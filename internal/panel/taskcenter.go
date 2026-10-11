@@ -460,13 +460,19 @@ func (p *Panel) runGrowthQueued(a *auth.Auth, code string) (string, error) {
 	return msg, nil
 }
 
-// tasksQueueStatus 队列状态（轮询用）。
+// tasksQueueStatus 队列状态（轮询用）。按身份过滤：普通用户只看得到自己账号的
+// 队列项，未登录访客为空。
 func (p *Panel) tasksQueueStatus(w http.ResponseWriter, r *http.Request) {
 	q := p.queue()
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	items := make([]queueItem, len(q.items))
-	copy(items, q.items)
+	owned, all := p.ownFilter(r)
+	items := make([]queueItem, 0, len(q.items))
+	for _, it := range q.items {
+		if all || owned[wbOwnerKey(it.UID)] {
+			items = append(items, it)
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"running":    q.running,
 		"total":      len(items),
@@ -481,7 +487,7 @@ func (p *Panel) tasksQueueStatus(w http.ResponseWriter, r *http.Request) {
 // schoolVouchers 我的券码：逐 CN 账号查开学季 /vouchers（3 并发，与 packages
 // 同款限流），失败只在对应账号标 error。global 账号无开学季，不发上游调用。
 func (p *Panel) schoolVouchers(w http.ResponseWriter, r *http.Request) {
-	accts := p.cfg.Pool.List()
+	accts := p.visibleWB(r)
 	type row struct {
 		UID      string                   `json:"uid"`
 		Nickname string                   `json:"nickname"`

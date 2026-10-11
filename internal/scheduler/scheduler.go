@@ -406,7 +406,7 @@ func (s *Scheduler) runBatch(ctx context.Context, kinds []taskKind) {
 			case taskTravel:
 				s.RunTravelNow()
 			case taskActivity:
-				s.runActivity(ctx)
+				s.runActivity(ctx, nil)
 			case taskKeepalive:
 				s.RunKeepaliveNow()
 			case taskBlackcat:
@@ -447,10 +447,17 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 // 旅行已从签到剥离为独立排程（travel_hours），不再搭签到便车。
 // 末尾追加连登管家（streak.go）：可兑换档位自动兑换 + 抽奖次数自动抽完——
 // 连登兑换按天数解锁，挂在每日签到后即「到天数那天自动完成兑换→抽奖闭环」。
-func (s *Scheduler) RunCheckinNow() {
+func (s *Scheduler) RunCheckinNow() { s.RunCheckinNowFiltered(nil) }
+
+// RunCheckinNowFiltered 只对 allow(uid)==true 的账号执行签到（allow==nil = 全量）。
+// 面板多租户：普通用户的「全部签到」只作用于自己名下的账号。
+func (s *Scheduler) RunCheckinNowFiltered(allow func(uid string) bool) {
 	expiringSoon := s.ExpiringSoonWindow()
 	includeDisabled := s.includeDisabledInTasks()
 	for _, st := range s.cfg.Pool.List() {
+		if allow != nil && !allow(st.UID) {
+			continue
+		}
 		if st.Disabled && !includeDisabled {
 			continue
 		}
@@ -507,14 +514,22 @@ func (s *Scheduler) RunCheckinNow() {
 // RunActivityNow 是无 ctx 的外部入口（面板/测试一次性触发）；排程主循环走
 // runActivity（ctx 取消时立即放弃剩余账号，不等限速睡满）。
 func (s *Scheduler) RunActivityNow() {
-	s.runActivity(context.Background())
+	s.runActivity(context.Background(), nil)
+}
+
+// RunActivityNowFiltered 只对 allow(uid)==true 的账号上报（allow==nil = 全量）。
+func (s *Scheduler) RunActivityNowFiltered(allow func(uid string) bool) {
+	s.runActivity(context.Background(), allow)
 }
 
 // runActivity 活跃上报遍历，随 ctx 取消立即退出。
-func (s *Scheduler) runActivity(ctx context.Context) {
+func (s *Scheduler) runActivity(ctx context.Context, allow func(uid string) bool) {
 	first := true
 	includeDisabled := s.includeDisabledInTasks()
 	for _, st := range s.cfg.Pool.List() {
+		if allow != nil && !allow(st.UID) {
+			continue
+		}
 		if st.Disabled && !includeDisabled {
 			continue
 		}
@@ -577,9 +592,15 @@ func (s *Scheduler) checkActivityStreak(a *auth.Auth) bool {
 // 12153 禁用走 Pool.NoteSessionDead 的**连续计数**语义：一次刷新失败不再立即杀号，
 // 连续 sessionDeadThreshold 次（3 次）才禁用（P0-1：13 个 disabled 号全是历史误判）。
 // 刷新成功 → ClearSessionDead 清计数（错误判定的账号有复活路径）。
-func (s *Scheduler) RunKeepaliveNow() {
+func (s *Scheduler) RunKeepaliveNow() { s.RunKeepaliveNowFiltered(nil) }
+
+// RunKeepaliveNowFiltered 只对 allow(uid)==true 的账号续期 token（allow==nil = 全量）。
+func (s *Scheduler) RunKeepaliveNowFiltered(allow func(uid string) bool) {
 	includeDisabled := s.includeDisabledInTasks()
 	for _, st := range s.cfg.Pool.List() {
+		if allow != nil && !allow(st.UID) {
+			continue
+		}
 		if st.Disabled && !includeDisabled {
 			continue
 		}
@@ -611,11 +632,17 @@ func (s *Scheduler) RunKeepaliveNow() {
 // 解冻语义与签到一致（ReenableIfCredits：余额 > 0 的冷却账号自动解冻），
 // 但不做签到、不刷新 token——只让"积分"这个观测量保持新鲜。
 // 供两类入口复用：后台周期任务（StartBalanceRefresh）与面板手动全量刷新。
-func (s *Scheduler) RunBalanceRefreshNow() {
+func (s *Scheduler) RunBalanceRefreshNow() { s.RunBalanceRefreshNowFiltered(nil) }
+
+// RunBalanceRefreshNowFiltered 只刷新 allow(uid)==true 的账号余额（allow==nil = 全量）。
+func (s *Scheduler) RunBalanceRefreshNowFiltered(allow func(uid string) bool) {
 	var wg sync.WaitGroup
 	expiringSoon := s.ExpiringSoonWindow()
 	includeDisabled := s.includeDisabledInTasks()
 	for _, st := range s.cfg.Pool.List() {
+		if allow != nil && !allow(st.UID) {
+			continue
+		}
 		if st.Disabled && !includeDisabled {
 			continue
 		}

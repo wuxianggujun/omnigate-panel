@@ -323,7 +323,10 @@ func main() {
 		// 模型上限探测数据（scripts/probe_max_tokens.py --panel-out 写入）：
 		// 与 state 文件同目录，缺省 data/output_probes.json。
 		ProbeFile:  stateSibling(cfg.StateFile, "output_probes.json"),
-		ConfigPath: *cfgPath,
+		// 账号归属（多租户）：谁拥有哪个账号。与 state 文件同目录，缺省
+		// data/ownership.json；缺失/损坏时退化为空映射（全部视为管理员/共享）。
+		OwnershipFile: stateSibling(cfg.StateFile, "ownership.json"),
+		ConfigPath:    *cfgPath,
 		LoadConfig: func() (any, error) {
 			return Load(*cfgPath)
 		},
@@ -395,10 +398,11 @@ func main() {
 				return panel.PanelAuthSection{}, err
 			}
 			return panel.PanelAuthSection{
-				SessionHours: c.PanelAuth.SessionHours,
-				MaxFailures:  c.PanelAuth.MaxFailures,
-				LockMinutes:  c.PanelAuth.LockMinutes,
-				Users:        c.PanelAuth.Users,
+				SessionHours:      c.PanelAuth.SessionHours,
+				MaxFailures:       c.PanelAuth.MaxFailures,
+				LockMinutes:       c.PanelAuth.LockMinutes,
+				AllowRegistration: c.PanelAuth.AllowRegistration,
+				Users:             c.PanelAuth.Users,
 			}, nil
 		},
 		SavePanelAuth: func(section panel.PanelAuthSection) ([]string, error) {
@@ -469,6 +473,9 @@ func main() {
 		// runable 登录校验（服务端会话探测 + 取积分）：runable 只支持 Google/Facebook
 		// 登录、会话是 httpOnly Cookie（网页读不到），面板无法自动抓取，只能由用户粘贴。
 		pcfg.OmniLogin = omni.LoginRunable
+		// 面板 → OmniGate 管理端点代理：raccoon/TRAE 的授权/回调/账号列表/签到/
+		// 移除由面板注入 api_key 转发（多租户下普通 user 不持有网关 api_key）。
+		pcfg.OmniAdmin = omni.Handler()
 	}
 	pn := panel.New(pcfg)
 	// 成长任务队列每日自动执行（与「执行全部待办」同管线）：Sequential 族零点解锁后

@@ -25,11 +25,15 @@ func (g *Gateway) traeProvider(name string) (*trae.Provider, error) {
 // fingerprint, remembers it under a state id, and returns the login URL for the
 // user to open.
 //
-// When redirectBase is non-empty the callback is pointed at it (typically the
-// panel's public /omni/admin/trae/redirect) so TRAE lands on a page we control
-// and the account is captured automatically. Otherwise the fallback localhost
-// callback is used and the user must paste the URL back (TraeCompleteCallback).
-func (g *Gateway) TraeAuthorize(providerName, label, redirectBase string) (map[string]string, error) {
+// TRAE's authorization page only accepts a callback matching
+// http://127.0.0.1:<port>/authorize (a hardcoded client-side regex — anything
+// else makes the page fail with "登录失败 / 网络错误"), so the callback is always
+// the localhost DefaultCallbackURL. After login the browser lands on an
+// unreachable localhost page whose address bar still carries the credentials;
+// the user pastes that URL back (TraeCompleteCallback). If the user runs the
+// optional local redirector, it forwards the same query to TraeCompleteRedirect
+// instead (auto-capture).
+func (g *Gateway) TraeAuthorize(providerName, label string) (map[string]string, error) {
 	if _, err := g.traeProvider(providerName); err != nil {
 		return nil, err
 	}
@@ -45,10 +49,6 @@ func (g *Gateway) TraeAuthorize(providerName, label, redirectBase string) (map[s
 		return nil, err
 	}
 	stateID := util.UUID()
-	callbackURL := strings.TrimSpace(redirectBase)
-	if callbackURL == "" {
-		callbackURL = trae.DefaultCallbackURL
-	}
 
 	g.traePendMu.Lock()
 	for k, v := range g.traePend {
@@ -65,19 +65,14 @@ func (g *Gateway) TraeAuthorize(providerName, label, redirectBase string) (map[s
 	}
 	g.traePendMu.Unlock()
 
-	out := map[string]string{
+	return map[string]string{
 		"provider":      providerName,
 		"label":         label,
 		"state":         stateID,
 		"mode":          "manual",
-		"authorize_url": trae.BuildLoginURL(machineID, deviceID, callbackURL),
-		"callback_hint": "http://127.0.0.1:18080/authorize?refreshToken=..&userInfo=..",
-	}
-	if strings.TrimSpace(redirectBase) != "" {
-		out["mode"] = "auto"
-		out["redirect_url"] = callbackURL
-	}
-	return out, nil
+		"authorize_url": trae.BuildLoginURL(machineID, deviceID, trae.DefaultCallbackURL),
+		"callback_hint": trae.DefaultCallbackURL + "?refreshToken=..&userInfo=..",
+	}, nil
 }
 
 // takeTraePending finds and removes an in-flight TRAE login by explicit state id,

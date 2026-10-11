@@ -3817,11 +3817,12 @@ function ogNextLabel() {
   return base + (ogAcctCount() + 1);
 }
 
-// setOgAuthCopy 让「浏览器登录」面板适配 raccoon / trae（均为自动捕获，带回退粘贴）。
+// setOgAuthCopy 让「浏览器登录」面板适配 raccoon（自动捕获）与 trae（本机回调 + 复制粘贴）。
 function setOgAuthCopy(isTrae) {
   if ($('btnStartOgAuth')) $('btnStartOgAuth').textContent = isTrae ? '生成登录链接并打开登录页' : '生成授权链接并打开登录页';
+  if ($('ogAdvSummary')) $('ogAdvSummary').textContent = isTrae ? '① 复制地址栏网址并粘贴（TRAE 必需）' : '手动粘贴回调（备选）';
   if ($('ogAuthHint')) $('ogAuthHint').innerHTML = isTrae
-    ? '登录成功后会自动跳回本面板并添加账号。若浏览器未自动跳回：把地址栏里的整条 URL（含 <code>refreshToken</code> / <code>userInfo</code>）复制到下面提交即可。可重复添加多个账号。'
+    ? 'TRAE 登录成功后，浏览器会跳到 <code>http://127.0.0.1:18080/authorize?...</code> 并显示「<b>无法访问此网站</b>」——<b>这是正常的，不是出错</b>（TRAE 只允许本机回调地址）。<br>请在地址栏按 <code>Ctrl+A</code>、<code>Ctrl+C</code> 复制整条网址，粘到下面的输入框（会自动提交），或直接点「📋 读取剪贴板并提交」。可重复添加多个账号。'
     : '若浏览器没有自动跳回：登录后把地址栏里的整段 <code>office-raccoon://auth/callback?code=...&amp;state=...</code>（或只把 <code>code</code>）粘到下面提交即可。可重复添加多个账号。';
   if ($('callback')) $('callback').placeholder = isTrae
     ? 'http://127.0.0.1:18080/authorize?refreshToken=...&userInfo=...'
@@ -3846,10 +3847,8 @@ async function authorizeOmni() {
   try {
     let data;
     if (isTrae) {
-      const redirectBase = location.origin + '/omni/admin/trae/redirect';
       data = await apiAbs('/omni/admin/trae/authorize?provider=' + encodeURIComponent(provName())
-        + '&label=' + encodeURIComponent($('authLabel').value)
-        + '&redirect_base=' + encodeURIComponent(redirectBase));
+        + '&label=' + encodeURIComponent($('authLabel').value));
       ogAuthState = data.state || '';
     } else {
       const redirectBase = location.origin + '/omni/admin/raccoon/redirect';
@@ -3863,11 +3862,14 @@ async function authorizeOmni() {
     $('ogAuthLoad').hidden = true;
     $('ogAuthReady').hidden = false;
     if (data.mode !== 'auto') {
-      $('authMode').textContent = '手动粘贴回调';
+      $('authMode').textContent = isTrae ? '复制地址栏粘贴' : '手动粘贴回调';
       $('ogAuthPoll').hidden = true;
-      ogMsg('authMsg', '已生成授权链接；登录后请展开下方「手动粘贴回调（备选）」提交。', 'ok');
+      ogMsg('authMsg', isTrae
+        ? '已打开 TRAE 登录页。登录后会跳到「无法访问此网站」的 127.0.0.1 页面（正常）——请复制地址栏整条网址，粘贴到下方输入框（会自动提交）。'
+        : '已生成授权链接；登录后请展开下方「手动粘贴回调（备选）」提交。', 'ok');
       const det = $('addTabOgAuth') ? $('addTabOgAuth').querySelector('details.og-adv') : null;
       if (det) det.open = true;
+      if (isTrae && $('callback')) { try { $('callback').focus(); } catch (e) { /* ignore */ } }
     } else {
       $('authMode').textContent = '自动捕获';
       $('ogAuthPoll').hidden = false;
@@ -3950,6 +3952,21 @@ async function submitOmniCallback() {
   } catch (e) {
     ogMsg('authMsg', '回调失败：' + e.message, 'err');
   }
+}
+
+// pasteClipboardCb 读取系统剪贴板里的回调网址并直接提交（TRAE 复制粘贴场景）。
+async function pasteClipboardCb() {
+  let t = '';
+  try {
+    t = await navigator.clipboard.readText();
+  } catch (e) {
+    ogMsg('authMsg', '读取剪贴板被拒绝：请手动在输入框里按 Ctrl+V 粘贴后提交', 'err');
+    return;
+  }
+  t = (t || '').trim();
+  if (!t) { ogMsg('authMsg', '剪贴板是空的', 'err'); return; }
+  $('callback').value = t;
+  await submitOmniCallback();
 }
 
 async function saveOmniToken() {
@@ -4397,6 +4414,12 @@ async function saveOutbound() {
   on('btnOpenAuth', openOmniAuth);
   on('btnCopyAuth', copyOmniAuth);
   on('btnSubmitCb', submitOmniCallback);
+  on('btnPasteCb', pasteClipboardCb);
+  // 粘贴回调网址后自动提交（TRAE 场景：地址栏整条网址复制回来即可）。
+  on('callback', function (e) {
+    const pasted = (e && e.clipboardData) ? e.clipboardData.getData('text') : '';
+    if (/authorize\?|callback\?|code=|refreshToken=/.test(pasted)) setTimeout(submitOmniCallback, 80);
+  }, 'paste');
   on('btnTokenSave', saveOmniToken);
   on('btnOgOpenLogin', openRunableLogin);
   on('btnOgCredsSave', loginOgCreds);

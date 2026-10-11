@@ -575,7 +575,7 @@ func (s *Server) handleTraeAdmin(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/admin/trae/")
 	switch {
 	case r.Method == http.MethodGet && path == "authorize":
-		res, err := s.gw.TraeAuthorize(s.traeProviderOrDefault(r.URL.Query().Get("provider")), r.URL.Query().Get("label"), r.URL.Query().Get("redirect_base"))
+		res, err := s.gw.TraeAuthorize(s.traeProviderOrDefault(r.URL.Query().Get("provider")), r.URL.Query().Get("label"))
 		if err != nil {
 			s.adminError(w, err)
 			return

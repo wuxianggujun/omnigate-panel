@@ -15,12 +15,12 @@ import (
 	"time"
 )
 
-// DefaultCallbackURL is the fallback redirect target TRAE sends the user back
-// to when no explicit callback is supplied. It is a localhost address the
-// user's browser cannot reach: the point is that the tokens appear in the
-// address bar so the user can copy the URL. The panel normally supplies its own
-// public callback (…/omni/admin/trae/redirect) so the account is captured
-// automatically without any copy/paste.
+// DefaultCallbackURL is the redirect target TRAE sends the user back to. TRAE's
+// authorization page hardcodes a check that auth_callback_url matches
+// http://127.0.0.1:<port>/authorize, so this localhost address is the ONLY thing
+// TRAE accepts — any other callback makes the page fail with "登录失败 /
+// 网络错误". The user's browser cannot reach it, so the tokens stay in the
+// address bar for the user to copy back to the panel.
 const DefaultCallbackURL = "http://127.0.0.1:18080/authorize"
 
 // loginTraceIDHexLen is the hex length of login_trace_id (matching login.sh).

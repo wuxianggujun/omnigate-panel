@@ -1030,8 +1030,11 @@ func (p *Panel) usage(w http.ResponseWriter, r *http.Request) {
 const creditHistoryPoints = 36
 
 // creditsHistory 返回余额快照历史（「近 N 小时消耗」与用量对账的数据源）。
-// 窗口口径与 /panel/api/usage 一致（hours / from / to；都不给 = 24h）——前端用
-// 同一组查询参数同时拉两份数据，才能逐账号对账。
+//
+// 窗口口径与 /panel/api/usage 的 hours **逐位一致**（[当前整点-(N-1)h, now]），
+// 前端用同一个 hours 同时拉两份数据，逐账号对账时两侧区间才完全重合。响应里的
+// hours 是**实际生效**的小时数（「全部历史」/ 超过保留期一律收敛到保留期小时数），
+// 前端拿它去拉同口径的用量——不能回请求值，否则两侧又错开了。
 //
 // 与用量页不同，历史是采样点而不是小时桶：请求窗口超过保留期（26h）时只能给出
 // 保留期内那一段，响应里每行的 span_sec / from / to 就是**实际**覆盖区间，
@@ -1049,25 +1052,35 @@ func (p *Panel) creditsHistory(w http.ResponseWriter, r *http.Request) {
 	if !to.IsZero() {
 		now = to
 	}
+	// 窗口口径必须与 /panel/api/usage 的 hours 口径**逐位一致**：
+	//   hours=N → [当前整点-(N-1)h, now]
+	// 用量按「桶起点落在窗口内」筛桶，余额按采样点筛。若这里从 now-Nh 起算，两侧起点
+	// 就差小半桶——热模型（gpt-6.1-sol）一小时约 90 分，足以把对账结论从「对得上」
+	// 翻成「积分过期」。对齐整点后两侧起止完全重合，容差只需覆盖采样间隔。
+	const maxHours = int(credithist.Retention / time.Hour)
+	hours := int(credithist.DefaultWindow / time.Hour)
 	window := credithist.DefaultWindow
 	switch {
 	case !from.IsZero() && !to.IsZero() && to.After(from):
+		// 显式区间：按调用方给的边界（调用方负责对齐整点，见 usage.Window 的约定）。
 		window = to.Sub(from)
+		hours = int(window / time.Hour)
 	case from.IsZero() && to.IsZero():
 		if v := q.Get("hours"); v != "" {
-			if n, err := strconv.Atoi(v); err == nil && n >= 0 {
-				window = time.Duration(n) * time.Hour
+			if n, err := strconv.Atoi(v); err == nil {
+				hours = n
 			}
 		}
+		// hours<=0 = 全部历史：余额历史只留 Retention，能给的只有保留期那一段。
+		if hours <= 0 || hours > maxHours {
+			hours = maxHours
+		}
+		window = now.Sub(now.Truncate(time.Hour).Add(-time.Duration(hours-1) * time.Hour))
 	}
-	// 窗口非法 / 「全部历史」/ 超出保留期：能给的只有保留期那一段。
-	// requested 是客户端请求的窗口（0 = 全部历史），单独回给前端——用量侧的窗口
-	// 可以比保留期宽得多（如「全部历史」），此时两侧覆盖区间不同，前端必须能
-	// 如实说明「这个差额只反映最近 26h」，否则会被读成「记账漏了」。
-	requested := window
 	if window <= 0 || window > credithist.Retention {
 		window = credithist.Retention
 	}
+	winFrom := now.Add(-window)
 	owned, all := p.ownFilter(r)
 	var allow func(uid string) bool
 	if !all {
@@ -1075,9 +1088,10 @@ func (p *Panel) creditsHistory(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"window_sec":    int64(window.Seconds()),
-		"requested_sec": int64(requested.Seconds()),
+		"hours":         hours,
+		"from":          winFrom.Format(time.RFC3339),
+		"to":            now.Format(time.RFC3339),
 		"retention_sec": int64(credithist.Retention.Seconds()),
-		"now":           now.Format(time.RFC3339),
 		"series_points": creditHistoryPoints,
 		"accounts":      p.cfg.History.Snapshot(window, creditHistoryPoints, allow, now),
 	})

@@ -60,11 +60,21 @@ func getHistory(t *testing.T, p *Panel, r *http.Request, query string) map[strin
 func TestCreditsHistoryWindowAndNet(t *testing.T) {
 	p := reconFixture(t)
 	out := getHistory(t, p, reqAs("alice", panelauth.RoleAdmin), "hours=24")
-	if got := out["window_sec"]; got != float64(86400) {
-		t.Fatalf("window_sec=%v want 86400", got)
+	if got := out["hours"]; got != float64(24) {
+		t.Fatalf("hours=%v want 24", got)
 	}
-	if got := out["requested_sec"]; got != float64(86400) {
-		t.Fatalf("requested_sec=%v want 86400（未封顶）", got)
+	// hours=24 与 /panel/api/usage 同口径：[当前整点-23h, now] → 23h~24h 之间，
+	// 且左边界必须落在整点上（否则与用量的小时桶差半桶）。
+	ws, _ := out["window_sec"].(float64)
+	if ws <= float64(23*3600) || ws > float64(24*3600) {
+		t.Fatalf("window_sec=%v 应落在 (23h, 24h]", ws)
+	}
+	winFrom, err := time.Parse(time.RFC3339, out["from"].(string))
+	if err != nil {
+		t.Fatalf("from=%v 不是 RFC3339", out["from"])
+	}
+	if winFrom.Minute() != 0 || winFrom.Second() != 0 {
+		t.Fatalf("from=%v 未对齐整点（用量按小时桶筛选，必须对齐）", winFrom)
 	}
 	accts, _ := out["accounts"].([]any)
 	if len(accts) != 2 {
@@ -92,23 +102,22 @@ func TestCreditsHistoryWindowAndNet(t *testing.T) {
 	}
 }
 
-// 「全部历史」（hours=0）只能给保留期那一段：window_sec 回落到 Retention，
-// 但 requested_sec 必须如实回 0 —— 前端据此说明「用量窗口更长，两侧区间不同」。
+// 「全部历史」/ 超过保留期一律收敛到保留期小时数（26）：前端拿 hours 去拉同口径的
+// 用量，所以 hours 必须是**实际生效**的那个值，不能是请求值。
 func TestCreditsHistoryClampsToRetention(t *testing.T) {
 	p := reconFixture(t)
 	out := getHistory(t, p, reqAs("alice", panelauth.RoleAdmin), "hours=0")
-	want := float64(int64(credithist.Retention.Seconds()))
-	if out["window_sec"] != want {
-		t.Fatalf("window_sec=%v want %v（保留期）", out["window_sec"], want)
+	if out["hours"] != float64(26) {
+		t.Fatalf("hours=0（全部历史）→ hours=%v want 26", out["hours"])
 	}
-	if out["requested_sec"] != float64(0) {
-		t.Fatalf("requested_sec=%v want 0（全部历史）", out["requested_sec"])
+	ws, _ := out["window_sec"].(float64)
+	if ws <= float64(25*3600) || ws > float64(26*3600) {
+		t.Fatalf("window_sec=%v 应落在 (25h, 26h]", ws)
 	}
-	// 显式 48h 同样被保留期封顶，但 requested_sec 如实回 48h。
+	// 显式 48h 同样收敛到 26。
 	out = getHistory(t, p, reqAs("alice", panelauth.RoleAdmin), "hours=48")
-	if out["window_sec"] != want || out["requested_sec"] != float64(48*3600) {
-		t.Fatalf("hours=48: window=%v requested=%v want %v / 172800",
-			out["window_sec"], out["requested_sec"], want)
+	if out["hours"] != float64(26) {
+		t.Fatalf("hours=48 → hours=%v want 26", out["hours"])
 	}
 }
 

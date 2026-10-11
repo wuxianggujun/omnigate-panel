@@ -542,9 +542,18 @@ function renderAccountRows() {
   const omniProvs = f === '' ? lastOmni : (f === '__wb' ? [] : lastOmni.filter(p => p.name === f));
   const ogCount = omniProvs.reduce((a, p) => a + ((p.accounts || []).length), 0);
   if (!wbList.length && !ogCount) {
-    tb.innerHTML = '<tr><td colspan="10"><div class="empty"><div class="big">这里还没有账号</div>' +
-      (f === '' ? '点击右上角「添加账号」，在弹窗里选择来源（WorkBuddy 或任一上游供应商）即可添加' : '当前来源没有账号') +
-      '</div></td></tr>';
+    const role = authState.authenticated ? (authState.role || 'viewer') : 'public';
+    let msg;
+    if (role === 'public') {
+      msg = '未登录时只显示账号数量与健康度等汇总（不含账号明细与凭证）。登录后可以添加并运维自己的账号。';
+    } else if (role === 'user') {
+      msg = '你还没有添加账号。点击右上角「添加账号」，添加的账号只有你自己能看到和运维。';
+    } else {
+      msg = f === '' ? '点击右上角「添加账号」，在弹窗里选择来源（WorkBuddy 或任一上游供应商）即可添加' : '当前来源没有账号';
+    }
+    tb.innerHTML = '<tr><td colspan="10"><div class="empty"><div class="big">' +
+      (role === 'public' ? '账号明细不公开' : (role === 'user' ? '这里还没有你的账号' : '这里还没有账号')) +
+      '</div>' + msg + '</div></td></tr>';
     return;
   }
   // 有总额度（credits_total）→ 进度条按自身 剩余/总额 百分比；旧数据无总额 → 退回池内最高=100%

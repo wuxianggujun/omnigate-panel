@@ -48,9 +48,20 @@ type Config struct {
 	// （更窄）：用于把新会话优先绑到积分快过期的账号上（pool 侧的快过期硬优先层）。
 	// 返回空切片时回落 AvailableForModel。nil 时行为与引入前一致。
 	//
-	// 刻意不参与可用性校验：那会让粘性给快过期让路（换号丢 prompt 缓存），是另一档
-	// 需要显式决策的策略，不在本字段语义内。
+	// 它本身不参与可用性校验（那会让刚聊完的会话也换号，白丢 prompt 缓存）；
+	// 「让路」由 YieldColdAfter 单独控制，见下。
 	AssignForModel func(model string) []string
+	// YieldColdAfter 粘性给快过期层让路（P2）的「凉透」阈值：绑定号不在 AssignForModel
+	// 候选（= 快过期优先层非空，而本会话钉在长期号上）且距上次活跃已超过该时长时，
+	// 主动解绑重分配，把会话迁到快过期号上。
+	//
+	// 为什么要等它「凉」：让路必然换号，换号就得让上游按全价重算 prompt 前缀缓存
+	// （热号那 90%+ 的缓存命中没了）。上游缓存通常几分钟就失效，所以只要距上次活跃
+	// 够久，让路就是零成本的纯赚；刚聊完就换是纯亏。这个阈值同时是防抖边界——被换到
+	// 快过期号后，若该号在途打满又弹回普通号，也要再等一个阈值才会再次让路。
+	//
+	// 0 = 关闭（保持旧语义：只有可用性失效才重绑）。
+	YieldColdAfter time.Duration
 }
 
 // Router 会话粘性路由器。
@@ -149,7 +160,7 @@ func (r *Router) Resolve(key string) (string, bool) {
 
 // ResolveForModel 返回会话 key 在该模型上应绑定的账号 uid。
 // 命中且账号在该模型可用 → 滚动 lastActive 并直接返回；否则（绑定号已冷却/占满/
-// 被该模型限流）走重新分配。
+// 被该模型限流/该给快过期层让路）走重新分配。
 //
 // 为什么必须带模型：绑定只记 uid，同一个会话可能换模型；账号被 6004 模型级限额后
 // 对其他模型仍可用（见 pool.healthyForModel 的 softRateModel 豁免）。若只按账号级
@@ -163,11 +174,12 @@ func (r *Router) ResolveForModel(key, model string) (string, bool) {
 	e, found := r.entries[key]
 	r.mu.RUnlock()
 	if found && !expired(e, now, r.cfg.TTL) {
-		if available[e.uid] {
+		if available[e.uid] && !r.shouldYield(e, model, now) {
 			r.touch(key, e.uid, now)
 			return e.uid, true
 		}
-		// 绑定号已冷却/占满 → 失效，落入慢路径重分配。
+		// 绑定号已冷却/占满 → 失效，落入慢路径重分配；
+		// 或绑在长期号上而快过期层正空着 → 让路重绑（P2，见 YieldColdAfter）。
 	}
 
 	// ── Slow path: 写锁 re-check 后分配 ────────────────────
@@ -176,11 +188,11 @@ func (r *Router) ResolveForModel(key, model string) (string, bool) {
 
 	// re-check：并发同 key 可能已被其他 goroutine 分配好。
 	if e2, found2 := r.entries[key]; found2 && !expired(e2, now, r.cfg.TTL) {
-		if available[e2.uid] {
+		if available[e2.uid] && !r.shouldYield(e2, model, now) {
 			r.entries[key] = entry{uid: e2.uid, lastActive: now}
 			return e2.uid, true
 		}
-		delete(r.entries, key) // 失效：清掉再分配
+		delete(r.entries, key) // 失效或让路：清掉再分配
 	}
 
 	// 分配候选优先走 AssignForModel（快过期硬优先层：把新会话优先绑到积分快过期的号上，
@@ -308,6 +320,36 @@ func (r *Router) assignSlice(model string) []string {
 		}
 	}
 	return r.availableSlice(model)
+}
+
+// shouldYield 报告这条绑定是否该给快过期层让路（P2）。三条件同时成立才让：
+//
+//  1. 让路已启用（YieldColdAfter > 0）；
+//  2. 绑定已「凉」：距上次活跃超过 YieldColdAfter——上游 prompt 前缀缓存大概率已失效，
+//     此时换号不必重算缓存，让路近乎免费；热会话换号是纯亏，不换；
+//  3. 绑定号不在分配候选里。assignSlice 在快过期优先层非空时只返回层内成员，层空时
+//     回落全集，所以「不在里面」恰好等价于「有快过期积分在等，而我正钉在长期号上」。
+//     层空（无快过期号 / 层内号在途打满）时绑定号必在全集里，自然不让路。
+//
+// 让路 = 调用方清掉绑定后走慢路径重分配，最终落到 assignSlice 的候选（快过期层）上。
+// 这里不直接删条目：快路径只持读锁，删除统一由慢路径在写锁内做。
+func (r *Router) shouldYield(e entry, model string, now time.Time) bool {
+	if r.cfg.YieldColdAfter <= 0 {
+		return false
+	}
+	if now.Sub(e.lastActive) < r.cfg.YieldColdAfter {
+		return false
+	}
+	uids := r.assignSlice(model)
+	if len(uids) == 0 {
+		return false
+	}
+	for _, u := range uids {
+		if u == e.uid {
+			return false
+		}
+	}
+	return true
 }
 
 func expired(e entry, now time.Time, ttl time.Duration) bool {

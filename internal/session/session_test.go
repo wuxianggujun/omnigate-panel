@@ -380,7 +380,8 @@ func TestExtractKeyMultimodalContent(t *testing.T) {
 
 // TestAssignForModelNarrowsNewSessions 首次分配走 AssignForModel（快过期硬优先层），
 // 而可用性校验仍用 AvailableForModel（全集）——已绑在普通号上的会话不该被判失效
-// 而重绑（那会让粘性给快过期让路，换号丢 prompt 缓存）。
+// 而重绑（那会让粘性给快过期让路，换号丢 prompt 缓存）。让路是独立开关，见
+// TestStickyYieldsToExpiringWhenCold（本用例 YieldColdAfter=0，即关闭）。
 func TestAssignForModelNarrowsNewSessions(t *testing.T) {
 	r := New(Config{
 		TTL:               time.Minute,
@@ -399,5 +400,77 @@ func TestAssignForModelNarrowsNewSessions(t *testing.T) {
 	r.Bind("kept", "regular")
 	if uid, ok := r.ResolveForModel("kept", "m"); !ok || uid != "regular" {
 		t.Fatalf("已绑会话 uid=%q ok=%v，want regular（校验走可用性全集）", uid, ok)
+	}
+}
+
+// yieldRouter 构造「快过期层 = expiring，可用性全集 = expiring+regular」的路由器。
+// coldAfter 是让路阈值：传极小值（1ns）等价于"绑定已凉"，传 1h 等价于"还热"，
+// 传 0 等价于关闭。
+func yieldRouter(coldAfter time.Duration) *Router {
+	return New(Config{
+		TTL:               time.Minute,
+		Store:             newCountingStore(),
+		AvailableForModel: func(string) []string { return []string{"expiring", "regular"} },
+		AssignForModel:    func(string) []string { return []string{"expiring"} },
+		YieldColdAfter:    coldAfter,
+	})
+}
+
+// TestStickyYieldsToExpiringWhenCold P2：冷会话（距上次活跃超过阈值）若钉在普通号上
+// 而快过期层有号，就解绑改绑到快过期号；热会话不动（换号要重算 prompt 缓存，不值）。
+func TestStickyYieldsToExpiringWhenCold(t *testing.T) {
+	r := yieldRouter(time.Nanosecond)
+	r.Bind("cold", "regular")
+	if uid, ok := r.ResolveForModel("cold", "m"); !ok || uid != "expiring" {
+		t.Fatalf("冷会话 uid=%q ok=%v，want expiring（让路到快过期层）", uid, ok)
+	}
+
+	// 让路后即落在优先层内，之后再解析不应反复横跳。
+	for i := 0; i < 3; i++ {
+		if uid, ok := r.ResolveForModel("cold", "m"); !ok || uid != "expiring" {
+			t.Fatalf("第 %d 次解析 uid=%q ok=%v，want expiring（让路后稳定）", i, uid, ok)
+		}
+	}
+}
+
+// TestStickyHotSessionDoesNotYield 阈值未到（还热）时不让路——这是防"换号丢缓存"
+// 的关键边界，也是防止被换到快过期号后在途打满又弹回来反复横跳的防抖边界。
+func TestStickyHotSessionDoesNotYield(t *testing.T) {
+	r := yieldRouter(time.Hour)
+	r.Bind("hot", "regular")
+	if uid, ok := r.ResolveForModel("hot", "m"); !ok || uid != "regular" {
+		t.Fatalf("热会话 uid=%q ok=%v，want regular（不该让路）", uid, ok)
+	}
+}
+
+// TestStickyYieldDisabled 阈值为 0 = 关闭：回到旧语义，绑在普通号上就一直是普通号。
+func TestStickyYieldDisabled(t *testing.T) {
+	r := yieldRouter(0)
+	r.Bind("k", "regular")
+	if uid, ok := r.ResolveForModel("k", "m"); !ok || uid != "regular" {
+		t.Fatalf("关闭让路 uid=%q ok=%v，want regular", uid, ok)
+	}
+}
+
+// TestStickyNoYieldWhenAlreadyInTier 已绑在快过期号上的会话不算让路对象；
+// 且优先层为空（回落全集）时绑定号必在候选里，也不该被判让路。
+func TestStickyNoYieldWhenAlreadyInTier(t *testing.T) {
+	r := yieldRouter(time.Nanosecond)
+	r.Bind("in-tier", "expiring")
+	if uid, ok := r.ResolveForModel("in-tier", "m"); !ok || uid != "expiring" {
+		t.Fatalf("层内会话 uid=%q ok=%v，want expiring", uid, ok)
+	}
+
+	// 优先层清空（无快过期号）：分配候选回落全集，绑定号在内 → 不让路。
+	empty := New(Config{
+		TTL:               time.Minute,
+		Store:             newCountingStore(),
+		AvailableForModel: func(string) []string { return []string{"expiring", "regular"} },
+		AssignForModel:    func(string) []string { return nil },
+		YieldColdAfter:    time.Nanosecond,
+	})
+	empty.Bind("k", "regular")
+	if uid, ok := empty.ResolveForModel("k", "m"); !ok || uid != "regular" {
+		t.Fatalf("层空时 uid=%q ok=%v，want regular（无优先层可让）", uid, ok)
 	}
 }

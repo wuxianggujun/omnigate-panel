@@ -288,6 +288,10 @@ type Config struct {
 		Enabled    bool   `json:"enabled"`     // 默认 true
 		TTL        string `json:"ttl"`         // 会话绑定 TTL，默认 "30m"
 		GCInterval string `json:"gc_interval"` // 会话 GC 周期，默认 "5m"
+		// YieldColdAfter 粘性给快过期层让路（P2）的「凉透」阈值：会话绑在长期号上、
+		// 而快过期优先层非空时，距上次活跃超过该时长才解绑重绑到快过期号。
+		// 空 = 不解析（0 = 关闭）；非空必须可解析。
+		YieldColdAfter string `json:"yield_cold_after"`
 	} `json:"session_sticky"`
 
 	// 解析后
@@ -299,6 +303,7 @@ type Config struct {
 	DegradeCooldownMaxD    time.Duration `json:"-"`
 	SessionTTL             time.Duration `json:"-"`
 	SessionGCInterval      time.Duration `json:"-"`
+	SessionYieldColdAfter  time.Duration `json:"-"` // 0 = 不让路（P2 关闭）
 	BalanceRefreshInterval time.Duration `json:"-"` // 0 = 不启动（enabled=false）
 	ExpiringSoonDur        time.Duration `json:"-"`
 	// CostExploreIntervalDur 解析后的 costTier 探索窗口（issue #136）；0 = 关停。
@@ -378,6 +383,9 @@ func Default() *Config {
 	c.SessionSticky.Enabled = true
 	c.SessionSticky.TTL = "30m"
 	c.SessionSticky.GCInterval = "5m"
+	// 粘性让路（P2）默认开：冷会话（距上次活跃 >10m，上游 prompt 缓存已失效）让位给
+	// 快过期优先层；"0" 关停。
+	c.SessionSticky.YieldColdAfter = "10m"
 	return c
 }
 
@@ -664,6 +672,18 @@ func (c *Config) normalize() error {
 	}
 	if c.SessionGCInterval, err = time.ParseDuration(c.SessionSticky.GCInterval); err != nil {
 		return fmt.Errorf("session_sticky.gc_interval: %w", err)
+	}
+	// 粘性让路「凉透」阈值（P2）：空值回落默认 10m（Default 已置；此兜底覆盖显式 ""，
+	// 也让旧配置（没有该字段）升级后直接生效）；"0" 是合法值（关闭让路，回到旧语义），
+	// 不回落；负值钳 0 同关闭。
+	if c.SessionSticky.YieldColdAfter == "" {
+		c.SessionSticky.YieldColdAfter = "10m"
+	}
+	if c.SessionYieldColdAfter, err = time.ParseDuration(c.SessionSticky.YieldColdAfter); err != nil {
+		return fmt.Errorf("session_sticky.yield_cold_after: %w", err)
+	}
+	if c.SessionYieldColdAfter < 0 {
+		c.SessionYieldColdAfter = 0
 	}
 	// 快过期窗口：空 = 禁用（ExpiringSoonDur 0）；非空必须可解析（拼写错误 fail fast）。
 	if c.Pool.ExpiringSoon != "" {

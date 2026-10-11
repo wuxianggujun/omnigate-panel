@@ -145,6 +145,8 @@ func main() {
 			AvailableForModel: realmAwareAvailableForModel(p, realmRouter),
 			// 首次分配走快过期硬优先层（层为空时内部回落 AvailableForModel 同集）。
 			AssignForModel: realmAwareAssignForModel(p, realmRouter),
+			// 粘性让路（P2）：冷会话给快过期层让位，0 = 关闭。
+			YieldColdAfter: cfg.SessionYieldColdAfter,
 		})
 		sessRouter.LoadFromStore() // 启动时从 Redis 恢复粘性（读操作仅此处）
 		sessRouter.StartGC()
@@ -820,7 +822,7 @@ func restartRequiredFields(c *Config) []string {
 	if c.Upstash.URL != "" || c.Upstash.Token != "" {
 		out = append(out, "upstash")
 	}
-	out = append(out, "session_sticky.ttl", "session_sticky.gc_interval")
+	out = append(out, "session_sticky.ttl", "session_sticky.gc_interval", "session_sticky.yield_cold_after")
 	out = append(out, "logging.request_archive_enabled", "logging.request_retention_days", "logging.request_archive_max_mb")
 	out = append(out, "server.read_timeout")
 	return out

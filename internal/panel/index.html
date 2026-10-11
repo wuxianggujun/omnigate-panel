@@ -536,6 +536,9 @@
               <label class="fld"><span class="lb">会话粘性 TTL</span>
                 <input name="ttl" placeholder="30m">
                 <span class="hint">改动需重启进程</span></label>
+              <label class="fld"><span class="lb">粘性让路阈值</span>
+                <input name="yield_cold_after" placeholder="10m">
+                <span class="hint">距上次活跃超过此时长的会话，若还钉在普通号上而快过期层有号，就解绑改绑过去（上游 prompt 缓存此时已失效，换号不亏）；0 关闭</span></label>
             </div>
             <div class="switch"><span class="lb">快过期积分优先（硬优先层）</span>
               <input type="checkbox" name="prefer_expiring"></div>

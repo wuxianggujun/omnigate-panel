@@ -163,6 +163,9 @@ func TestNewPoolConfigDefaults(t *testing.T) {
 	if c.SessionTTL.Minutes() != 30 || c.SessionGCInterval.Minutes() != 5 {
 		t.Errorf("session durations=%v/%v", c.SessionTTL, c.SessionGCInterval)
 	}
+	if c.SessionYieldColdAfter.Minutes() != 10 {
+		t.Errorf("session_sticky.yield_cold_after default=%v want 10m", c.SessionYieldColdAfter)
+	}
 	if c.Upstash.URL != "" || c.Upstash.Token != "" {
 		t.Errorf("upstash default should be empty: %+v", c.Upstash)
 	}
@@ -586,6 +589,26 @@ func TestBadSessionTTL(t *testing.T) {
 	os.WriteFile(fp, []byte(`{"session_sticky":{"ttl":"oops"}}`), 0o600)
 	if _, err := Load(fp); err == nil {
 		t.Fatal("want error for bad session_sticky.ttl")
+	}
+}
+
+func TestSessionYieldColdAfterFromFile(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+	// 显式 "0" = 关闭让路，不该被空值回落覆盖成 10m。
+	os.WriteFile(fp, []byte(`{"session_sticky":{"yield_cold_after":"0"}}`), 0o600)
+	c, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.SessionYieldColdAfter != 0 {
+		t.Errorf("yield_cold_after=%v want 0（显式关停）", c.SessionYieldColdAfter)
+	}
+
+	// 非空非法值必须 fail fast。
+	os.WriteFile(fp, []byte(`{"session_sticky":{"yield_cold_after":"oops"}}`), 0o600)
+	if _, err := Load(fp); err == nil {
+		t.Fatal("want error for bad session_sticky.yield_cold_after")
 	}
 }
 

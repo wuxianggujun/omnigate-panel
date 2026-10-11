@@ -708,6 +708,19 @@ function wbRowHtml(s, maxCred) {
         : (dg > (s.cool_remaining_sec || 0) ? '连败降权' : (s.cool_kind === 'hard_credit' ? '积分冷却' : '限流冷却'));
       tag = '<span class="tag warn">' + kind + ' · ' + dur(cool) + '</span>';
     } else tag = '<span class="tag ok">可用</span>' + (s.in_flight ? '' : '');
+    // 快过期批次角标：credits_expiring 由服务端按「快过期路由窗口」算好，>0 即表示该号
+    // 已进入「快过期硬优先层」（选号与新会话分配会优先落到它身上）。不显示出来就没人
+    // 看得出优先层在工作——线上实测：全池只有 1 个号有快过期批次，且它此前从未被选中过。
+    const expMs = s.credits_earliest_expiry ? parseAPITime(s.credits_earliest_expiry) : 0;
+    const expLeft = expMs ? Math.round((expMs - Date.now()) / 1000) : 0;
+    if (s.credits_expiring > 0) {
+      const eTip = '窗口内有 ' + s.credits_expiring + ' 分即将过期'
+        + (s.credits_earliest_remaining ? '（最早一批剩余 ' + s.credits_earliest_remaining + ' 分'
+            + (expLeft > 0 ? '，' + dur(expLeft) + '后到期' : '') + '）' : '')
+        + '；已进入快过期硬优先层（选号与新会话分配优先，积分不用就归零）';
+      tag += ' <span class="tag hot" title="' + esc(eTip) + '">快过期 ' + s.credits_expiring
+        + (expLeft > 0 ? ' · ' + dur(expLeft) : '') + '</span>';
+    }
     const note = s.reason ? '<div class="hint" style="font-size:11.5px;color:var(--ink-3);margin-top:3px">' + esc(s.reason) + '</div>' : '';
     const rateLimits = rateLimitRowsHtml(s.rate_limited_models, Date.now());
     const short = s.uid.length > 16 ? s.uid.slice(0, 16) + '…' : s.uid;

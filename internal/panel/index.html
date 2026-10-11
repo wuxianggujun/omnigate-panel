@@ -506,15 +506,15 @@
                 <span class="hint">垄断破除：免费层垄断时定期搭车探索未知号；0 关停</span></label>
               <label class="fld"><span class="lb">积分保底</span>
                 <input name="credit_floor" type="number" min="0" placeholder="100">
-                <span class="hint">余额低于此值不再接实测收费模型（保住免费模型可用）；0 关闭</span></label>
+                <span class="hint">余额低于此值不再接实测收费模型（保住免费模型可用）；有快过期批次的账号豁免（积分不用就归零，见右侧窗口）；0 关闭</span></label>
               <label class="fld"><span class="lb">快过期路由窗口</span>
                 <input name="expiring_soon" placeholder="168h">
-                <span class="hint">窗口内有快过期批次的账号选号权重 ×3（不排序、与金额无关）；0 关闭</span></label>
+                <span class="hint">窗口内有有效快过期批次的账号进入「快过期硬优先层」：最优成本层里只要还有这类账号，选号与新会话分配就只在它们之间进行（在途打满自然溢出到普通号，批次烧空/过期后自动退出）；层内按快过期量 + 最早到期加权，量低于 5 分不进层。0 关闭</span></label>
               <label class="fld"><span class="lb">会话粘性 TTL</span>
                 <input name="ttl" placeholder="30m">
                 <span class="hint">改动需重启进程</span></label>
             </div>
-            <div class="switch"><span class="lb">快过期积分优先</span>
+            <div class="switch"><span class="lb">快过期积分优先（硬优先层）</span>
               <input type="checkbox" name="prefer_expiring"></div>
           </div>
         </div>

@@ -45,6 +45,20 @@ type tool struct {
 	Description string          `json:"description"`
 	Parameters  json.RawMessage `json:"parameters"`
 	Strict      *bool           `json:"strict"`
+	// Function 是 chat/completions 形态的嵌套工具定义。Responses 规范用的是扁平
+	// 形态（name/description/parameters 与 type 同级），但大量客户端把「写给 chat
+	// 端点的」tools 原样发到 /v1/responses。只认扁平形态会把它们整批静默丢掉：
+	// 上游收不到 tools，模型只能干聊——实案里模型甚至自述 "no tool namespace
+	// listed"（会话中永远没有工具调用）。两种形态都收。
+	Function *nestedFunction `json:"function"`
+}
+
+// nestedFunction 是 chat 形态 tools[].function 的内容。
+type nestedFunction struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	Parameters  json.RawMessage `json:"parameters"`
+	Strict      *bool           `json:"strict"`
 }
 
 type textFormat struct {
@@ -348,8 +362,15 @@ func contentToChat(raw json.RawMessage) (any, error) {
 	return out, nil
 }
 
-// toolsToChat translates tools: the Responses flat function shape → the chat
-// {type:"function",function:{...}} nesting. Non-function tools are skipped.
+// toolsToChat translates tools into the chat {type:"function",function:{...}}
+// nesting. Both the Responses flat shape (name/description/parameters beside
+// type) and the chat nested shape (function:{...}) are accepted — see the tool
+// struct. Non-function tools are skipped.
+//
+// A missing parameters schema is filled with an empty object schema: the
+// upstream only treats an entry as callable when it carries parameters, so a
+// client that omits it (legal in some SDKs, required by the spec) would
+// otherwise get tools that are silently invisible to the model.
 func toolsToChat(tools []tool) []map[string]any {
 	if len(tools) == 0 {
 		return nil
@@ -359,18 +380,23 @@ func toolsToChat(tools []tool) []map[string]any {
 		if t.Type != "" && t.Type != "function" {
 			continue
 		}
-		if t.Name == "" {
+		name, desc, params, strict := t.Name, t.Description, t.Parameters, t.Strict
+		if name == "" && t.Function != nil {
+			name, desc, params, strict = t.Function.Name, t.Function.Description, t.Function.Parameters, t.Function.Strict
+		}
+		if name == "" {
 			continue
 		}
-		fn := map[string]any{"name": t.Name}
-		if t.Description != "" {
-			fn["description"] = t.Description
+		fn := map[string]any{"name": name}
+		if desc != "" {
+			fn["description"] = desc
 		}
-		if len(t.Parameters) > 0 {
-			fn["parameters"] = json.RawMessage(t.Parameters)
+		if len(params) == 0 {
+			params = json.RawMessage(`{"type":"object","properties":{}}`)
 		}
-		if t.Strict != nil {
-			fn["strict"] = *t.Strict
+		fn["parameters"] = json.RawMessage(params)
+		if strict != nil {
+			fn["strict"] = *strict
 		}
 		out = append(out, map[string]any{"type": "function", "function": fn})
 	}
@@ -380,8 +406,10 @@ func toolsToChat(tools []tool) []map[string]any {
 	return out
 }
 
-// toolChoiceToChat translates tool_choice: a string passes through;
-// {type:"function",name} → the chat {type:"function",function:{name}}.
+// toolChoiceToChat translates tool_choice into the chat form: a string passes
+// through; {type:"auto"|"none"|"required"} → that string; a named function
+// (either the Responses flat {type:"function",name} or the chat nested
+// {type:"function",function:{name}}) → {type:"function",function:{name}}.
 func toolChoiceToChat(raw json.RawMessage) any {
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 {
@@ -395,11 +423,25 @@ func toolChoiceToChat(raw json.RawMessage) any {
 		return nil
 	}
 	var obj struct {
-		Type string `json:"type"`
-		Name string `json:"name"`
+		Type     string `json:"type"`
+		Name     string `json:"name"`
+		Function *struct {
+			Name string `json:"name"`
+		} `json:"function"`
 	}
-	if json.Unmarshal(trimmed, &obj) == nil && obj.Name != "" {
-		return map[string]any{"type": "function", "function": map[string]any{"name": obj.Name}}
+	if json.Unmarshal(trimmed, &obj) != nil {
+		return nil
+	}
+	switch obj.Type {
+	case "auto", "none", "required":
+		return obj.Type
+	}
+	name := obj.Name
+	if name == "" && obj.Function != nil {
+		name = obj.Function.Name
+	}
+	if name != "" {
+		return map[string]any{"type": "function", "function": map[string]any{"name": name}}
 	}
 	return nil
 }

@@ -2,6 +2,7 @@ package responses
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -363,5 +364,88 @@ func TestTranslatorResponseID(t *testing.T) {
 	}
 	if resp["metadata"].(map[string]any)["a"] != "b" {
 		t.Errorf("metadata=%v", resp["metadata"])
+	}
+}
+
+// TestToolsToChatAcceptsChatNestedShape 回归：客户端把「写给 chat 端点的」嵌套
+// tools 原样发到 /v1/responses 时，必须照样转成上游可用的工具，而不是静默丢弃。
+//
+// 实案：丢掉之后上游收不到 tools，模型只能干聊（自述 "no tool namespace
+// listed"），用户在会话里永远看不到工具调用，而且**没有任何报错**——排查成本极高。
+// 同理，缺 parameters 的工具在上游侧等同不存在，这里补空对象 schema。
+func TestToolsToChatAcceptsChatNestedShape(t *testing.T) {
+	cr, err := RequestToChat([]byte(`{
+		"model":"m","input":"hi",
+		"tools":[
+			{"type":"function","function":{"name":"nested","description":"d","parameters":{"type":"object","properties":{"a":{"type":"string"}}}}},
+			{"type":"function","name":"flat","parameters":{"type":"object"}},
+			{"type":"function","name":"no_params"}
+		]
+	}`), nil)
+	if err != nil {
+		t.Fatalf("translate: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(cr.Body, &got); err != nil {
+		t.Fatalf("chat not json: %v", err)
+	}
+	tools, _ := got["tools"].([]any)
+	if len(tools) != 3 {
+		t.Fatalf("tools=%v (want 3: nested + flat + no_params)", got["tools"])
+	}
+	names := make([]string, 0, 3)
+	for _, raw := range tools {
+		fn := raw.(map[string]any)["function"].(map[string]any)
+		names = append(names, fn["name"].(string))
+		if _, ok := fn["parameters"]; !ok {
+			t.Errorf("tool %v 缺 parameters（上游会当它不存在）", fn["name"])
+		}
+	}
+	if names[0] != "nested" || names[1] != "flat" || names[2] != "no_params" {
+		t.Fatalf("tool names=%v", names)
+	}
+	// 嵌套形态的 description/parameters 必须原样带过去。
+	fn0 := tools[0].(map[string]any)["function"].(map[string]any)
+	if fn0["description"] != "d" {
+		t.Errorf("nested description=%v", fn0["description"])
+	}
+	if _, ok := fn0["parameters"].(map[string]any)["properties"]; !ok {
+		t.Errorf("nested parameters=%v", fn0["parameters"])
+	}
+	// 缺 parameters 的补空对象 schema。
+	fn2 := tools[2].(map[string]any)["function"].(map[string]any)
+	if params2, _ := fn2["parameters"].(map[string]any); params2["type"] != "object" {
+		t.Errorf("缺省 parameters=%v (want object schema)", fn2["parameters"])
+	}
+}
+
+// TestToolChoiceToChatForms tool_choice 的常见写法都要落到上游认识的形态。
+func TestToolChoiceToChatForms(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string // 期望的 chat tool_choice：字符串，或 "function:<name>"
+	}{
+		{`"auto"`, "auto"},
+		{`{"type":"auto"}`, "auto"},
+		{`{"type":"none"}`, "none"},
+		{`{"type":"required"}`, "required"},
+		{`{"type":"function","name":"f"}`, "function:f"},
+		{`{"type":"function","function":{"name":"f"}}`, "function:f"},
+	}
+	for _, c := range cases {
+		got := toolChoiceToChat(json.RawMessage(c.in))
+		var flat string
+		switch v := got.(type) {
+		case string:
+			flat = v
+		case map[string]any:
+			fn, _ := v["function"].(map[string]any)
+			flat = "function:" + fmt.Sprint(fn["name"])
+		case nil:
+			flat = ""
+		}
+		if flat != c.want {
+			t.Errorf("tool_choice %s → %v (want %s)", c.in, got, c.want)
+		}
 	}
 }

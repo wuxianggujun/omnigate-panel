@@ -877,8 +877,11 @@ function ogRowHtml(p, a) {
   else if (avail != null) balHtml = '<span class="num">' + esc(avail) + '</span>';
   else balHtml = '<span style="color:var(--ink-3)">—</span>';
   const acts = '<button class="xs ghost" data-src="omni" data-a="ogbalance" data-prov="' + esc(p.name) + '" data-label="' + esc(label) + '" title="从上游刷新该账号积分（余额）">积分</button>' +
-    (p.type === 'raccoon'
+    ((p.type === 'raccoon' || p.type === 'newapi')
       ? '<button class="xs ghost" data-src="omni" data-a="ogcheckin" data-prov="' + esc(p.name) + '" data-label="' + esc(label) + '">签到</button>'
+      : '') +
+    (p.type === 'newapi'
+      ? '<button class="xs ghost" data-src="omni" data-a="ogrefresh" data-prov="' + esc(p.name) + '" data-label="' + esc(label) + '" title="轮换该账号的会话 access_token">刷新</button>'
       : '') +
     '<button class="xs ghost danger" data-src="omni" data-a="ogremove" data-type="' + esc(p.type || '') + '" data-prov="' + esc(p.name) + '" data-label="' + esc(label) + '">移除</button>';
   return '<tr title="' + esc(p.name + ' / ' + label) + '">' +
@@ -1062,6 +1065,10 @@ $('accBody').addEventListener('click', async ev => {
         const bi = omniBalInfo[ogBalKey(prov, label)] || {};
         toast(bi.balance_error ? ('积分刷新失败：' + bi.balance_error)
           : ('积分已刷新：' + (bi.available != null ? bi.available : '—')), bi.balance_error ? 'err' : 'ok');
+      } else if (a === 'ogrefresh') {
+        await api('omni/account/refresh', { method: 'POST', body: JSON.stringify({ provider: prov, label }) });
+        toast('已刷新「' + label + '」的会话', 'ok');
+        await refreshOmniBalances(true);
       } else if (a === 'ogremove') {
         if (b.dataset.type && b.dataset.type !== 'raccoon') {
           // runable / openai 等账号是 omnigate.json 静态配置，须改配置后热生效。
@@ -2020,12 +2027,14 @@ function addTabsForSource(src) {
   const t = addSourceType(src);
   if (t === 'raccoon') return [['ogauth', '浏览器登录'], ['ogtoken', '粘贴 Token']];
   if (t === 'trae') return [['ogauth', '浏览器登录']];
+  if (t === 'newapi') return [['ognewapi', '浏览器登录']];
   if (t === 'runable') return [['ogcreds', '浏览器登录']];
   return [['ognone', '说明']];
 }
 const ADD_PANELS = {
   login: 'addTabLogin', import: 'addTabImport', bundle: 'addTabBundle',
-  ogauth: 'addTabOgAuth', ogtoken: 'addTabOgToken', ogcreds: 'addTabOgCreds', ognone: 'addTabOgNone',
+  ogauth: 'addTabOgAuth', ogtoken: 'addTabOgToken', ogcreds: 'addTabOgCreds',
+  ognewapi: 'addTabOgNewAPI', ognone: 'addTabOgNone',
 };
 async function openAdd() {
   // 来源列表依赖 OmniGate 账号聚合；首次打开若尚未加载则先取一次。
@@ -2074,7 +2083,8 @@ function switchAddTab(tab) {
   if (tab === 'ogauth' && $('authLabel')) { $('authLabel').value = ogNextLabel(); resetOgAuthPanel(); setOgAuthCopy(addSourceType(addSource) === 'trae'); }
   if (tab === 'ogtoken' && $('tokLabel')) $('tokLabel').value = ogNextLabel();
   if (tab === 'ogcreds' && $('ogAcctLabel')) $('ogAcctLabel').value = ogNextLabel();
-  ogMsg('authMsg', ''); ogMsg('tokenMsg', ''); ogMsg('ogCredsMsg', '');
+  if (tab === 'ognewapi' && $('naLabel')) { $('naLabel').value = ogNextLabel(); resetNaAuthPanel(); }
+  ogMsg('authMsg', ''); ogMsg('tokenMsg', ''); ogMsg('ogCredsMsg', ''); ogMsg('naMsg', '');
 }
 
 // resetOgAuthPanel 把 raccoon 浏览器登录面板复位到「未开始」态（切页 / 关闭时调用）。
@@ -4246,7 +4256,7 @@ function omniModelsText(p) { return Array.isArray(p.models) ? p.models.join('\n'
 
 function provCard(p, i) {
   const type = p.type || 'runable';
-  const typeOpts = ['runable', 'raccoon', 'trae', 'openai']
+  const typeOpts = ['runable', 'raccoon', 'trae', 'newapi', 'openai']
     .map(t => '<option value="' + t + '"' + (t === type ? ' selected' : '') + '>' + t + '</option>').join('');
   const raccoonFields = type === 'raccoon' ? '' +
       '<label>main_origin<input data-i="' + i + '" data-f="main_origin" value="' + esc(p.main_origin || '') + '" placeholder="https://..."></label>' +
@@ -4507,7 +4517,7 @@ function ogAcctCount() {
 }
 function ogNextLabel() {
   const t = addSourceType(addSource);
-  const base = t === 'raccoon' ? '浣熊账号' : (t === 'trae' ? 'TRAE账号' : (t === 'runable' ? 'runable账号' : '账号'));
+  const base = t === 'raccoon' ? '浣熊账号' : (t === 'trae' ? 'TRAE账号' : (t === 'runable' ? 'runable账号' : (t === 'newapi' ? '账号' : '账号')));
   return base + (ogAcctCount() + 1);
 }
 
@@ -4731,6 +4741,136 @@ async function loginOgCreds() {
 // openRunableLogin 打开 runable 登录页（用户在那里用 Google 登录，随后复制 session_token）。
 function openRunableLogin() {
   window.open('https://runable.com/', '_blank', 'noopener');
+}
+
+/* ── OmniGate · New API（justwoker 等）：浏览器登录抓取 ─────────────────
+   该站登录带 Turnstile，服务端直连密码登录会被拦。面板发起一次「抓取会话」拿到
+   一次性 state + 登录页 + 控制台脚本；用户在已登录该站的页面控制台执行脚本，脚本
+   把鉴权包 POST 回面板的公开 capture 端点（靠 state 校验），面板随后轮询状态。 */
+let naAuthState = '';
+let naSigninUrl = '';
+let naPollTimer = null;
+
+function stopNaPoll() { if (naPollTimer) { clearInterval(naPollTimer); naPollTimer = null; } }
+
+// resetNaAuthPanel 把 New API 抓取面板复位到「未开始」态。
+function resetNaAuthPanel() {
+  stopNaPoll();
+  naAuthState = '';
+  naSigninUrl = '';
+  if ($('naAuthLoad')) $('naAuthLoad').hidden = true;
+  if ($('naAuthReady')) $('naAuthReady').hidden = true;
+  if ($('naAuthDone')) $('naAuthDone').hidden = true;
+  if ($('naMode')) $('naMode').textContent = '';
+  if ($('naScript')) $('naScript').value = '';
+  if ($('btnStartNaAuth')) $('btnStartNaAuth').disabled = false;
+}
+
+async function startNewAPIAuth() {
+  stopNaPoll();
+  naAuthState = ''; naSigninUrl = '';
+  $('naAuthLoad').hidden = false;
+  $('naAuthReady').hidden = true;
+  $('naAuthDone').hidden = true;
+  $('btnStartNaAuth').disabled = true;
+  ogMsg('naMsg', '');
+  try {
+    const res = await api('omni/newapi/authorize', {
+      method: 'POST',
+      body: JSON.stringify({
+        provider: provName(),
+        label: $('naLabel').value.trim(),
+        api_key: $('naApiKey').value.trim(),
+      }),
+    });
+    naAuthState = res.state || '';
+    naSigninUrl = res.signin_url || '';
+    $('naScript').value = res.snippet || '';
+    $('naAuthLoad').hidden = true;
+    $('naAuthReady').hidden = false;
+    $('naMode').textContent = '浏览器脚本回传';
+    startNaPoll(res.label || $('naLabel').value.trim());
+    if (naSigninUrl) window.open(naSigninUrl, '_blank', 'noopener');
+  } catch (e) {
+    $('naAuthLoad').hidden = true;
+    $('btnStartNaAuth').disabled = false;
+    ogMsg('naMsg', '发起失败：' + e.message, 'err');
+  }
+}
+
+// startNaPoll 轮询抓取状态：state 从「等待」变「结束」且账号已入库即视为成功。
+function startNaPoll(label) {
+  let tries = 0;
+  naPollTimer = setInterval(async () => {
+    tries++;
+    if (tries > 240) { // ~10 分钟（抓取会话 15 分钟有效）
+      stopNaPoll();
+      $('naAuthPoll').hidden = true;
+      ogMsg('naMsg', '等待超时：请确认已在登录页执行脚本，或重新发起。', 'err');
+      $('btnStartNaAuth').disabled = false;
+      return;
+    }
+    try {
+      const st = await api('omni/newapi/status?state=' + encodeURIComponent(naAuthState));
+      if (st && st.pending) return;
+      // pending 结束：可能是回传成功，也可能只是 state 过期。用账号是否入库来确认。
+      const list = await api('omni/accounts');
+      const prov = (list || []).find(p => p.name === provName());
+      const hit = prov && (prov.accounts || []).some(a => a.label === label && a.has_token);
+      if (!hit) return; // 再等等（state 过期时最终会超时）
+      stopNaPoll();
+      $('naAuthReady').hidden = true;
+      $('naAuthDone').hidden = false;
+      $('naAuthDone').textContent = '授权成功：' + label + '，账号已载入池中';
+      $('btnStartNaAuth').disabled = false;
+      await loadOverview(true);
+      setTimeout(closeAdd, 1600);
+    } catch (e) {
+      if (e && e.status === 401) {
+        stopNaPoll();
+        $('naAuthPoll').hidden = true;
+        ogMsg('naMsg', '登录已过期：请重新登录后再发起。', 'err');
+        return;
+      }
+      /* 其它错误继续轮询 */
+    }
+  }, 2500);
+}
+
+function openNaSignin() {
+  if (!naSigninUrl) { ogMsg('naMsg', '还没有登录链接，请先点「生成并打开登录页」', 'err'); return; }
+  window.open(naSigninUrl, '_blank', 'noopener');
+}
+
+async function copyNaScript() {
+  const s = $('naScript').value;
+  if (!s) return;
+  try { await navigator.clipboard.writeText(s); ogMsg('naMsg', '脚本已复制：到已登录该站的页面 F12 → Console 粘贴回车', 'ok'); }
+  catch (e) { ogMsg('naMsg', '复制失败：请手动选中脚本框内容复制', 'err'); }
+}
+
+// refreshAllNewAPI 统一刷新：遍历当前可见的 New API 账号，逐个轮换会话 access_token。
+// 列表已按归属过滤，所以普通用户只会刷新到自己的账号。
+async function refreshAllNewAPI() {
+  const targets = [];
+  (lastOmni || []).forEach(p => {
+    if (p.type !== 'newapi') return;
+    (p.accounts || []).forEach(a => targets.push([p.name, a.label]));
+  });
+  if (!targets.length) { toast('没有可刷新的 New API 账号', 'err'); return; }
+  let ok = 0, bad = 0, firstErr = '';
+  for (const [prov, label] of targets) {
+    try {
+      await api('omni/account/refresh', { method: 'POST', body: JSON.stringify({ provider: prov, label }) });
+      ok++;
+    } catch (e) {
+      bad++;
+      if (!firstErr) firstErr = label + '：' + e.message;
+    }
+  }
+  toast('统一刷新完成：成功 ' + ok + (bad ? '，失败 ' + bad + '（' + firstErr + '）' : ''), bad ? 'err' : 'ok');
+  await loadOverview(true);
+  refreshOmniBalances(true);
 }
 
 // removeOmniAccountFromConfig 删除配置型账号（runable 等，改 omnigate.json 后热生效）。
@@ -5128,6 +5268,11 @@ async function saveOutbound() {
   on('btnTokenSave', saveOmniToken);
   on('btnOgOpenLogin', openRunableLogin);
   on('btnOgCredsSave', loginOgCreds);
+  // New API（justwoker 等）：浏览器登录抓取 + 统一刷新
+  on('btnStartNaAuth', startNewAPIAuth);
+  on('btnOpenNaSignin', openNaSignin);
+  on('btnCopyNaScript', copyNaScript);
+  on('btnRefreshAll', refreshAllNewAPI);
   on('btnOgGoProv', () => { closeAdd(); go('providers'); history.replaceState(null, '', '#providers'); });
   on('addSource', switchAddSource, 'change');
   on('btnLoadModels', loadUpstreamModels);

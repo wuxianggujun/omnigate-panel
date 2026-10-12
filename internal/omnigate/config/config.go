@@ -143,7 +143,7 @@ type ServerConfig struct {
 // ProviderConfig describes one upstream and its accounts.
 type ProviderConfig struct {
 	Name         string   `json:"name"`
-	Type         string   `json:"type"` // "runable" | "openai" | "raccoon"
+	Type         string   `json:"type"` // "runable" | "openai" | "raccoon" | "trae" | "newapi"
 	BaseURL      string   `json:"base_url"`
 	DeviceHeader string   `json:"device_header"`
 	APIKey       string   `json:"api_key"`
@@ -170,8 +170,9 @@ type AccountConfig struct {
 	Cookie   string `json:"cookie"`
 	Email    string `json:"email"`
 	Password string `json:"password"`
-	// RefreshToken is used by token-based providers (raccoon). When set, the
-	// gateway can mint fresh access tokens without re-authorizing.
+	// RefreshToken is used by token-based providers (raccoon / newapi). When set,
+	// the gateway can mint fresh access tokens without re-authorizing. For newapi
+	// it holds the session id sent as X-Auth-Session.
 	RefreshToken string `json:"refresh_token"`
 	// UID / MachineID / DeviceID / ApiHost are TRAE-specific per-account
 	// fingerprint fields (see provider.Account). Omitted for other types.
@@ -179,6 +180,16 @@ type AccountConfig struct {
 	MachineID string `json:"machine_id,omitempty"`
 	DeviceID  string `json:"device_id,omitempty"`
 	ApiHost   string `json:"api_host,omitempty"`
+	// APIKey is the newapi chat key (sk-...). It is a second credential next to
+	// the access token: the token drives /api/user/* (check-in, self) while the
+	// API key drives /v1/chat/completions.
+	APIKey string `json:"api_key,omitempty"`
+	// ExpiresAt is the access token's expiry (unix seconds) when the provider
+	// learns it from the token endpoint (newapi). 0 = unknown.
+	ExpiresAt int64 `json:"expires_at,omitempty"`
+	// SessionCookie is the optional New API session cookie captured with the
+	// session id (see provider.Account.SessionCookie).
+	SessionCookie string `json:"session_cookie,omitempty"`
 }
 
 // CheckinConfig controls the scheduled check-in / keep-alive tasks.
@@ -186,18 +197,45 @@ type CheckinConfig struct {
 	Enabled         bool          `json:"enabled"`
 	IntervalMinutes int           `json:"interval_minutes"`
 	Tasks           []CheckinTask `json:"tasks"`
+	// JitterMinutes 给签到时刻加一个 ±N 分钟的随机抖动，避免每天「整点固态」签到
+	// 被上游风控识别。缺省（字段缺失）= 30；显式 0 = 关闭；>0 = 该值。任务级
+	// jitter_minutes 可覆盖（见 CheckinTask.Jitter）。
+	JitterMinutes *int `json:"jitter_minutes,omitempty"`
 }
 
 // CheckinTask is either a generic HTTP request or a built-in provider task.
 type CheckinTask struct {
 	Name            string            `json:"name"`
 	Provider        string            `json:"provider"`
-	Type            string            `json:"type"` // "http" | "runable"
+	Type            string            `json:"type"` // "http" | "runable" | "raccoon" | "trae" | "newapi" | "newapi-refresh"
 	Method          string            `json:"method"`
 	URL             string            `json:"url"`
 	Headers         map[string]string `json:"headers"`
 	Body            string            `json:"body"`
 	IntervalMinutes int               `json:"interval_minutes"`
+	// JitterMinutes 覆盖全局 checkin.jitter_minutes：缺省 = 继承全局；0 = 该任务
+	// 不加抖动；>0 = 该值。
+	JitterMinutes *int `json:"jitter_minutes,omitempty"`
+}
+
+// DefaultJitter 是签到抖动的默认幅度（±30 分钟），当任务与全局都没显式配置时生效。
+const DefaultJitter = 30 * time.Minute
+
+// Jitter 解析任务的有效抖动幅度：任务级 > 全局 > 默认；显式 0 = 关闭。
+func (t CheckinTask) Jitter(global *int) time.Duration {
+	if t.JitterMinutes != nil {
+		if *t.JitterMinutes <= 0 {
+			return 0
+		}
+		return time.Duration(*t.JitterMinutes) * time.Minute
+	}
+	if global != nil {
+		if *global <= 0 {
+			return 0
+		}
+		return time.Duration(*global) * time.Minute
+	}
+	return DefaultJitter
 }
 
 // DefaultInterval is the fallback check-in period.
@@ -360,6 +398,9 @@ func (c *Config) applyDefaults() {
 			}
 		case "trae":
 			// Hosts default inside the provider; nothing to fill here.
+		case "newapi":
+			// BaseURL 必填（每个 New API 站点不同，例如 https://api.justwoker.icu），
+			// 没有通用缺省，留空由 provider 自身报错。
 		}
 	}
 }
@@ -378,7 +419,7 @@ func (c *Config) validate() error {
 		}
 		seen[p.Name] = true
 		switch p.Type {
-		case "runable", "openai", "raccoon", "trae":
+		case "runable", "openai", "raccoon", "trae", "newapi":
 		default:
 			return fmt.Errorf("provider %q: unknown type %q", p.Name, p.Type)
 		}

@@ -139,6 +139,19 @@ type Config struct {
 	// 「OmniGate 管理端点代理」（omni_admin_proxy.go）用它转发 raccoon/TRAE 的
 	// 授权/回调/账号列表/签到/移除，并注入网关 api_key。nil 时对应接口返回 501。
 	OmniAdmin http.Handler
+
+	// New API（QuantumNous/new-api）供应商的浏览器登录抓取与统一刷新。该站登录开了
+	// Cloudflare Turnstile，服务端直连密码登录会被拦，故账号只能靠「浏览器登录 +
+	// 控制台脚本回传」建立。任一为 nil 时对应接口返回 501。
+	//
+	//	OmniNewAPIAuthorize  登记一次性 state，返回 {state, signin_url}
+	//	OmniNewAPICapture    脚本回传鉴权包（payload 为原始 JSON 体）→ 落库账号
+	//	OmniNewAPICaptureStatus 轮询 state 是否仍在等待
+	//	OmniRefresh          统一刷新：轮换某 provider/账号的会话 access_token
+	OmniNewAPIAuthorize     func(provider, label, apiKey string) (any, error)
+	OmniNewAPICapture       func(state string, payload json.RawMessage) (any, error)
+	OmniNewAPICaptureStatus func(state string) (bool, error)
+	OmniRefresh             func(provider, label string) (any, error)
 }
 
 // Panel 管理面板 handler。挂载方式：外层 mux Handle("/panel/", panel)，
@@ -296,6 +309,14 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("POST /panel/api/omni/account/remove", p.tenant(p.omniAccountRemove))
 	p.mux.HandleFunc("POST /panel/api/omni/account/add", p.tenant(p.omniAccountAdd))
 	p.mux.HandleFunc("POST /panel/api/omni/account/login", p.tenant(p.omniAccountLogin))
+	// New API（justwoker 等）浏览器登录抓取：authorize/status 需登录，capture 公开
+	// （靠一次性 state 校验，脚本跑在 New API 站点 origin 上，走 no-cors 回传）。
+	p.mux.HandleFunc("POST /panel/api/omni/newapi/authorize", p.tenant(p.omniNewAPIAuthorize))
+	p.mux.HandleFunc("GET /panel/api/omni/newapi/status", p.tenant(p.omniNewAPICaptureStatus))
+	p.mux.HandleFunc("POST /panel/api/omni/newapi/capture", p.omniNewAPICapture)
+	p.mux.HandleFunc("OPTIONS /panel/api/omni/newapi/capture", p.omniNewAPICapturePreflight)
+	// 统一刷新：轮换 New API 账号的会话 access_token（单账号 / 整 provider）。
+	p.mux.HandleFunc("POST /panel/api/omni/account/refresh", p.tenant(p.omniAccountRefresh))
 	// OmniGate 登录类管理端点代理（raccoon/trae 的 authorize/callback/token/
 	// accounts/checkin/remove）：面板注入 api_key 转发到进程内 OmniGate，并按归属
 	// 打标/过滤/校验。前端不再直连 /omni/admin/*，普通 user 无需持有 api_key。

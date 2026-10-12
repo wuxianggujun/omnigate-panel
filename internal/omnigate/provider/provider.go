@@ -49,6 +49,14 @@ type Account struct {
 	MachineID string
 	DeviceID  string
 	ApiHost   string
+	// APIKey is a second credential used by New API relays (newapi): the access
+	// token drives /api/user/* (check-in, self) while this sk-... key drives
+	// /v1/chat/completions. Empty for providers that use a single credential.
+	APIKey string
+	// SessionCookie is the optional session cookie captured alongside a New API
+	// session id. Sent (as a Cookie header) during token rotation in case the
+	// relay validates the cookie as well as the X-Auth-Session header.
+	SessionCookie string
 }
 
 // ChatInput is a normalized chat request handed to a provider.

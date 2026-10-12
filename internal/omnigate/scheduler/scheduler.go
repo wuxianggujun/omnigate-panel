@@ -4,6 +4,8 @@ package scheduler
 import (
 	"bytes"
 	"context"
+	"fmt"
+	"hash/fnv"
 	"io"
 	"net/http"
 	"strings"
@@ -20,11 +22,28 @@ type Scheduler struct {
 	gw   *gateway.Gateway
 	log  *logx.Logger
 	stop chan struct{}
+
+	// startedAt / firstOff 给每个任务一个随机的「首次执行」错峰：进程刚起来时
+	// 不要所有签到任务在同一秒齐发（既像机器人，又可能触发上游风控）。
+	startedAt time.Time
+	firstOff  map[string]time.Duration
 }
 
 // New builds a Scheduler.
 func New(cfg *config.Config, gw *gateway.Gateway, log *logx.Logger) *Scheduler {
-	return &Scheduler{cfg: cfg, gw: gw, log: log, stop: make(chan struct{})}
+	s := &Scheduler{
+		cfg:       cfg,
+		gw:        gw,
+		log:       log,
+		stop:      make(chan struct{}),
+		startedAt: time.Now(),
+		firstOff:  map[string]time.Duration{},
+	}
+	def := cfg.DefaultInterval()
+	for _, t := range cfg.Checkin.Tasks {
+		s.firstOff[taskName(t)] = firstRunOffset(taskName(t), t.Interval(def))
+	}
+	return s
 }
 
 // Start launches the scheduling loop (no-op when disabled).
@@ -57,18 +76,64 @@ func (s *Scheduler) loop() {
 
 func (s *Scheduler) runDue() {
 	def := s.cfg.DefaultInterval()
+	now := time.Now()
 	for _, task := range s.cfg.Checkin.Tasks {
-		name := task.Name
-		if name == "" {
-			name = task.Type + ":" + task.Provider
-		}
+		name := taskName(task)
 		interval := task.Interval(def)
-		if last := s.gw.LastCheckin(name); !last.IsZero() && time.Since(last) < interval {
-			continue
+		jitter := task.Jitter(s.cfg.Checkin.JitterMinutes)
+		last := s.gw.LastCheckin(name)
+		if last.IsZero() {
+			// 首次执行：随机错峰（同一 task 名在同一进程生命周期内固定）。
+			if off := s.firstOff[name]; off > 0 && now.Sub(s.startedAt) < off {
+				continue
+			}
+		} else {
+			// 到点判定 = 上次 + 间隔 ± 随机抖动（种子 = 上次时间，故一个周期内稳定、
+			// 跨周期各不相同 → 每天签到时刻不再固定）。
+			due := last.Add(interval).Add(jitterOffset(name, last.Unix(), jitter))
+			if now.Before(due) {
+				continue
+			}
 		}
 		s.runTask(task)
 		s.gw.MarkCheckin(name)
 	}
+}
+
+// taskName returns a task's stable identity (its name, or type:provider).
+func taskName(task config.CheckinTask) string {
+	if task.Name != "" {
+		return task.Name
+	}
+	return task.Type + ":" + task.Provider
+}
+
+// firstRunOffset derives a stable per-task first-run stagger in [0, cap), where
+// cap is a quarter of the interval clamped to 30 minutes.
+func firstRunOffset(name string, interval time.Duration) time.Duration {
+	cap := interval / 4
+	if cap > 30*time.Minute {
+		cap = 30 * time.Minute
+	}
+	if cap <= 0 {
+		return 0
+	}
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(name))
+	return time.Duration(h.Sum64() % uint64(cap))
+}
+
+// jitterOffset derives a stable pseudo-random offset in [-jitter, +jitter) from
+// the task name and its last-run time. Because the seed changes every cycle, the
+// effective interval drifts run to run instead of landing on a fixed clock time.
+func jitterOffset(name string, last int64, jitter time.Duration) time.Duration {
+	if jitter <= 0 {
+		return 0
+	}
+	h := fnv.New64a()
+	_, _ = fmt.Fprintf(h, "%s|%d", name, last)
+	frac := float64(h.Sum64()%2001)/1000.0 - 1.0 // [-1, 1)
+	return time.Duration(float64(jitter) * frac)
 }
 
 func (s *Scheduler) runTask(task config.CheckinTask) {
@@ -94,6 +159,20 @@ func (s *Scheduler) runTask(task config.CheckinTask) {
 		}
 		s.log.Info("签到任务：TRAE 每日签到（%s）", provider)
 		s.gw.RunTraeCheckin(provider)
+	case "newapi":
+		provider := task.Provider
+		if provider == "" {
+			provider = s.cfg.DefaultProvider
+		}
+		s.log.Info("签到任务：New API 每日签到（%s）", provider)
+		s.gw.RunNewAPICheckin(provider)
+	case "newapi-refresh":
+		provider := task.Provider
+		if provider == "" {
+			provider = s.cfg.DefaultProvider
+		}
+		s.log.Info("刷新任务：New API 统一刷新（%s）", provider)
+		s.gw.RunNewAPIRefresh(provider)
 	case "http", "":
 		s.runHTTP(task)
 	default:

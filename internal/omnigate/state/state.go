@@ -38,6 +38,12 @@ type DynAccount struct {
 	ApiHost   string `json:"api_host,omitempty"`
 	ExpiresAt int64  `json:"expires_at,omitempty"`
 	AddedAt   int64  `json:"added_at,omitempty"`
+	// APIKey is the New API chat key (sk-...) for newapi accounts: the access
+	// token (AccessToken) drives check-in/self, the API key drives chat.
+	APIKey string `json:"api_key,omitempty"`
+	// SessionCookie is the optional New API session cookie captured with the
+	// session id (see provider.Account.SessionCookie).
+	SessionCookie string `json:"session_cookie,omitempty"`
 }
 
 // Load reads (or creates) the state file inside dir.

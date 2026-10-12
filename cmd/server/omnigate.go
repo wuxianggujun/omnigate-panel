@@ -484,6 +484,17 @@ func (m *omniManager) Accounts(ctx context.Context, withBalance bool) (any, erro
 				enrichOmniAccount(r, meta)
 			}
 			pa.Accounts = rows
+		case typ == "newapi":
+			// New API（justwoker 等）：withBalance 时查上游额度（/api/user/self），
+			// 否则只回内存视图（快，供概览轮询）。
+			rows, err := rt.gw.NewAPIAccounts(ctx, name, withBalance)
+			if err != nil {
+				return nil, err
+			}
+			for _, r := range rows {
+				enrichOmniAccount(r, meta)
+			}
+			pa.Accounts = rows
 		default:
 			for _, a := range rt.gw.Accounts(name) {
 				item := map[string]any{"label": a.Label, "has_token": a.Cookie != ""}
@@ -571,6 +582,12 @@ func (m *omniManager) Checkin(ctx context.Context, provider, label string) (any,
 			return nil, err
 		}
 		return map[string]any{"results": res}, nil
+	case "newapi":
+		res, err := rt.gw.NewAPICheckin(ctx, provider, label)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"results": res}, nil
 	default:
 		return nil, fmt.Errorf("provider %q 不支持签到", provider)
 	}
@@ -618,6 +635,12 @@ func (m *omniManager) CheckinAll(ctx context.Context) (any, error) {
 			} else {
 				item["results"] = res
 			}
+		case "newapi":
+			if res, err := rt.gw.NewAPICheckin(ctx, name, ""); err != nil {
+				item["error"] = err.Error()
+			} else {
+				item["results"] = res
+			}
 		default:
 			continue
 		}
@@ -638,4 +661,65 @@ func (m *omniManager) LoginRunable(provider, email, password, cookie string) (an
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 	return rt.gw.RunableVerify(ctx, provider, email, password, cookie)
+}
+
+// NewAPIAuthorize 登记一次 New API 浏览器抓取会话（返回 state + 登录页）。
+func (m *omniManager) NewAPIAuthorize(provider, label, apiKey string) (any, error) {
+	rt := m.cur.Load()
+	if rt == nil {
+		return nil, errors.New("omnigate 未启用")
+	}
+	return rt.gw.NewAPIAuthorize(provider, label, apiKey)
+}
+
+// NewAPICapture 接收浏览器脚本回传的鉴权包并落库账号。
+func (m *omniManager) NewAPICapture(stateID string, payload json.RawMessage) (any, error) {
+	rt := m.cur.Load()
+	if rt == nil {
+		return nil, errors.New("omnigate 未启用")
+	}
+	var p omnigateway.NewAPICapturePayload
+	if err := json.Unmarshal(payload, &p); err != nil {
+		return nil, fmt.Errorf("解析回传数据失败: %w", err)
+	}
+	// 兼容毫秒级时间戳（不同 New API 版本可能回毫秒）。
+	if p.ExpiresAt > 1e12 {
+		p.ExpiresAt /= 1000
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	return rt.gw.NewAPICapture(ctx, stateID, p)
+}
+
+// NewAPICaptureStatus 报告一次抓取 state 是否仍在等待（前端轮询）。
+func (m *omniManager) NewAPICaptureStatus(stateID string) (bool, error) {
+	rt := m.cur.Load()
+	if rt == nil {
+		return false, errors.New("omnigate 未启用")
+	}
+	return rt.gw.NewAPIPending(stateID), nil
+}
+
+// NewAPIRefresh 统一刷新：轮换某 New API provider / 账号的会话 access_token。
+func (m *omniManager) NewAPIRefresh(provider, label string) (any, error) {
+	rt := m.cur.Load()
+	if rt == nil {
+		return nil, errors.New("omnigate 未启用")
+	}
+	if rt.gw.ProviderType(provider) != "newapi" {
+		return nil, fmt.Errorf("provider %q 不支持统一刷新", provider)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	if label != "" {
+		if err := rt.gw.NewAPIRefreshAccount(ctx, provider, label); err != nil {
+			return nil, err
+		}
+		return map[string]any{"ok": true, "refreshed": 1}, nil
+	}
+	res, err := rt.gw.NewAPIRefreshAll(ctx, provider)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"results": res}, nil
 }

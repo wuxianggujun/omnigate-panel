@@ -99,6 +99,7 @@
           </label>
           <span class="note" id="accNote"></span>
           <button class="xs" id="btnCheckinAll">全部签到</button>
+          <button class="xs" id="btnRefreshAll">统一刷新</button>
           <button class="xs" id="btnTravelAll">旅行巡检</button>
           <button class="xs" id="btnActivityAll">活跃上报</button>
           <button class="xs" id="btnKeepaliveAll">全部保活</button>
@@ -1018,6 +1019,31 @@
           <button class="primary" id="btnOgCredsSave">保存并校验</button>
           <span class="og-msg" id="ogCredsMsg"></span>
         </div>
+      </div>
+
+      <!-- OmniGate · New API（justwoker 等）：浏览器登录抓取（控制台脚本回传鉴权包） -->
+      <div id="addTabOgNewAPI" class="tab-panel" hidden>
+        <div class="og-fields">
+          <label>账号名（可改）<input id="naLabel" placeholder="账号名"></label>
+          <label class="og-full">聊天 API Key（sk-…，可稍后补）<input id="naApiKey" placeholder="该站「令牌」页里的 sk-…，用于 /v1 聊天"></label>
+        </div>
+        <div class="og-hint">该站登录带 Cloudflare Turnstile 校验，面板无法用账号密码直连登录，只能「浏览器登录 + 控制台脚本回传」：</div>
+        <div class="og-hint" style="margin-top:6px">① 点「生成并打开登录页」，在打开的页面里<b>登录</b>；<br>② 回到本弹窗点「复制脚本」；<br>③ 在<b>已登录该站</b>的浏览器标签页按 <b>F12</b> → <b>Console（控制台）</b>，粘贴脚本并回车（若提示 <code>allow pasting</code>，先输入它再粘贴）；<br>④ 回到面板等待自动完成。</div>
+        <div class="og-row" style="margin-top:10px">
+          <button class="primary" id="btnStartNaAuth">生成并打开登录页</button>
+          <span class="tag mute" id="naMode"></span>
+        </div>
+        <div id="naAuthLoad" class="state" hidden style="margin-top:12px"><span class="dots">正在生成抓取会话</span></div>
+        <div id="naAuthReady" hidden>
+          <div class="og-row" style="margin-top:10px">
+            <button id="btnOpenNaSignin">打开登录页</button>
+            <button id="btnCopyNaScript">复制脚本</button>
+          </div>
+          <textarea id="naScript" readonly spellcheck="false" style="width:100%;height:150px;margin-top:8px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;resize:vertical"></textarea>
+          <div class="state" id="naAuthPoll"><span class="dots">等待回传，自动检测中</span></div>
+        </div>
+        <div id="naAuthDone" class="state ok" hidden style="margin-top:12px"></div>
+        <div class="og-msg" id="naMsg"></div>
       </div>
 
       <!-- OmniGate · openai 等：无需账号 -->

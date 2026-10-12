@@ -20,6 +20,7 @@ import (
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/logx"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/openai"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/provider"
+	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/provider/newapi"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/provider/openaibackend"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/provider/raccoon"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/provider/runable"
@@ -64,6 +65,13 @@ type Gateway struct {
 	traePendMu sync.Mutex
 	traePend   map[string]traePending
 
+	// newapiPend remembers in-flight New API browser-login captures (keyed by
+	// state). The panel hands the user a one-time token + snippet; the snippet
+	// posts the captured auth bundle back, and the pending entry supplies the
+	// label / API key the user typed before starting.
+	newapiPendMu sync.Mutex
+	newapiPend   map[string]newapiPending
+
 	// proxyFor resolves a per-provider outbound proxy (nil = direct). Installed
 	// via WithProxyResolver; consulted once per provider at construction.
 	proxyFor func(providerName string) *url.URL
@@ -98,6 +106,16 @@ type traePending struct {
 	machineID string
 	deviceID  string
 	at        time.Time
+}
+
+// newapiPending remembers an in-flight New API browser-login capture. The user
+// pre-fills the label + chat API key in the panel; the snippet only supplies the
+// auth bundle, so we keep the rest here until the capture arrives.
+type newapiPending struct {
+	provider string
+	label    string
+	apiKey   string
+	at       time.Time
 }
 
 type modelEntry struct {
@@ -176,6 +194,9 @@ var (
 	_ interface {
 		SetProxySelector(outbound.Selector)
 	} = (*trae.Provider)(nil)
+	_ interface {
+		SetProxySelector(outbound.Selector)
+	} = (*newapi.Provider)(nil)
 )
 
 // New builds a Gateway from config and state.
@@ -190,6 +211,7 @@ func New(cfg *config.Config, st *state.State, log *logx.Logger, opts ...Option) 
 		convs:      map[string]*conv{},
 		pending:    map[string]raccoonPending{},
 		traePend:   map[string]traePending{},
+		newapiPend: map[string]newapiPending{},
 		cool:       newCooldownLedger(),
 		sess:       newSessionHealth(),
 		credits:    newCreditCache(),
@@ -209,6 +231,8 @@ func New(cfg *config.Config, st *state.State, log *logx.Logger, opts ...Option) 
 			prov = raccoon.NewProvider(p.Name, p.MainOrigin, p.LLMBase, p.AuthBase)
 		case "trae":
 			prov = trae.NewProvider(p.Name, p.AgentHost, p.UgHost, p.OAuthHost)
+		case "newapi":
+			prov = newapi.NewProvider(p.Name, p.BaseURL, p.Models)
 		default:
 			return nil, fmt.Errorf("provider %q: unknown type %q", p.Name, p.Type)
 		}
@@ -251,6 +275,9 @@ func New(cfg *config.Config, st *state.State, log *logx.Logger, opts ...Option) 
 				MachineID:    a.MachineID,
 				DeviceID:     a.DeviceID,
 				ApiHost:      a.ApiHost,
+				APIKey:       a.APIKey,
+				ExpiresAt:    a.ExpiresAt,
+				SessionCookie: a.SessionCookie,
 			})
 		}
 		// Merge accounts added at runtime (e.g. via the Raccoon web login).
@@ -268,6 +295,8 @@ func New(cfg *config.Config, st *state.State, log *logx.Logger, opts ...Option) 
 				DeviceID:     d.DeviceID,
 				ApiHost:      d.ApiHost,
 				ExpiresAt:    d.ExpiresAt,
+				APIKey:       d.APIKey,
+				SessionCookie: d.SessionCookie,
 			})
 		}
 		g.accounts[p.Name] = accts
@@ -1095,7 +1124,7 @@ func (g *Gateway) openStream(ctx context.Context, provName string, prov provider
 					g.log.Warn("账号「%s」刷新 token 失败: %v", acc.Label, err)
 				}
 			}
-			if acc.Cookie == "" {
+			if acc.Cookie == "" && acc.APIKey == "" {
 				if !g.tryLogin(ctx, provName, prov, acc) {
 					continue
 				}

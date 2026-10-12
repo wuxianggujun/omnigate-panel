@@ -493,6 +493,13 @@ func main() {
 		// runable 登录校验（服务端会话探测 + 取积分）：runable 只支持 Google/Facebook
 		// 登录、会话是 httpOnly Cookie（网页读不到），面板无法自动抓取，只能由用户粘贴。
 		pcfg.OmniLogin = omni.LoginRunable
+		// New API（justwoker 等）浏览器登录抓取 + 统一刷新：该站登录开了 Cloudflare
+		// Turnstile，服务端直连密码登录会被拦，故账号靠「浏览器登录 + 控制台脚本回传」
+		// 建立。抓取端点公开但靠一次性 state 校验（见 internal/panel/omni_newapi.go）。
+		pcfg.OmniNewAPIAuthorize = omni.NewAPIAuthorize
+		pcfg.OmniNewAPICapture = omni.NewAPICapture
+		pcfg.OmniNewAPICaptureStatus = omni.NewAPICaptureStatus
+		pcfg.OmniRefresh = omni.NewAPIRefresh
 		// 面板 → OmniGate 管理端点代理：raccoon/TRAE 的授权/回调/账号列表/签到/
 		// 移除由面板注入 api_key 转发（多租户下普通 user 不持有网关 api_key）。
 		pcfg.OmniAdmin = omni.Handler()

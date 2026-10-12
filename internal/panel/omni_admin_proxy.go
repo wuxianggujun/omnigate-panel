@@ -42,6 +42,7 @@ var omniAdminSubs = map[string]bool{
 	"remove":      true,
 	"fingerprint": true,
 	"gems":        true,
+	"gemmaps":     true,
 	"chats":       true,
 	"keepalive":   true,
 }
@@ -90,9 +91,10 @@ func (p *Panel) omniAdminProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// fingerprint 改的是全局供应商设置（与 /panel/api/omni/config 同级），只允许
-	// 管理员读写；普通 user / viewer 即使猜到路径也不能改全局 TLS 指纹。
-	if sub == "fingerprint" && roleOf(r) != panelauth.RoleAdmin {
+	// fingerprint / gemmaps 改的是全局供应商设置（与 /panel/api/omni/config 同级），
+	// 只允许管理员读写；普通 user / viewer 即使猜到路径也不能改全局 TLS 指纹或
+	// 把自定义 Gem 暴露成全局模型名。
+	if (sub == "fingerprint" || firstSeg(sub) == "gemmaps") && roleOf(r) != panelauth.RoleAdmin {
 		writeErr(w, http.StatusForbidden, "admin_required")
 		return
 	}

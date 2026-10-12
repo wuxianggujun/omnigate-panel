@@ -105,6 +105,13 @@ type ChatInput struct {
 	// Incognito/Mode mirror the original gateway's upstream modes.
 	Incognito bool
 	Mode      string
+	// GemID runs the turn on a saved custom Gem (geminiweb). Empty = a normal
+	// model turn. The model in Model is the Gem's underlying base model.
+	GemID string
+	// PreferredAccount pins the turn to a specific account label. Set for a Gem
+	// turn, because a gem_id is private to the account that owns it. Empty =
+	// normal round-robin selection.
+	PreferredAccount string
 }
 
 // ApplySampling merges the standard OpenAI sampling/structure controls from in

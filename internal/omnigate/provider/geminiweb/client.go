@@ -342,21 +342,21 @@ func (c *Client) batchexecute(ctx context.Context, jar *fingerprint.Jar, session
 }
 
 // generate posts one turn to StreamGenerate and returns the raw response so the
-// caller can stream it.
-func (c *Client) generate(ctx context.Context, jar *fingerprint.Jar, sessionToken, sessionUUID, prompt, model, convID string, files []fileRef, thinking bool) (*http.Response, error) {
+// caller can stream it. gemID (non-empty) runs the turn on a saved custom Gem.
+func (c *Client) generate(ctx context.Context, jar *fingerprint.Jar, sessionToken, sessionUUID, prompt, model, convID string, files []fileRef, gemID string, thinking bool) (*http.Response, error) {
 	if strings.TrimSpace(sessionToken) == "" {
 		return nil, &UpstreamError{Status: 401, Message: "缺少会话 token"}
 	}
 	var encoded string
 	extra := map[string]string{}
 	if thinking {
-		encoded = encodePayloadThinking(prompt, model, convID, files, "", sessionUUID)
+		encoded = encodePayloadThinking(prompt, model, convID, files, gemID, sessionUUID)
 		for k, v := range buildModelHeaderThinking(model, sessionUUID) {
 			extra[k] = v
 		}
 		extra["x-goog-ext-525005358-jspb"] = `["` + sessionUUID + `",1]`
 	} else {
-		encoded = encodePayload(prompt, model, convID, files, "")
+		encoded = encodePayload(prompt, model, convID, files, gemID)
 		for k, v := range buildModelHeader(model) {
 			extra[k] = v
 		}

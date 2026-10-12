@@ -46,6 +46,9 @@ type Provider struct {
 	// fp is the anti-detection runtime (headers / TLS / jitter / cookie store).
 	// Nil = the client's in-memory default fingerprint.
 	fp *fingerprint.Runtime
+	// gems maps a client-facing model name to a custom Gem + its owning account
+	// (issue #2). Nil = no Gems are exposed as model names.
+	gems *GemMappingStore
 	// logf reports non-fatal upstream problems (an attachment that could not be
 	// uploaded). Nil = silent.
 	logf func(format string, args ...any)
@@ -54,6 +57,11 @@ type Provider struct {
 	// (at most one goroutine per provider). See keepalive.go.
 	keepAliveOnce sync.Once
 	keepAliveRun  atomic.Bool
+
+	// chatCleanupOnce / chatCleanupRun guard the opt-in background web-chat
+	// cleanup loop (at most one goroutine per provider). See keepalive.go.
+	chatCleanupOnce sync.Once
+	chatCleanupRun  atomic.Bool
 
 	mu       sync.Mutex
 	sessions map[string]*session
@@ -113,6 +121,7 @@ func (p *Provider) StartFingerprintSync(ctx context.Context) {
 func (p *Provider) FingerprintStatus() map[string]any {
 	st := p.fpRuntime().Status()
 	st["keepalive_running"] = p.KeepAliveRunning()
+	st["chat_cleanup_running"] = p.ChatCleanupRunning()
 	return st
 }
 
@@ -131,6 +140,44 @@ func (p *Provider) SetChromeTarget(target string) error {
 // one a generated image is inlined as a data URI (or dropped when there is no
 // public base URL to link to).
 func (p *Provider) SetImageStore(s *imagegen.Store) { p.images = s }
+
+// SetGemMappingStore attaches the model-name → custom Gem mapping store. Once
+// set, a request whose model name matches a mapping runs on that Gem's
+// underlying model and is pinned to the account that owns it.
+func (p *Provider) SetGemMappingStore(s *GemMappingStore) { p.gems = s }
+
+// GemMappings returns every model-name → Gem mapping (for the admin surface).
+func (p *Provider) GemMappings() []GemMapping {
+	if p.gems == nil {
+		return nil
+	}
+	return p.gems.All()
+}
+
+// ResolveGem resolves a model name to its Gem mapping. ok is false when the name
+// is not a Gem alias (or no mapping store is attached).
+func (p *Provider) ResolveGem(model string) (GemMapping, bool) {
+	if p.gems == nil {
+		return GemMapping{}, false
+	}
+	return p.gems.Resolve(strings.TrimSpace(model))
+}
+
+// SetGemMapping writes one model-name → Gem mapping and persists it.
+func (p *Provider) SetGemMapping(model string, m GemMapping) bool {
+	if p.gems == nil {
+		return false
+	}
+	return p.gems.Set(model, m)
+}
+
+// DeleteGemMapping removes one model-name → Gem mapping.
+func (p *Provider) DeleteGemMapping(model string) bool {
+	if p.gems == nil {
+		return false
+	}
+	return p.gems.Delete(model)
+}
 
 // SetLogger attaches a logger for non-fatal upstream problems — chiefly an
 // attachment that could not be uploaded, which would otherwise vanish without a
@@ -171,8 +218,19 @@ func (p *Provider) ListModels(ctx context.Context) ([]openai.Model, error) {
 
 func (p *Provider) catalog() []openai.Model {
 	out := make([]openai.Model, 0, len(p.models))
+	seen := make(map[string]bool, len(p.models))
 	for _, id := range p.models {
 		out = append(out, openai.Model{ID: id, Object: "model", OwnedBy: p.name})
+		seen[id] = true
+	}
+	// Expose each mapped Gem as a callable model name (issue #2). A Gem alias
+	// that collides with a real model is skipped — the real model wins.
+	for _, gm := range p.GemMappings() {
+		if seen[gm.Model] {
+			continue
+		}
+		seen[gm.Model] = true
+		out = append(out, openai.Model{ID: gm.Model, Object: "model", OwnedBy: p.name})
 	}
 	return out
 }
@@ -201,7 +259,7 @@ func (p *Provider) StreamChat(ctx context.Context, acc *provider.Account, in pro
 	}
 	model := resolveModel(in.Model, s.familyModel)
 	thinking := strings.TrimSpace(in.ReasoningEffort) != ""
-	resp, err := p.client.generate(ctx, s.jar, s.sessionToken, s.sessionUUID, in.Prompt, model, "", files, thinking)
+	resp, err := p.client.generate(ctx, s.jar, s.sessionToken, s.sessionUUID, in.Prompt, model, "", files, in.GemID, thinking)
 	if err != nil {
 		if Unauthorized(err) {
 			p.markUnhealthy(acc, err)

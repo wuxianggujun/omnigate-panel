@@ -716,6 +716,45 @@ func (s *Server) handleGeminiWebAdmin(w http.ResponseWriter, r *http.Request) {
 		default:
 			s.adminError(w, fmt.Errorf("未知的 action %q（create/update/delete）", req.Action))
 		}
+	case r.Method == http.MethodGet && path == "gemmaps":
+		name := s.geminiWebProviderOrDefault(r.URL.Query().Get("provider"))
+		mappings, err := s.gw.GeminiWebListGemMappings(name)
+		if err != nil {
+			s.adminError(w, err)
+			return
+		}
+		s.writeValue(w, 200, map[string]any{"ok": true, "mappings": mappings})
+	case r.Method == http.MethodPost && path == "gemmaps":
+		var req struct {
+			Provider  string `json:"provider"`
+			Action    string `json:"action"`
+			Model     string `json:"model"`
+			GemID     string `json:"gem_id"`
+			BaseModel string `json:"base_model"`
+			AccountID string `json:"account_id"`
+		}
+		if err := decodeBody(r, &req); err != nil {
+			s.adminError(w, err)
+			return
+		}
+		name := s.geminiWebProviderOrDefault(req.Provider)
+		switch strings.ToLower(strings.TrimSpace(req.Action)) {
+		case "set":
+			if err := s.gw.GeminiWebSetGemMapping(name, req.Model, req.GemID, req.BaseModel, req.AccountID); err != nil {
+				s.adminError(w, err)
+				return
+			}
+			s.writeValue(w, 200, map[string]any{"ok": true})
+		case "delete":
+			ok, err := s.gw.GeminiWebDeleteGemMapping(name, req.Model)
+			if err != nil {
+				s.adminError(w, err)
+				return
+			}
+			s.writeValue(w, 200, map[string]any{"ok": true, "deleted": ok})
+		default:
+			s.adminError(w, fmt.Errorf("未知的 action %q（set/delete）", req.Action))
+		}
 	case r.Method == http.MethodGet && path == "chats":
 		name := s.geminiWebProviderOrDefault(r.URL.Query().Get("provider"))
 		recent, _ := strconv.Atoi(r.URL.Query().Get("recent"))

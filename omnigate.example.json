@@ -15,6 +15,20 @@
     "min_expiring": 5,
     "refresh_interval": "10m"
   },
+  "fingerprint": {
+    "jitter_enabled": false,
+    "version_sync_enabled": false,
+    "version_sync_interval_hours": 24,
+    "tls_enabled": true
+  },
+  "maintenance": {
+    "keepalive_enabled": false,
+    "keepalive_interval_minutes": 30,
+    "chat_cleanup_enabled": false,
+    "chat_cleanup_keep_hours": 24,
+    "chat_cleanup_interval_hours": 6,
+    "chat_cleanup_skip_pinned": true
+  },
   "providers": [
     {
       "name": "raccoon",

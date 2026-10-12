@@ -251,6 +251,9 @@ func New(cfg *config.Config, st *state.State, log *logx.Logger, opts ...Option) 
 			// Generated images are stored under the data dir (a bind mount) so
 			// the /images/{id} route can serve them across restarts.
 			gw.SetImageStore(imagegen.NewStore(filepath.Join(cfg.DataDir, "generated_images")))
+			// Custom Gems exposed as callable model names (issue #2): a mapping
+			// persists model → {gem_id, base_model, account}.
+			gw.SetGemMappingStore(geminiweb.NewGemMappingStore(filepath.Join(cfg.DataDir, "gem-mapping.json")))
 			// An attachment that fails to upload must not disappear silently.
 			gw.SetLogger(g.log.Warn)
 			// Anti-detection / protocol-masquerade layer (ported from gemini2api):
@@ -277,6 +280,17 @@ func New(cfg *config.Config, st *state.State, log *logx.Logger, opts ...Option) 
 				provName := p.Name
 				gw.StartKeepAlive(context.Background(),
 					time.Duration(m.KeepaliveIntervalMinutes)*time.Minute,
+					func() []*provider.Account { return g.Accounts(provName) })
+			}
+			// Opt-in background web-chat cleanup (main.py's web_chat_cleanup_loop):
+			// periodically delete each account's stale Gemini web chats. Off by
+			// default — it deletes upstream data.
+			if m := cfg.Maintenance; m != nil && m.ChatCleanupEnabled {
+				provName := p.Name
+				gw.StartChatCleanup(context.Background(),
+					time.Duration(m.ChatCleanupIntervalHours*float64(time.Hour)),
+					m.ChatCleanupKeepHours,
+					m.ChatCleanupSkipPinnedOrDefault(),
 					func() []*provider.Account { return g.Accounts(provName) })
 			}
 			prov = gw
@@ -313,17 +327,17 @@ func New(cfg *config.Config, st *state.State, log *logx.Logger, opts ...Option) 
 			}
 			seen[label] = true
 			accts = append(accts, &provider.Account{
-				Label:        label,
-				Cookie:       st.Cookie(p.Name, label, a.Cookie),
-				Email:        a.Email,
-				Password:     a.Password,
-				RefreshToken: st.RefreshToken(p.Name, label, a.RefreshToken),
-				UID:          a.UID,
-				MachineID:    a.MachineID,
-				DeviceID:     a.DeviceID,
-				ApiHost:      a.ApiHost,
-				APIKey:       a.APIKey,
-				ExpiresAt:    a.ExpiresAt,
+				Label:         label,
+				Cookie:        st.Cookie(p.Name, label, a.Cookie),
+				Email:         a.Email,
+				Password:      a.Password,
+				RefreshToken:  st.RefreshToken(p.Name, label, a.RefreshToken),
+				UID:           a.UID,
+				MachineID:     a.MachineID,
+				DeviceID:      a.DeviceID,
+				ApiHost:       a.ApiHost,
+				APIKey:        a.APIKey,
+				ExpiresAt:     a.ExpiresAt,
 				SessionCookie: a.SessionCookie,
 			})
 		}
@@ -334,15 +348,15 @@ func New(cfg *config.Config, st *state.State, log *logx.Logger, opts ...Option) 
 			}
 			seen[d.Label] = true
 			accts = append(accts, &provider.Account{
-				Label:        d.Label,
-				Cookie:       st.Cookie(p.Name, d.Label, d.AccessToken),
-				RefreshToken: st.RefreshToken(p.Name, d.Label, d.RefreshToken),
-				UID:          d.UserID,
-				MachineID:    d.MachineID,
-				DeviceID:     d.DeviceID,
-				ApiHost:      d.ApiHost,
-				ExpiresAt:    d.ExpiresAt,
-				APIKey:       d.APIKey,
+				Label:         d.Label,
+				Cookie:        st.Cookie(p.Name, d.Label, d.AccessToken),
+				RefreshToken:  st.RefreshToken(p.Name, d.Label, d.RefreshToken),
+				UID:           d.UserID,
+				MachineID:     d.MachineID,
+				DeviceID:      d.DeviceID,
+				ApiHost:       d.ApiHost,
+				ExpiresAt:     d.ExpiresAt,
+				APIKey:        d.APIKey,
 				SessionCookie: d.SessionCookie,
 			})
 		}
@@ -613,6 +627,18 @@ func (g *Gateway) HandleChat(ctx context.Context, req *openai.ChatRequest, w htt
 		return
 	}
 	upstreamModel := g.resolveModel(ctx, provName, model)
+	// Gemini Web 自定义 Gem（issue #2）：模型名命中 gem 映射时，改用该 Gem 的
+	// 底层模型，并把请求固定到拥有该 Gem 的账号（gem_id 是账号私有的）。
+	var gemID, gemAccount string
+	if gp, ok := prov.(*geminiweb.Provider); ok {
+		if gm, ok := gp.ResolveGem(model); ok {
+			gemID = gm.GemID
+			gemAccount = gm.AccountID
+			if gm.BaseModel != "" {
+				upstreamModel = gm.BaseModel
+			}
+		}
+	}
 	incognito := g.cfg.Mode == "incognito"
 	hasTools := len(req.Tools) > 0
 
@@ -639,6 +665,8 @@ func (g *Gateway) HandleChat(ctx context.Context, req *openai.ChatRequest, w htt
 	// 不用自己数字数（代价是静默丢一点上下文）。截断发生在拼 prompt 的那一步，
 	// 所以流式/非流式、工具路径/非工具路径走的是同一套口径。
 	in := g.buildInput(prov, upstreamModel, req, incognito, hasTools)
+	in.GemID = gemID
+	in.PreferredAccount = gemAccount
 
 	if req.Stream {
 		h := w.Header()
@@ -1159,6 +1187,24 @@ func (g *Gateway) openStream(ctx context.Context, provName string, prov provider
 	accts := g.accounts[provName]
 	g.accountsMu.RUnlock()
 
+	// A Gem turn is account-scoped: pin to the account that owns the Gem. A
+	// gem_id is private to one Google account, so falling back to another account
+	// would run the wrong (or no) Gem.
+	pinned := false
+	if in.PreferredAccount != "" {
+		var only []*provider.Account
+		for _, a := range accts {
+			if a.Label == in.PreferredAccount {
+				only = append(only, a)
+			}
+		}
+		if len(only) == 0 {
+			return nil, fmt.Errorf("Gem 绑定的账号「%s」不存在", in.PreferredAccount)
+		}
+		accts = only
+		pinned = true
+	}
+
 	// Stateless upstreams (api-key based) need no account pool.
 	if len(accts) == 0 {
 		if prov.Type() == "openai" {
@@ -1238,7 +1284,9 @@ func (g *Gateway) openStream(ctx context.Context, provName string, prov provider
 				g.sess.MarkExpired(provName, acc.Label, err.Error())
 			}
 			if err == nil {
-				if idx != start {
+				// A pinned (Gem) turn must not move the provider's global active
+				// index: idx is relative to the filtered one-account slice.
+				if !pinned && idx != start {
 					g.st.SetActive(provName, idx)
 					g.log.Info("⇄ 自动切换账号「%s」", acc.Label)
 				}

@@ -173,6 +173,13 @@ func (s *Scheduler) runTask(task config.CheckinTask) {
 		}
 		s.log.Info("刷新任务：New API 统一刷新（%s）", provider)
 		s.gw.RunNewAPIRefresh(provider)
+	case "geminiweb":
+		provider := task.Provider
+		if provider == "" {
+			provider = s.cfg.DefaultProvider
+		}
+		s.log.Info("签到任务：Gemini Web 会话健康检查（%s）", provider)
+		s.gw.RunGeminiWebCheckin(provider)
 	case "http", "":
 		s.runHTTP(task)
 	default:

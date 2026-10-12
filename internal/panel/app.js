@@ -4520,7 +4520,11 @@ function openGems(prov, label) {
   gemTarget = { prov, label };
   if ($('gemWho')) $('gemWho').textContent = prov + ' / ' + label;
   if ($('gemVeil')) $('gemVeil').classList.add('on');
+  // 模型名映射是 provider 级全局设置，只有管理员能读写。
+  const sec = $('gemMapSection');
+  if (sec) sec.hidden = !isAdmin();
   loadGems();
+  if (isAdmin()) loadGemMaps();
 }
 function closeGems() { if ($('gemVeil')) $('gemVeil').classList.remove('on'); gemTarget = null; }
 
@@ -4543,7 +4547,10 @@ async function loadGems() {
       '<td>' + esc(g.name || '(未命名)') + '</td>' +
       '<td style="color:var(--ink-3)">' + esc(g.description || '—') + '</td>' +
       '<td style="color:var(--ink-3)">' + esc((g.prompt || '').slice(0, 120)) + '</td>' +
-      '<td class="c-acts"><button class="xs ghost danger" data-gemdel="' + esc(g.id) + '">删除</button></td>' +
+      '<td class="c-acts">' +
+        (isAdmin() ? '<button class="xs ghost" data-gemexpose="' + esc(g.id) + '" data-gemname="' + esc(g.name || '') + '">暴露为模型名</button> ' : '') +
+        '<button class="xs ghost danger" data-gemdel="' + esc(g.id) + '">删除</button>' +
+      '</td>' +
       '</tr>').join('');
   } catch (e) {
     if (st) { st.className = 'state err'; st.innerHTML = esc(e.message); }
@@ -4586,6 +4593,70 @@ async function gemDelete(gid, btn) {
     });
     toast('已删除 Gem', 'ok');
     loadGems();
+    if (isAdmin()) loadGemMaps();
+  } catch (e) {
+    toast('删除失败：' + e.message, 'err');
+    if (btn) btn.disabled = false;
+  }
+}
+
+// ── 自定义 Gem 暴露为模型名（issue #2，provider 级映射）──
+
+async function loadGemMaps() {
+  if (!gemTarget) return;
+  const st = $('gemMapState'), tb = $('gemMapBody');
+  if (!tb) return;
+  if (st) { st.hidden = false; st.className = 'state'; st.innerHTML = '<span class="dots">加载中</span>'; }
+  tb.innerHTML = '';
+  try {
+    const d = await apiAbs('/omni/admin/geminiweb/gemmaps?provider=' + encodeURIComponent(gemTarget.prov));
+    const ms = (d && d.mappings) || [];
+    if (st) st.hidden = true;
+    if (!ms.length) {
+      tb.innerHTML = '<tr><td colspan="4"><div class="empty">还没有把 Gem 暴露为模型名</div></td></tr>';
+      return;
+    }
+    tb.innerHTML = ms.map(m => '<tr>' +
+      '<td class="id">' + esc(m.model) + '</td>' +
+      '<td>' + esc(m.base_model || 'gemini-pro') + '</td>' +
+      '<td style="color:var(--ink-3)">' + esc(m.account_id || '—') + '</td>' +
+      '<td class="c-acts"><button class="xs ghost danger" data-gemmapdel="' + esc(m.model) + '">删除</button></td>' +
+      '</tr>').join('');
+  } catch (e) {
+    if (st) { st.className = 'state err'; st.innerHTML = esc(e.message); }
+  }
+}
+
+async function gemExpose(gid, gemName) {
+  if (!gemTarget) return;
+  const model = (prompt('把 Gem「' + (gemName || gid) + '」暴露为哪个模型名？（客户端用它调用）', '') || '').trim();
+  if (!model) return;
+  const base = (prompt('该 Gem 的底层模型（默认 gemini-pro）', 'gemini-pro') || 'gemini-pro').trim() || 'gemini-pro';
+  try {
+    await apiAbs('/omni/admin/geminiweb/gemmaps', {
+      method: 'POST',
+      body: JSON.stringify({
+        provider: gemTarget.prov, action: 'set',
+        model, gem_id: gid, base_model: base, account_id: gemTarget.label,
+      }),
+    });
+    toast('已暴露为模型名「' + model + '」', 'ok');
+    loadGemMaps();
+  } catch (e) {
+    toast('暴露失败：' + e.message, 'err');
+  }
+}
+
+async function gemMapDelete(model, btn) {
+  if (!gemTarget || !confirm('删除模型名映射「' + model + '」？')) return;
+  if (btn) btn.disabled = true;
+  try {
+    await apiAbs('/omni/admin/geminiweb/gemmaps', {
+      method: 'POST',
+      body: JSON.stringify({ provider: gemTarget.prov, action: 'delete', model }),
+    });
+    toast('已删除映射', 'ok');
+    loadGemMaps();
   } catch (e) {
     toast('删除失败：' + e.message, 'err');
     if (btn) btn.disabled = false;
@@ -5646,12 +5717,20 @@ async function saveOutbound() {
     if (b) gcDeleteChat(b.dataset.gcdel, b);
   });
   on('btnCloseGem', closeGems);
-  on('btnGemReload', loadGems);
+  on('btnGemReload', () => { loadGems(); if (isAdmin()) loadGemMaps(); });
   on('btnGemCreate', gemCreate);
+  on('btnGemMapReload', loadGemMaps);
   const gmb = $('gemBody');
   if (gmb) gmb.addEventListener('click', ev => {
+    const exp = ev.target.closest('button[data-gemexpose]');
+    if (exp) { gemExpose(exp.dataset.gemexpose, exp.dataset.gemname); return; }
     const b = ev.target.closest('button[data-gemdel]');
     if (b) gemDelete(b.dataset.gemdel, b);
+  });
+  const gmm = $('gemMapBody');
+  if (gmm) gmm.addEventListener('click', ev => {
+    const b = ev.target.closest('button[data-gemmapdel]');
+    if (b) gemMapDelete(b.dataset.gemmapdel, b);
   });
   // 积分快过期优先（raccoon / runable 的每日·每月积分会作废）
   on('btnSaveCfgCredit', () => saveOmniConfig('crMsg'));

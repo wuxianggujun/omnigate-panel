@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/provider"
@@ -168,4 +169,49 @@ func (g *Gateway) GeminiWebKeepAlive(ctx context.Context, providerName, label st
 		return nil, fmt.Errorf("账号「%s」不存在", label)
 	}
 	return out, nil
+}
+
+// GeminiWebListGemMappings returns every model-name → custom Gem mapping for a
+// provider (issue #2). Mappings are provider-scoped and persisted under the data
+// dir, so they survive restarts.
+func (g *Gateway) GeminiWebListGemMappings(providerName string) ([]geminiweb.GemMapping, error) {
+	gp, err := g.geminiWebProvider(providerName)
+	if err != nil {
+		return nil, err
+	}
+	return gp.GemMappings(), nil
+}
+
+// GeminiWebSetGemMapping writes one model-name → custom Gem mapping. The model
+// name becomes callable through /v1/chat/completions and is pinned to accountID.
+func (g *Gateway) GeminiWebSetGemMapping(providerName, model, gemID, baseModel, accountID string) error {
+	gp, err := g.geminiWebProvider(providerName)
+	if err != nil {
+		return err
+	}
+	model = strings.TrimSpace(model)
+	gemID = strings.TrimSpace(gemID)
+	if model == "" || gemID == "" {
+		return fmt.Errorf("model 与 gem_id 均不能为空")
+	}
+	if strings.TrimSpace(baseModel) == "" {
+		baseModel = "gemini-pro"
+	}
+	if !gp.SetGemMapping(model, geminiweb.GemMapping{
+		GemID:     gemID,
+		BaseModel: baseModel,
+		AccountID: strings.TrimSpace(accountID),
+	}) {
+		return fmt.Errorf("写入 Gem 映射失败")
+	}
+	return nil
+}
+
+// GeminiWebDeleteGemMapping removes one model-name → custom Gem mapping.
+func (g *Gateway) GeminiWebDeleteGemMapping(providerName, model string) (bool, error) {
+	gp, err := g.geminiWebProvider(providerName)
+	if err != nil {
+		return false, err
+	}
+	return gp.DeleteGemMapping(strings.TrimSpace(model)), nil
 }

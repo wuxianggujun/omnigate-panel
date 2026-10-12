@@ -68,7 +68,8 @@ func (p *Provider) UpdateGem(ctx context.Context, acc *provider.Account, gemID, 
 	return ok, nil
 }
 
-// DeleteGem removes a custom Gem.
+// DeleteGem removes a custom Gem. Any model-name → Gem mapping that pointed at
+// this Gem is deleted too, so a caller is never left with a dead model name.
 func (p *Provider) DeleteGem(ctx context.Context, acc *provider.Account, gemID string) (bool, error) {
 	s, err := p.ensureSession(ctx, acc)
 	if err != nil {
@@ -80,6 +81,9 @@ func (p *Provider) DeleteGem(ctx context.Context, acc *provider.Account, gemID s
 		return false, err
 	}
 	acc.Cookie = s.jar.CookieHeader()
+	if ok && p.gems != nil {
+		p.gems.DeleteByGem(gemID, acc.Label)
+	}
 	return ok, nil
 }
 

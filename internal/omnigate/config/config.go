@@ -71,12 +71,28 @@ func (f *FingerprintConfig) TLSImpersonationEnabled() bool {
 }
 
 // MaintenanceConfig 是 OmniGate 上游账号的后台维护开关。移植自 gemini2api
-// gclient.py 的 _auto_refresh_loop（定期轮换 Cookie → 重建会话 → 心跳）。
+// gclient.py 的 _auto_refresh_loop（定期轮换 Cookie → 重建会话 → 心跳）与
+// main.py 的 web_chat_cleanup_loop（定时清理 Gemini 网页端堆积会话）。
 type MaintenanceConfig struct {
 	// KeepaliveEnabled 打开 geminiweb 账号的后台保活。
 	KeepaliveEnabled bool `json:"keepalive_enabled,omitempty"`
 	// KeepaliveIntervalMinutes 是保活间隔（分钟）；<=0 视为 30。
 	KeepaliveIntervalMinutes int `json:"keepalive_interval_minutes,omitempty"`
+
+	// ChatCleanupEnabled 打开 geminiweb 网页端会话的定时清理。默认关闭：清理
+	// 会真的删除上游数据，只应由运维显式开启。
+	ChatCleanupEnabled bool `json:"chat_cleanup_enabled,omitempty"`
+	// ChatCleanupKeepHours 是保留窗口（小时）；<=0 视为 24（上游另有一小时下界）。
+	ChatCleanupKeepHours float64 `json:"chat_cleanup_keep_hours,omitempty"`
+	// ChatCleanupIntervalHours 是清理间隔（小时）；<=0 视为 6。
+	ChatCleanupIntervalHours float64 `json:"chat_cleanup_interval_hours,omitempty"`
+	// ChatCleanupSkipPinned 跳过置顶会话；缺省（nil）视为 true。
+	ChatCleanupSkipPinned *bool `json:"chat_cleanup_skip_pinned,omitempty"`
+}
+
+// ChatCleanupSkipPinnedOrDefault 报告清理是否跳过置顶会话（未设置时默认 true）。
+func (m *MaintenanceConfig) ChatCleanupSkipPinnedOrDefault() bool {
+	return m == nil || m.ChatCleanupSkipPinned == nil || *m.ChatCleanupSkipPinned
 }
 
 // APIKey 是一把入站网关密钥。
@@ -193,9 +209,9 @@ type ProviderConfig struct {
 	APIKey       string   `json:"api_key"`
 	Models       []string `json:"models"`
 	// Raccoon-specific bases; each defaults to base_url + the upstream path.
-	MainOrigin string          `json:"main_origin"`
-	LLMBase    string          `json:"llm_base"`
-	AuthBase   string          `json:"auth_base"`
+	MainOrigin string `json:"main_origin"`
+	LLMBase    string `json:"llm_base"`
+	AuthBase   string `json:"auth_base"`
 	// TRAE-specific hosts (SOLO agent / check-in / OAuth). Empty = the defaults.
 	AgentHost string          `json:"agent_host"`
 	UgHost    string          `json:"ug_host"`
@@ -251,7 +267,7 @@ type CheckinConfig struct {
 type CheckinTask struct {
 	Name            string            `json:"name"`
 	Provider        string            `json:"provider"`
-	Type            string            `json:"type"` // "http" | "runable" | "raccoon" | "trae" | "newapi" | "newapi-refresh"
+	Type            string            `json:"type"` // "http" | "runable" | "raccoon" | "trae" | "newapi" | "newapi-refresh" | "geminiweb"
 	Method          string            `json:"method"`
 	URL             string            `json:"url"`
 	Headers         map[string]string `json:"headers"`
@@ -418,6 +434,12 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Maintenance.KeepaliveIntervalMinutes <= 0 {
 		c.Maintenance.KeepaliveIntervalMinutes = 30
+	}
+	if c.Maintenance.ChatCleanupKeepHours <= 0 {
+		c.Maintenance.ChatCleanupKeepHours = 24
+	}
+	if c.Maintenance.ChatCleanupIntervalHours <= 0 {
+		c.Maintenance.ChatCleanupIntervalHours = 6
 	}
 	if c.Mode == "" {
 		c.Mode = "text"

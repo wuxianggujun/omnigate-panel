@@ -967,6 +967,20 @@
           <tbody id="gemBody"></tbody>
         </table>
       </div>
+      <div id="gemMapSection" hidden>
+        <div class="og-sep"></div>
+        <div class="og-row" style="justify-content:space-between">
+          <div class="og-t">已暴露为模型名 <span class="hint">（provider 级：客户端用这些模型名即可直接调用对应 Gem，请求会固定到其所属账号）</span></div>
+          <button class="xs ghost" id="btnGemMapReload">刷新</button>
+        </div>
+        <div class="state" id="gemMapState"></div>
+        <div class="tbl-wrap">
+          <table class="acc md" id="gemMapTable">
+            <thead><tr><th>模型名</th><th>底层模型</th><th>所属账号</th><th class="c-acts"></th></tr></thead>
+            <tbody id="gemMapBody"></tbody>
+          </table>
+        </div>
+      </div>
     </div>
     <footer>
       <span class="grow"></span>

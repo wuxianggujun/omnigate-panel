@@ -19,6 +19,8 @@ func TestNewAPICaptureSnippet(t *testing.T) {
 		"new-api:auth-refresh",
 		"AUTH_REFRESH_RACE",
 		"session_sid",
+		"mode: 'cors'",
+		"out.error",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("脚本缺少 %q", want)

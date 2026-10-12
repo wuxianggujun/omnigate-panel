@@ -7,8 +7,8 @@
 //	POST /panel/api/omni/newapi/capture     （公开、state 校验）脚本把鉴权包 POST 回来
 //	GET  /panel/api/omni/newapi/status      （登录用户）轮询抓取是否完成
 //
-// capture 走 no-cors 的 text/plain POST（浏览器「简单请求」，无需 CORS 预检），
-// 因此这里额外放开 CORS 头，让 cors 模式的 fetch 也能读到结果。
+// capture 走 cors 模式的 text/plain POST：text/plain 让它保持「简单请求」（无预检），
+// 放开 CORS 头则让脚本能读到服务端的裁定（成功 / 具体拒绝原因），而不是只能靠面板轮询。
 //
 // 分工与 omni_accounts.go 一致：面板只做 HTTP 编排，真正落库在 main 注入的闭包里。
 package panel
@@ -284,12 +284,17 @@ func newAPICaptureSnippet(base, stateID string) string {
     if (!payload.access_token || !payload.session_sid) {
       throw new Error('未拿到 access_token / session，请确认已登录本站');
     }
-    await fetch(%q, {
-      method: 'POST', mode: 'no-cors',
+    const res = await fetch(%q, {
+      method: 'POST', mode: 'cors',
       headers: { 'Content-Type': 'text/plain' },
       body: JSON.stringify(payload)
     });
-    console.log('%%c已回传登录凭据，请回到面板查看结果。建议随后关闭本站标签页，避免浏览器与面板同时刷新会话。', 'color:#0a0');
+    const out = await res.json().catch(() => ({}));
+    if (res.ok && (!out || out.ok !== false)) {
+      console.log('%%c已回传登录凭据，请回到面板查看结果。建议随后关闭本站标签页，避免浏览器与面板同时刷新会话。', 'color:#0a0');
+    } else {
+      console.error('回传被拒（HTTP ' + res.status + '）：' + ((out && out.error) || '未知错误'));
+    }
   } catch (e) {
     console.error('抓取失败：', e);
   }

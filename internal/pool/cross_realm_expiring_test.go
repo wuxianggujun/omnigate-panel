@@ -120,3 +120,105 @@ func TestPreferRealmOverSticky(t *testing.T) {
 		t.Error("关闭快过期优先后 cn-exp 应让位给 global")
 	}
 }
+
+// paidExpiringPool 复刻线上案例：cn 的快过期号（cn-exp）对 pay-model 实测**收费**（tier 2），
+// 国际版号（g-free）实测**免费**（tier 0）。口径来自 2026-10-12 线上台账：
+// `ㅤ.`(cn) 在 deepseek-v4.1-flash 上 cost 0.00087/1k，14 个 global 号 cost=0。
+func paidExpiringPool(t *testing.T) *Pool {
+	t.Helper()
+	withNoPickGap(t)
+	auth.SetGlobalEnabled(true)
+	t.Cleanup(func() { auth.SetGlobalEnabled(true) })
+	p := New("")
+	p.SetCostExploreInterval(0)
+	p.Add(&auth.Auth{UID: "g-free", Domain: "www.workbuddy.ai"})
+	p.Add(&auth.Auth{UID: "cn-exp", Domain: "www.codebuddy.cn"})
+	now := time.Now()
+	p.SetCreditsDetailed("g-free", 1_000_000, 1_000_000, 0, time.Time{}, 0)
+	p.SetCreditsDetailed("cn-exp", 120, 120, 100, now.Add(24*time.Hour), 100)
+	p.NoteModelCost("g-free", "pay-model", 0, 1000)   // tier 0：实测免费
+	p.NoteModelCost("cn-exp", "pay-model", 0.9, 1000) // tier 2：实测收费
+	return p
+}
+
+// freeTierExpiringPool 同上，但 cn-exp 对 free-model 也实测免费（同属最优成本层 tier 0）。
+// 用于确认成本门槛不会误伤「快过期号本来就免费」的正常场景。
+func freeTierExpiringPool(t *testing.T) *Pool {
+	t.Helper()
+	p := paidExpiringPool(t)
+	p.NoteModelCost("cn-exp", "free-model", 0, 1000) // tier 0：与 g-free 同层
+	p.NoteModelCost("g-free", "free-model", 0, 1000)
+	return p
+}
+
+// TestAssignExpiringRespectsCostTier 粘性分配侧必须过成本层（成本层 > 快过期）：
+// 快过期号在收费层、国际版号在免费层时，新会话不能被跨域快过期层改道到收费号上。
+func TestAssignExpiringRespectsCostTier(t *testing.T) {
+	p := paidExpiringPool(t)
+	p.SetRandomSource(func(n int64) int64 { return 0 })
+
+	// 分配候选：快过期层被成本门拦掉 → 退到按域序拼接。
+	if got, want := p.AssignUIDsForModelRealms("pay-model", []string{"global", "cn"}), []string{"g-free", "cn-exp"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("分配候选=%v want %v（快过期号在收费层，不应被硬优先）", got, want)
+	}
+	// 单域入口同样不收窄。
+	if got, want := p.AssignUIDsForModelRealm("pay-model", "global"), []string{"g-free"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("单域分配=%v want %v", got, want)
+	}
+	// 选号：跨域快过期趟被成本门拦掉 → 落到免费的国际版号。
+	for i := 0; i < 20; i++ {
+		a := p.PickExcludingForRealms(nil, "pay-model", []string{"global", "cn"})
+		if a == nil || a.UID != "g-free" {
+			t.Fatalf("第 %d 次选号=%v want g-free（成本层高于快过期）", i, a)
+		}
+	}
+	// 粘性让路：粘在收费快过期号上 → 让位（否则粘性绕过成本分层，一直付费）。
+	if !p.PreferRealmOverSticky("cn-exp", "cn", "pay-model", []string{"global", "cn"}) {
+		t.Error("粘性号在收费层、域内有免费号，应让位")
+	}
+}
+
+// TestExpiringKeptWhenSameCostTier 快过期号与普通号同处最优成本层时，快过期优先照旧生效
+// （成本门只在「快过期号更贵」时拦截，不改变 P6 的跨域快过期语义）。
+func TestExpiringKeptWhenSameCostTier(t *testing.T) {
+	p := freeTierExpiringPool(t)
+	p.SetRandomSource(func(n int64) int64 { return 0 })
+
+	if got, want := p.AssignUIDsForModelRealms("free-model", []string{"global", "cn"}), []string{"cn-exp"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("分配候选=%v want %v（同成本层内快过期跨域优先）", got, want)
+	}
+	for i := 0; i < 20; i++ {
+		a := p.PickExcludingForRealms(nil, "free-model", []string{"global", "cn"})
+		if a == nil || a.UID != "cn-exp" {
+			t.Fatalf("第 %d 次选号=%v want cn-exp（同成本层内快过期优先）", i, a)
+		}
+	}
+	if p.PreferRealmOverSticky("cn-exp", "cn", "free-model", []string{"global", "cn"}) {
+		t.Error("快过期号已在最优成本层内，不应让位")
+	}
+}
+
+// TestPreferRealmOverStickyYieldsWhenCostlier 粘性号即使已在首选域，只要它不是最优成本层
+// （域内有更便宜的可用号）也要让位——「已在首选域」不再等于「永不让位」。
+func TestPreferRealmOverStickyYieldsWhenCostlier(t *testing.T) {
+	withNoPickGap(t)
+	auth.SetGlobalEnabled(true)
+	t.Cleanup(func() { auth.SetGlobalEnabled(true) })
+	p := New("")
+	p.SetCostExploreInterval(0)
+	p.Add(&auth.Auth{UID: "g-free", Domain: "www.workbuddy.ai"})
+	p.Add(&auth.Auth{UID: "g-paid", Domain: "www.workbuddy.ai"})
+	p.SetCreditsDetailed("g-free", 1_000_000, 1_000_000, 0, time.Time{}, 0)
+	p.SetCreditsDetailed("g-paid", 1_000_000, 1_000_000, 0, time.Time{}, 0)
+	p.NoteModelCost("g-free", "pay-model", 0, 1000)
+	p.NoteModelCost("g-paid", "pay-model", 0.9, 1000)
+
+	// 粘在收费号上（域内还有免费号）→ 让位。
+	if !p.PreferRealmOverSticky("g-paid", "global", "pay-model", []string{"global", "cn"}) {
+		t.Error("粘性号非最优成本层（域内有免费号），应让位")
+	}
+	// 粘在免费号上（本身已是最优层，无快过期批次）→ 按域优先，仍在首选域故不让位。
+	if p.PreferRealmOverSticky("g-free", "global", "pay-model", []string{"global", "cn"}) {
+		t.Error("粘性号已在最优成本层且首选域，不应让位")
+	}
+}

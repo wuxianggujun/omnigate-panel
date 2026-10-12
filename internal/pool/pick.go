@@ -100,18 +100,30 @@ func (p *Pool) PreferRealmAvailable(stickyRealm, reqModel string, realms []strin
 	return false
 }
 
-// PreferRealmOverSticky 报告「是否应放弃粘性号、改由有序域选号重绑」。在 PreferRealmAvailable
-// 的域优先级之上叠加 P6 快过期优先：粘性号本身若处于快过期优先层（且对该模型可用，调用方
-// 已用 PickByUIDForModel 校验过），则不让位——否则「快过期积分优先消耗」会被历史粘性绑定
-// 永久旁路（域偏好 > 会话粘性，但快过期层 > 域偏好）。
+// PreferRealmOverSticky 报告「是否应放弃粘性号、改由有序域选号重绑」。判定顺序与选号一致
+// （成本层 > 快过期 > 域偏好）：
+//
+//  1. 粘性号若不在**最优成本层**（候选域里有更便宜的号可用），一律让位——否则历史粘性
+//     绑定会绕过成本分层，一直为可免费/未观测的模型在付费号上花钱（线上案例：cn 快过期号
+//     在 deepseek-v4.1-flash 上 tier 2、14 个国际版号 tier 0）。
+//  2. 粘性号已处于最优成本层且在快过期优先层内时不让位（快过期 > 域偏好）。
+//  3. 否则按原有域优先级让位（域偏好 > 会话粘性）。
 //
 // 调用方须先做 realmIn(realms, stickyRealm) 校验（stickyRealm 不在 realms 时按不可用处理）。
 func (p *Pool) PreferRealmOverSticky(stickyUID, stickyRealm, reqModel string, realms []string) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	now := time.Now()
-	if e := p.byUID[stickyUID]; e != nil && p.preferExpiring && expiringPreferred(e, now) {
-		return false // 粘性号在快过期层内：不让位，继续烧它的快过期积分
+	sticky := p.byUID[stickyUID]
+	if sticky != nil {
+		if best, ok := p.bestCostTierForRealmsLocked(reqModel, realms, now); ok {
+			if ti, _ := costTierOf(sticky, reqModel, now); ti > best {
+				return true // 有更便宜的号可用：粘性让位，别为了保绑定一直付费
+			}
+		}
+		if p.preferExpiring && expiringPreferred(sticky, now) {
+			return false // 粘性号在最优成本层 + 快过期层内：不让位，继续烧它的快过期积分
+		}
 	}
 	for _, realm := range realms {
 		if realm == stickyRealm {
@@ -224,16 +236,7 @@ func (p *Pool) pickLocked(tried map[string]bool, reqModel, realm string, allowCo
 	// 若已知收费的号恒压过未知号，那台免费的号永远轮不到，也就永远学不到。
 	// 为什么用硬过滤而非仅排序：pickWeighted 会在候选内加权随机，只排序的话
 	// 收费号仍有机会抽中，达不到"优先免费"的语义。
-	costTier := func(e *entry) (int, float64) {
-		mc, ok := e.modelCostOf(reqModel, now)
-		if !ok {
-			return 1, 0
-		}
-		if mc.CostPer1k <= 0 {
-			return 0, 0
-		}
-		return 2, mc.CostPer1k
-	}
+	costTier := func(e *entry) (int, float64) { return costTierOf(e, reqModel, now) }
 	bestTier := 2
 	hasTier1 := false
 	explored := false // 本次 pick 是否切了探索层（事件日志在选中号确定后打）
@@ -614,6 +617,21 @@ func expiringNow(e *entry, now time.Time) bool {
 		e.creditsEarliestRemaining > 0 &&
 		!e.creditsEarliestExpiry.IsZero() &&
 		e.creditsEarliestExpiry.After(now)
+}
+
+// costTierOf 返回账号对 reqModel 的成本层（0 已实测免费 / 1 无观测 / 2 已实测收费）+ 单价。
+//
+// 单一事实来源：选号（pickLocked）、粘性分配（AssignUIDsForModelRealm / AssignUIDsForModelRealms）、
+// 粘性让路（PreferRealmOverSticky）三处共用同一口径，避免「成本层 > 快过期」在某一侧漏掉。
+func costTierOf(e *entry, reqModel string, now time.Time) (int, float64) {
+	mc, ok := e.modelCostOf(reqModel, now)
+	if !ok {
+		return 1, 0
+	}
+	if mc.CostPer1k <= 0 {
+		return 0, 0
+	}
+	return 2, mc.CostPer1k
 }
 
 // expiringMinCredits 进入快过期硬优先层的最低快过期量（P5 门槛，单位同 credits）。

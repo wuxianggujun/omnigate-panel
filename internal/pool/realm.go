@@ -127,12 +127,105 @@ func (p *Pool) AvailableUIDsForModelRealm(model, realm string) []string {
 	return p.availableUIDsForModelRealmLocked(model, realm, time.Now())
 }
 
+// bestCostTierOfUIDsLocked 返回 uid 列表里对 model 的最优成本层（0 免费 / 1 无观测 / 2 收费）。
+// ok=false 表示列表为空（或所有 uid 都已不在了）。调用方必须已持 p.mu。
+//
+// 口径与 pickLocked 的成本分层一致（共用 costTierOf）：成本层是最高优先级，故任何
+// 收窄候选的决策（快过期优先层）都必须先过这一层，否则会为了烧快过期积分去付费。
+func (p *Pool) bestCostTierOfUIDsLocked(uids []string, model string, now time.Time) (int, bool) {
+	best, ok := 2, false
+	for _, uid := range uids {
+		e := p.byUID[uid]
+		if e == nil {
+			continue
+		}
+		if ti, _ := costTierOf(e, model, now); !ok || ti < best {
+			best, ok = ti, true
+		}
+	}
+	return best, ok
+}
+
+// expiringTierInBestCostTierLocked 在 all 里挑出「处于**最优成本层** 且 在快过期优先层」的 uid。
+//
+// 为什么必须先过成本层（成本层 > 快过期）：线上案例是 cn 的快过期号在
+// deepseek-v4.1-flash 上实测收费（tier 2），而 14 个国际版号实测免费（tier 0）。若只按
+// 快过期收窄，所有新会话会被绑到那个收费号上，每次请求都在花钱——「能免费就不该为了
+// 烧快过期积分去付费」。层为空（最优成本层里没有有效快过期号）时返回 nil，交回调用方
+// 退到全集/域序。调用方必须已持 p.mu。
+func (p *Pool) expiringTierInBestCostTierLocked(all []string, model string, now time.Time) []string {
+	best, ok := p.bestCostTierOfUIDsLocked(all, model, now)
+	if !ok {
+		return nil
+	}
+	tier := make([]string, 0, len(all))
+	for _, uid := range all {
+		e := p.byUID[uid]
+		if e == nil {
+			continue
+		}
+		if ti, _ := costTierOf(e, model, now); ti != best {
+			continue
+		}
+		if expiringPreferred(e, now) {
+			tier = append(tier, uid)
+		}
+	}
+	return tier
+}
+
+// bestCostTierForRealmsLocked 返回 realms 内「当前可服务 reqModel」账号的最优成本层（0/1/2）。
+// 可用性判据与 realmHasCapacityLocked 同口径（healthyForModel + 未触积分保底 + 在途未满）——
+// 只统计真能被选中的号，否则会被不可用的便宜号误导而白白抖动粘性绑定。
+// realms 为空 → 不过滤（全池）。ok=false = 域内没有可服务该模型的号。调用方必须已持 p.mu。
+func (p *Pool) bestCostTierForRealmsLocked(reqModel string, realms []string, now time.Time) (int, bool) {
+	inRealms := func(realm string) bool {
+		if len(realms) == 0 {
+			return true
+		}
+		for _, r := range realms {
+			if r == realm {
+				return true
+			}
+		}
+		return false
+	}
+	best, ok := 2, false
+	for _, e := range p.byUID {
+		if !inRealms(e.a.Realm()) {
+			continue
+		}
+		e.pruneExpiredModelCooldowns(now)
+		e.pruneExpiredModelCosts(now)
+		healthy := e.healthy(now)
+		if reqModel != "" {
+			healthy = e.healthyForModel(now, reqModel)
+		}
+		if !healthy {
+			continue
+		}
+		if p.floorBlockedForRealmModel(e, reqModel, e.a.Realm(), now) {
+			continue
+		}
+		if p.inFlightFull(e) {
+			continue
+		}
+		if ti, _ := costTierOf(e, reqModel, now); !ok || ti < best {
+			best, ok = ti, true
+		}
+	}
+	return best, ok
+}
+
 // AssignUIDsForModelRealm 会话**首次分配**用的候选列表（P1 快过期硬优先层的粘性侧）：
 // 存在快过期优先层成员时只返回它们，否则退回全部可用账号（与 AvailableUIDsForModelRealm 同集）。
 //
 // 为什么要与可用性校验分开：校验必须用全集，否则已绑在普通号上的会话会被判「不可用」
 // 而重绑——那等于让粘性给快过期让路，会换号丢 prompt 缓存（新号按全价重算 prompt），
 // 是刻意未启用的另一档策略。本方法只决定「新会话绑到谁」。
+//
+// 收窄必须先过成本层（成本层 > 快过期，见 expiringTierInBestCostTierLocked）：否则新会话
+// 会被绑到一个对该模型收费的快过期号上，粘性侧就绕过了成本分层。
 //
 // 在途占满的号已被排除，故收窄不会堵死：层内号打满在途后新会话自然落到普通号上。
 func (p *Pool) AssignUIDsForModelRealm(model, realm string) []string {
@@ -143,13 +236,7 @@ func (p *Pool) AssignUIDsForModelRealm(model, realm string) []string {
 	if !p.preferExpiring {
 		return all
 	}
-	tier := make([]string, 0, len(all))
-	for _, uid := range all {
-		if expiringPreferred(p.byUID[uid], now) {
-			tier = append(tier, uid)
-		}
-	}
-	if len(tier) > 0 {
+	if tier := p.expiringTierInBestCostTierLocked(all, model, now); len(tier) > 0 {
 		return tier
 	}
 	return all
@@ -178,7 +265,8 @@ func (p *Pool) AssignUIDsForModelRealms(model string, realms []string) []string 
 }
 
 // assignExpiringTierForModel 返回全池（跨域）内该模型的快过期优先层 uid（P6 的粘性侧入口）。
-// 层口径与 AssignUIDsForModelRealm 一致（preferExpiring 关闭 / 层为空时返回 nil）。
+// 层口径与 AssignUIDsForModelRealm 一致（preferExpiring 关闭 / 层为空时返回 nil），
+// 且同样先过成本层：最优成本层里没有快过期号时返回 nil，调用方退到按域序拼接。
 func (p *Pool) assignExpiringTierForModel(model string) []string {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -187,11 +275,5 @@ func (p *Pool) assignExpiringTierForModel(model string) []string {
 	}
 	now := time.Now()
 	all := p.availableUIDsForModelRealmLocked(model, "", now)
-	tier := make([]string, 0, len(all))
-	for _, uid := range all {
-		if expiringPreferred(p.byUID[uid], now) {
-			tier = append(tier, uid)
-		}
-	}
-	return tier
+	return p.expiringTierInBestCostTierLocked(all, model, now)
 }

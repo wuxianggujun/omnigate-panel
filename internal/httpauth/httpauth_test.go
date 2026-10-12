@@ -50,6 +50,46 @@ func TestVerifyBearerWithoutHeaderStillCompares(t *testing.T) {
 	}
 }
 
+// TestVerifyBearerAPIKeyHeader 覆盖 Anthropic 客户端形态：Claude Code 走 x-api-key
+// 而不是 Authorization: Bearer，两种头必须同口径放行；两个头同时存在时 Bearer 优先。
+func TestVerifyBearerAPIKeyHeader(t *testing.T) {
+	withAPIKey := func(v string) *http.Request {
+		r := httptest.NewRequest("POST", "/v1/messages", nil)
+		if v != "" {
+			r.Header.Set("x-api-key", v)
+		}
+		return r
+	}
+	cases := []struct {
+		name string
+		key  string
+		req  *http.Request
+		want bool
+	}{
+		{"x-api-key 正确", "sk-abc123", withAPIKey("sk-abc123"), true},
+		{"x-api-key 错误", "sk-abc123", withAPIKey("sk-wrong"), false},
+		{"x-api-key 为空", "sk-abc123", withAPIKey(""), false},
+		{"空 key 放行任意 x-api-key", "", withAPIKey("whatever"), true},
+		{"两个头都在时 Bearer 优先", "sk-abc123", func() *http.Request {
+			r := withAPIKey("sk-abc123")
+			r.Header.Set("Authorization", "Bearer sk-wrong")
+			return r
+		}(), false},
+		{"Bearer 正确时忽略错的 x-api-key", "sk-abc123", func() *http.Request {
+			r := withAPIKey("sk-wrong")
+			r.Header.Set("Authorization", "Bearer sk-abc123")
+			return r
+		}(), true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := VerifyBearer(c.req, c.key); got != c.want {
+				t.Errorf("VerifyBearer(key=%q) = %v, want %v", c.key, got, c.want)
+			}
+		})
+	}
+}
+
 func TestDigestIsFixedLength(t *testing.T) {
 	// 不同长度输入摘要后应等长（这是常量时间比较的前提）
 	if len(digest("")) != len(digest("a-much-longer-secret-value")) {

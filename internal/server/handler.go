@@ -144,6 +144,10 @@ func NewHandler(cfg Config) *Handler {
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
 	// Responses API：翻译成 chat 请求复用同一条流水线（见 responses.go）。
 	h.mux.HandleFunc("POST /v1/responses", h.withAuth(h.responses))
+	// Anthropic Messages API：同构翻译层（见 messages.go / internal/anthropic）。
+	// 鉴权用 withAuthAnthropic：Claude Code 走 x-api-key 头，且错误体要 Anthropic 形态。
+	h.mux.HandleFunc("POST /v1/messages", h.withAuthAnthropic(h.messages))
+	h.mux.HandleFunc("POST /v1/messages/count_tokens", h.withAuthAnthropic(h.countTokens))
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
 	h.mux.HandleFunc("GET /healthz", h.healthz)
@@ -159,8 +163,9 @@ func NewHandler(cfg Config) *Handler {
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if h.cfg.RequestLog != nil && r.Method == http.MethodPost &&
-		(r.URL.Path == "/v1/chat/completions" || r.URL.Path == "/v1/responses") {
-		trace := &requestTrace{id: reqlog.NewRequestID(), start: time.Now()}
+		(r.URL.Path == "/v1/chat/completions" || r.URL.Path == "/v1/responses" ||
+			r.URL.Path == "/v1/messages") {
+		trace := &requestTrace{id: reqlog.NewRequestID(), start: time.Now(), path: r.URL.Path}
 		if h.loadLive().RecordClientInfo {
 			trace.captureClientInfo(r)
 		}

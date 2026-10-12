@@ -15,10 +15,16 @@ import (
 // bearerPrefix 认证方案前缀（大小写敏感，与 HTTP 规范及既有实现一致）。
 const bearerPrefix = "Bearer "
 
-// VerifyBearer 校验请求头是否携带正确的 Bearer 密钥。
+// apiKeyHeader 是 Anthropic 客户端（Claude Code）使用的密钥头。Claude Code 走
+// x-api-key 而不是 Authorization: Bearer——两种形态必须同口径放行，否则同一把密钥
+// 在 /v1/messages 上会被判 401。
+const apiKeyHeader = "x-api-key"
+
+// VerifyBearer 校验请求头是否携带正确的密钥。
 //
 // key 为空表示"未启用鉴权"，恒返回 true（调用方据此放行）。
-// 比较用 SHA-256 摘要 + subtle.ConstantTimeCompare：
+// 密钥来源两个头：Authorization: Bearer（OpenAI 系客户端）优先，其次 x-api-key
+// （Anthropic 系客户端）。比较用 SHA-256 摘要 + subtle.ConstantTimeCompare：
 //   - 常量时间，不因前缀匹配长度而泄露信息；
 //   - 先摘要再比较，长度差异被吸收进摘要（不会因长度不同提前返回）；
 //   - 摘要本身不可逆，即便有侧信道也拿不到密钥原文。
@@ -26,14 +32,22 @@ func VerifyBearer(r *http.Request, key string) bool {
 	if key == "" {
 		return true
 	}
-	authz := r.Header.Get("Authorization")
-	if !strings.HasPrefix(authz, bearerPrefix) {
-		// 缺头/方案不对：仍走一次摘要比较，保持耗时形状一致。
+	tok := bearerToken(r)
+	if tok == "" {
+		// 缺头：仍走一次摘要比较，保持耗时形状一致。
 		subtle.ConstantTimeCompare(digest(""), digest(key))
 		return false
 	}
-	tok := authz[len(bearerPrefix):]
 	return subtle.ConstantTimeCompare(digest(tok), digest(key)) == 1
+}
+
+// bearerToken 取请求携带的密钥原文：Authorization: Bearer 优先，其次 x-api-key。
+// 两个头都缺时返回空串（调用方据此判定未通过）。
+func bearerToken(r *http.Request) string {
+	if authz := r.Header.Get("Authorization"); strings.HasPrefix(authz, bearerPrefix) {
+		return authz[len(bearerPrefix):]
+	}
+	return r.Header.Get(apiKeyHeader)
 }
 
 // digest 返回 s 的 SHA-256（定长 32 字节，供常量时间比较）。

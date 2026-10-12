@@ -396,7 +396,11 @@ type requestTraceKey struct{}
 type requestTrace struct {
 	id    string
 	start time.Time
-	stat  *chatStat
+	// path 是入站端点路径（/v1/chat/completions、/v1/responses、/v1/messages）。
+	// 翻译端点（responses / messages）在进程内改投 chatCompletions，请求记录要记
+	// **客户端实际调用的端点**，否则面板里分不清 OpenAI / Responses / Anthropic 流量。
+	path string
+	stat *chatStat
 	// 调用来源，进入 handler 时一次性采集（见 ServeHTTP / captureClientInfo）。
 	clientIP  string
 	userAgent string
@@ -449,10 +453,15 @@ func requestTraceFrom(r *http.Request) *requestTrace {
 }
 
 func (t *requestTrace) event(status int) reqlog.Event {
+	path := t.path
+	if path == "" {
+		// 兜底：直接构造 trace 的测试/调用方未设 path 时按 chat 端点记。
+		path = "/v1/chat/completions"
+	}
 	e := reqlog.Event{
 		Time:      t.start,
 		RequestID: t.id,
-		Path:      "/v1/chat/completions",
+		Path:      path,
 		Status:    status,
 	}
 	duration := time.Since(t.start)

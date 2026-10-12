@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"strings"
 
@@ -180,44 +181,75 @@ func panelPublicBase(r *http.Request) string {
 	scheme := "https"
 	if p := strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")); p != "" {
 		scheme = p
-	} else if host := r.Host; !strings.Contains(host, ".") || strings.HasPrefix(host, "localhost") {
-		scheme = "http"
+	} else {
+		host := r.Host
+		if h, _, err := net.SplitHostPort(host); err == nil {
+			host = h
+		}
+		// 裸主机名 / localhost / 字面 IP 都按明文 http 处理。
+		if !strings.Contains(host, ".") || strings.EqualFold(host, "localhost") || net.ParseIP(host) != nil {
+			scheme = "http"
+		}
 	}
 	return scheme + "://" + r.Host
 }
 
 // newAPICaptureSnippet 生成让用户在 New API 站点控制台粘贴的抓取脚本。
 //
-// 脚本在 New API 的 origin 上跑：用 credentials:'include' 调 auth/refresh 拿一份
-// 新的鉴权包（access_token + session.sid），再把关键字段回传到面板的 capture 端点。
+// 脚本在 New API 的 origin 上跑，且走的就是站点前端自己的「bootstrap」路径：
+// 新开页面时前端内存态为空，getExpectedSID() 为 undefined，于是用
+// credentials:'include' 调 /api/user/auth/refresh（**不带** X-Auth-Session 头，
+// 靠 httpOnly 会话 cookie 认身份）拿一份鉴权包。所以脚本也这样做。
+//
+// session.sid 是稳定的（刷新只换 access_token，sid 不变），因此面板与浏览器可共用
+// 同一会话；并发刷新时上游回 409 AUTH_REFRESH_RACE，脚本重试即可。脚本还会抢站点
+// 前端同名的 Web Lock（new-api:auth-refresh），避免和它抢刷新。
 func newAPICaptureSnippet(base, stateID string) string {
 	captureURL := strings.TrimRight(base, "/") + "/panel/api/omni/newapi/capture?state=" + stateID
 	// 注意：脚本里含 %c，用 %% 转义避免被 fmt 当成动词。
 	tpl := `(async () => {
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const refresh = async () => {
+    let last = '';
+    for (let i = 0; i < 4; i++) {
+      if (i) await sleep(400 * i);
+      const r = await fetch('/api/user/auth/refresh', {
+        method: 'POST', credentials: 'include', headers: { 'Cache-Control': 'no-store' }
+      });
+      const b = await r.json().catch(() => ({}));
+      if (b && b.success && b.data && b.data.access_token) return b.data;
+      last = (b && (b.message || b.code)) || ('HTTP ' + r.status);
+      if (r.status === 409 && b && b.code === 'AUTH_REFRESH_RACE') continue;
+      break;
+    }
+    throw new Error('刷新会话失败：' + last);
+  };
   try {
-    const r = await fetch('/api/user/auth/refresh', { method: 'POST', credentials: 'include' });
-    const j = await r.json();
-    const d = (j && j.data) || {};
-    const s = d.session || {};
-    const u = d.user || {};
-    let exp = d.access_expires_at || 0;
+    const run = () => refresh();
+    const data = (navigator.locks && navigator.locks.request)
+      ? await navigator.locks.request('new-api:auth-refresh', { mode: 'exclusive' }, run)
+      : await run();
+    const s = data.session || {}, u = data.user || {};
+    let exp = data.access_expires_at || 0;
     if (typeof exp === 'number' && exp > 1e12) exp = Math.floor(exp / 1000);
     const payload = {
-      access_token: d.access_token || '',
-      token_type: d.token_type || '',
+      access_token: data.access_token || '',
+      token_type: data.token_type || '',
       access_expires_at: exp,
       session_sid: s.sid || '',
       cookie: document.cookie || '',
       username: u.username || '',
       user_id: u.id ? String(u.id) : ''
     };
-    if (!payload.access_token) throw new Error('未拿到 access_token，请确认已登录');
+    if (!payload.access_token || !payload.session_sid) {
+      throw new Error('未拿到 access_token / session，请确认已登录本站');
+    }
     await fetch(%q, {
       method: 'POST', mode: 'no-cors',
       headers: { 'Content-Type': 'text/plain' },
       body: JSON.stringify(payload)
     });
-    console.log('%%c已回传登录凭据，请回到面板查看结果。', 'color:#0a0');
+    console.log('%%c已回传登录凭据，请回到面板查看结果。建议随后关闭本站标签页，避免浏览器与面板同时刷新会话。', 'color:#0a0');
   } catch (e) {
     console.error('抓取失败：', e);
   }

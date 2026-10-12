@@ -44,6 +44,9 @@ const refreshLead = 5 * time.Minute
 // failure (401) from a generic error.
 type UpstreamError struct {
 	Status  int
+	// Code 是上游 envelope 里的业务错误码（如 AUTH_REFRESH_RACE / AUTH_SESSION_MISMATCH），
+	// 用于区分「并发刷新」这类可重试错误。
+	Code    string
 	Message string
 }
 
@@ -167,10 +170,10 @@ func (c *Client) doJSON(ctx context.Context, method, endpoint, authHeader, sidHe
 	_ = json.Unmarshal(raw, &env)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		msg := firstNonEmpty(strings.TrimSpace(env.Message), strings.TrimSpace(env.Code), clip(string(raw)))
-		return nil, &UpstreamError{Status: resp.StatusCode, Message: msg}
+		return nil, &UpstreamError{Status: resp.StatusCode, Code: strings.TrimSpace(env.Code), Message: msg}
 	}
 	if env.Code == "AUTH_UNAUTHORIZED" {
-		return nil, &UpstreamError{Status: 401, Message: firstNonEmpty(env.Message, "unauthorized")}
+		return nil, &UpstreamError{Status: 401, Code: env.Code, Message: firstNonEmpty(env.Message, "unauthorized")}
 	}
 	if !env.Success {
 		// success=false 但 200：业务失败（如「今天已经签到过了」），原样上报。
@@ -230,16 +233,36 @@ func parseBundle(data json.RawMessage) (*Bundle, error) {
 
 // Refresh rotates the access token using the stored session id (and, when the
 // capture managed to read it, the session cookie).
+//
+// session.sid 是**稳定**的（刷新只换 access_token，sid 不变；上游还会校验返回的
+// sid 必须与请求一致），所以浏览器标签页与面板可以共用同一个 sid。唯一要处理的是
+// 并发刷新：上游对同 session 的并发刷新回 409 AUTH_REFRESH_RACE，稍后重试即可。
 func (c *Client) Refresh(ctx context.Context, sid, cookie string) (*Bundle, error) {
 	sid = strings.TrimSpace(sid)
 	if sid == "" && strings.TrimSpace(cookie) == "" {
 		return nil, &UpstreamError{Status: 401, Message: "缺少 session（X-Auth-Session），请重新登录"}
 	}
-	data, err := c.doJSON(ctx, http.MethodPost, c.baseURL+"/api/user/auth/refresh", "", sid, cookie, nil)
-	if err != nil {
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(time.Duration(attempt) * 400 * time.Millisecond):
+			}
+		}
+		data, err := c.doJSON(ctx, http.MethodPost, c.baseURL+"/api/user/auth/refresh", "", sid, cookie, nil)
+		if err == nil {
+			return parseBundle(data)
+		}
+		lastErr = err
+		var ue *UpstreamError
+		if errors.As(err, &ue) && ue.Code == "AUTH_REFRESH_RACE" {
+			continue
+		}
 		return nil, err
 	}
-	return parseBundle(data)
+	return nil, lastErr
 }
 
 // SelfResult is the normalized /api/user/self snapshot.

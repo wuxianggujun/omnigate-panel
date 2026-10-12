@@ -35,7 +35,15 @@ import (
 	"github.com/wuxianggujun/omnigate-panel/internal/outbound"
 )
 
-const userAgent = "Mozilla/5.0 (compatible; omnigate/1.0)"
+// browserUA / acceptLanguage mimic the relay's own console, which is the only
+// thing that ever legitimately hits /api/user/* and (same-origin) /v1/*. A
+// scripted UA ("omnigate/1.0") plus a missing Accept-Language/Referer is a
+// needless tell for anti-abuse heuristics, so every request this client makes
+// carries the same shape a Chrome tab would send.
+const (
+	browserUA      = provider.BrowserUA
+	acceptLanguage = provider.AcceptLanguage
+)
 
 // refreshLead is how long before the access token's stated expiry we rotate it.
 const refreshLead = 5 * time.Minute
@@ -120,6 +128,34 @@ func (c *Client) SetProxySelector(sel outbound.Selector) {
 	c.http.Transport = outbound.WrapTransport(base, sel)
 }
 
+// setBrowserHeaders stamps req with the headers a same-origin XHR from the
+// relay's console would carry: browsers attach Origin to every non-GET/HEAD
+// request, but Content-Type only when there is a body. hasBody marks the latter;
+// accept overrides the default Accept header when non-empty.
+func (c *Client) setBrowserHeaders(req *http.Request, hasBody bool, accept string) {
+	if req == nil {
+		return
+	}
+	req.Header.Set("User-Agent", browserUA)
+	if accept == "" {
+		accept = "application/json, text/plain, */*"
+	}
+	req.Header.Set("Accept", accept)
+	req.Header.Set("Accept-Language", acceptLanguage)
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	req.Header.Set("Sec-Fetch-Mode", "cors")
+	req.Header.Set("Sec-Fetch-Dest", "empty")
+	if hasBody {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if c != nil && c.baseURL != "" {
+		req.Header.Set("Referer", c.baseURL+"/")
+		if req.Method != http.MethodGet && req.Method != http.MethodHead {
+			req.Header.Set("Origin", c.baseURL)
+		}
+	}
+}
+
 // envelope is the New API JSON wrapper: {success, message, data}.
 type envelope struct {
 	Success bool            `json:"success"`
@@ -146,11 +182,7 @@ func (c *Client) doJSON(ctx context.Context, method, endpoint, authHeader, sidHe
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", userAgent)
-	req.Header.Set("Accept", "application/json")
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
+	c.setBrowserHeaders(req, body != nil, "application/json")
 	if authHeader != "" {
 		req.Header.Set("Authorization", authHeader)
 	}
@@ -362,8 +394,7 @@ func (c *Client) FetchModels(ctx context.Context, apiKey string) ([]openai.Model
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", userAgent)
-	req.Header.Set("Accept", "application/json")
+	c.setBrowserHeaders(req, false, "application/json")
 	if k := stripBearer(apiKey); k != "" {
 		req.Header.Set("Authorization", "Bearer "+k)
 	}
@@ -484,9 +515,7 @@ func (p *Provider) StreamChat(ctx context.Context, acc *provider.Account, in pro
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "text/event-stream")
-	req.Header.Set("User-Agent", userAgent)
+	p.client.setBrowserHeaders(req, true, "text/event-stream")
 	req.Header.Set("Authorization", "Bearer "+stripBearer(acc.APIKey))
 	resp, err := p.client.http.Do(req)
 	if err != nil {

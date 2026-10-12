@@ -11,6 +11,16 @@ import (
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/openai"
 )
 
+// BrowserUA is the default outbound User-Agent for relays whose console — or
+// whose Electron desktop client — is browser-shaped. These upstreams
+// authenticate by token, not by UA, so a scripted UA ("omnigate/1.0") is a pure
+// anti-abuse tell with no upside. Keep this close to a current desktop Chrome
+// and bump the major version occasionally to stay plausible.
+const BrowserUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36"
+
+// AcceptLanguage is the default Accept-Language sent alongside BrowserUA.
+const AcceptLanguage = "zh-CN,zh;q=0.9,en;q=0.8"
+
 // OutOfCredits reports whether err looks like an exhausted-credit failure, which
 // triggers automatic account switching.
 func OutOfCredits(err error) bool {

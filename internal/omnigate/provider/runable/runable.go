@@ -21,7 +21,7 @@ import (
 	"github.com/wuxianggujun/omnigate-panel/internal/outbound"
 )
 
-const userAgent = "Mozilla/5.0 (compatible; omnigate/1.0)"
+const userAgent = provider.BrowserUA
 
 // MaxPromptChars 是上游对「单条 prompt」的字符数硬上限。实测：/api/chat/text、
 // /api/chat/incognito、/api/chat/agent 三种模式同一个闸（在模式分发之前就拦），
@@ -101,6 +101,7 @@ func OutOfCredits(err error) bool {
 
 func (c *Client) do(req *http.Request) (*http.Response, error) {
 	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("Accept-Language", provider.AcceptLanguage)
 	return c.http.Do(req)
 }
 

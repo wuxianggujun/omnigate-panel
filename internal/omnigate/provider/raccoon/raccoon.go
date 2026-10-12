@@ -41,7 +41,7 @@ const (
 	CodeExpired = 200035
 )
 
-const userAgent = "Mozilla/5.0 (compatible; omnigate/1.0)"
+const userAgent = provider.BrowserUA
 
 // UpstreamError carries an HTTP/upstream failure.
 type UpstreamError struct {
@@ -197,6 +197,7 @@ func (c *Client) requestJSON(ctx context.Context, method, endpoint string, heade
 		return nil, err
 	}
 	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("Accept-Language", provider.AcceptLanguage)
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}

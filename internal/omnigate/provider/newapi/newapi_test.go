@@ -4,7 +4,10 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+
+	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/provider"
 )
 
 func TestStripBearer(t *testing.T) {
@@ -104,5 +107,74 @@ func TestUnauthorized(t *testing.T) {
 	}
 	if Unauthorized(&UpstreamError{Status: 500}) {
 		t.Error("500 不该判为鉴权失败")
+	}
+}
+
+// TestBrowserHeaders 锁定出站指纹：每个请求都要像站点自己的同源 XHR，而不是
+// 脚本（UA 真实、带 Accept-Language / Referer / Sec-Fetch-*，GET 不带
+// Origin/Content-Type，POST 才带）。
+func TestBrowserHeaders(t *testing.T) {
+	type seen struct {
+		ua, al, site, mode, dest, ref, origin, ctype string
+	}
+	var got seen
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := r.Header
+		got = seen{
+			ua:     h.Get("User-Agent"),
+			al:     h.Get("Accept-Language"),
+			site:   h.Get("Sec-Fetch-Site"),
+			mode:   h.Get("Sec-Fetch-Mode"),
+			dest:   h.Get("Sec-Fetch-Dest"),
+			ref:    h.Get("Referer"),
+			origin: h.Get("Origin"),
+			ctype:  h.Get("Content-Type"),
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"success":true,"data":{"id":1,"username":"u"}}`))
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL)
+	if _, err := c.Self(context.Background(), "tok"); err != nil {
+		t.Fatalf("self: %v", err)
+	}
+	if got.ua != provider.BrowserUA {
+		t.Errorf("User-Agent=%q", got.ua)
+	}
+	if got.al != provider.AcceptLanguage {
+		t.Errorf("Accept-Language=%q", got.al)
+	}
+	if got.site != "same-origin" || got.mode != "cors" || got.dest != "empty" {
+		t.Errorf("Sec-Fetch-*=%q/%q/%q", got.site, got.mode, got.dest)
+	}
+	if got.ref != srv.URL+"/" {
+		t.Errorf("Referer=%q", got.ref)
+	}
+	if got.origin != "" || got.ctype != "" {
+		t.Errorf("GET 不该带 Origin/Content-Type，得到 %q/%q", got.origin, got.ctype)
+	}
+
+	if _, err := c.Checkin(context.Background(), "tok"); err != nil {
+		t.Fatalf("checkin: %v", err)
+	}
+	if got.origin != srv.URL {
+		t.Errorf("POST Origin=%q", got.origin)
+	}
+	if got.ctype != "" {
+		t.Errorf("无 body 的 POST 不该带 Content-Type，得到 %q", got.ctype)
+	}
+
+	// 带 body 的 POST（聊天）要带 Content-Type。
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v1/chat/completions", strings.NewReader("{}"))
+	c.setBrowserHeaders(req, true, "text/event-stream")
+	if req.Header.Get("Content-Type") != "application/json" {
+		t.Errorf("带 body 的 POST Content-Type=%q", req.Header.Get("Content-Type"))
+	}
+	if req.Header.Get("Origin") != srv.URL {
+		t.Errorf("带 body 的 POST Origin=%q", req.Header.Get("Origin"))
+	}
+	if req.Header.Get("Accept") != "text/event-stream" {
+		t.Errorf("Accept=%q", req.Header.Get("Accept"))
 	}
 }

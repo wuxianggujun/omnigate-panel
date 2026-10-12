@@ -201,11 +201,159 @@ func extractTextFromWrb(elem any) (text string, hasText bool, conv string, thoug
 	return
 }
 
+// extractImagesFromWrb pulls the AI-generated images out of one wrb.fr frame,
+// reusing extractGeneratedImages. Empty for frames that carry none.
+func extractImagesFromWrb(elem any) []genImage {
+	arr, ok := elem.([]any)
+	if !ok || len(arr) < 3 {
+		return nil
+	}
+	if s, _ := arr[0].(string); s != "wrb.fr" {
+		return nil
+	}
+	raw, ok := arr[2].(string)
+	if !ok {
+		return nil
+	}
+	var payload []any
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil || len(payload) < 5 {
+		return nil
+	}
+	cands, ok := payload[4].([]any)
+	if !ok || len(cands) == 0 {
+		return nil
+	}
+	candidate, ok := cands[0].([]any)
+	if !ok {
+		return nil
+	}
+	return extractGeneratedImages(candidate)
+}
+
 // genResult is the non-streaming result of one turn.
 type genResult struct {
 	Text     string
 	Thoughts string
 	ConvID   string
+	Images   []genImage
+}
+
+// genImage is one AI-generated image found in a response frame.
+type genImage struct {
+	URL      string
+	Mime     string
+	Width    int
+	Height   int
+	Filename string
+}
+
+// noImageHint replaces an empty reply after a placeholder URL was filtered out:
+// Gemini answered a vague "来张X图" by *retrieving* an image rather than
+// generating one, and the retrieval placeholder is useless to a client. Telling
+// the user how to ask again beats returning nothing.
+const noImageHint = "（没有生成图片。试试更明确的生成指令，如「画一张…」「生成一张…的图片」。）"
+
+// extractGeneratedImages pulls the images the model generated out of one
+// candidate. This is not where a user's own attachments live; it reads
+// candidate[12][7][0], a list of images where each image's metadata is a list of
+// the form [null, 1, filename, url, …, "image/png", …, [w, h, size]].
+//
+// The upstream reaches that metadata as img[0][3], i.e. the image is itself
+// wrapped in a list. The wrapper is read first and skipped when absent, because
+// this shape is only ever observed from live traffic and a misread nesting would
+// make image extraction fail silently — the one failure mode nothing else here
+// would catch.
+func extractGeneratedImages(candidate []any) []genImage {
+	if len(candidate) <= 12 {
+		return nil
+	}
+	c12, ok := candidate[12].([]any)
+	if !ok || len(c12) <= 7 {
+		return nil
+	}
+	arr, ok := c12[7].([]any)
+	if !ok || len(arr) == 0 {
+		return nil
+	}
+	imgList, ok := arr[0].([]any)
+	if !ok {
+		return nil
+	}
+	var out []genImage
+	for _, raw := range imgList {
+		img, ok := raw.([]any)
+		if !ok || len(img) == 0 {
+			continue
+		}
+		meta, ok := imageMeta(img[0])
+		if !ok {
+			continue
+		}
+		url, _ := meta[3].(string)
+		if !strings.HasPrefix(url, "http") {
+			continue
+		}
+		g := genImage{URL: url, Mime: "image/png", Filename: "generated.png"}
+		if fn, ok := meta[2].(string); ok && fn != "" {
+			g.Filename = fn
+		}
+		for _, el := range meta {
+			if s, ok := el.(string); ok && strings.HasPrefix(s, "image/") {
+				g.Mime = s
+				continue
+			}
+			if pair, ok := el.([]any); ok && len(pair) >= 2 {
+				if w, ok := numAsInt(pair[0]); ok {
+					if h, ok2 := numAsInt(pair[1]); ok2 {
+						g.Width, g.Height = w, h
+					}
+				}
+			}
+		}
+		out = append(out, g)
+	}
+	return out
+}
+
+// imageMeta resolves an image entry's metadata list, which is either the entry's
+// first element (img[0]) or that element's fourth (img[0][3]).
+func imageMeta(first any) ([]any, bool) {
+	outer, ok := first.([]any)
+	if !ok {
+		return nil, false
+	}
+	if len(outer) > 3 {
+		if inner, ok := outer[3].([]any); ok {
+			return inner, true
+		}
+	}
+	return outer, true
+}
+
+// numAsInt reads a JSON number as an int (encoding/json decodes every number as
+// float64).
+func numAsInt(v any) (int, bool) {
+	f, ok := v.(float64)
+	if !ok {
+		return 0, false
+	}
+	return int(f), true
+}
+
+// cleanGeneratedText strips the meaningless image placeholder URLs the model
+// emits alongside a real generated image. If the text was nothing but a
+// placeholder and no image came back, it substitutes a hint instead of an empty
+// reply.
+func cleanGeneratedText(text string, hasImages bool) string {
+	if !strings.Contains(text, "googleusercontent.com/image") {
+		return text
+	}
+	hadPlaceholder := imageGenPlaceholderRE.MatchString(text)
+	out := strings.TrimSpace(imageGenPlaceholderRE.ReplaceAllString(text, ""))
+	if hadPlaceholder && out == "" && !hasImages {
+		return noImageHint
+	}
+	return out
 }
 
 // parseOutput walks a non-streaming StreamGenerate body (a `)]}'` prefix plus
@@ -259,8 +407,13 @@ func parseOutput(raw string) genResult {
 					}
 				}
 			}
+			// 生图是流式响应，用含图的最新帧。
+			if imgs := extractGeneratedImages(candidate); len(imgs) > 0 {
+				out.Images = imgs
+			}
 		}
 	}
+	out.Text = cleanGeneratedText(out.Text, len(out.Images) > 0)
 	return out
 }
 

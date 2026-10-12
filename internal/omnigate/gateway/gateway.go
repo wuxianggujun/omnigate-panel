@@ -17,6 +17,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/config"
+	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/imagegen"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/logx"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/openai"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/provider"
@@ -245,7 +246,11 @@ func New(cfg *config.Config, st *state.State, log *logx.Logger, opts ...Option) 
 		case "newapi":
 			prov = newapi.NewProvider(p.Name, p.BaseURL, p.Models)
 		case "geminiweb":
-			prov = geminiweb.NewProvider(p.Name, p.Models)
+			gw := geminiweb.NewProvider(p.Name, p.Models)
+			// Generated images are stored under the data dir (a bind mount) so
+			// the /images/{id} route can serve them across restarts.
+			gw.SetImageStore(imagegen.NewStore(filepath.Join(cfg.DataDir, "generated_images")))
+			prov = gw
 		default:
 			return nil, fmt.Errorf("provider %q: unknown type %q", p.Name, p.Type)
 		}

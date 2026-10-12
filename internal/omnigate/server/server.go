@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -16,8 +17,11 @@ import (
 
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/config"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/gateway"
+	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/imagegen"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/logx"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/openai"
+	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/provider"
+	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/util"
 	"github.com/wuxianggujun/omnigate-panel/internal/reqlog"
 	"github.com/wuxianggujun/omnigate-panel/internal/usage"
 )
@@ -45,11 +49,21 @@ type Server struct {
 
 	// poolStatus 返回各出站代理池的运行时快照（供 /healthz 观测）。nil = 不展示。
 	poolStatus func() any
+
+	// images 托管 AI 生成的图片（geminiweb 抽图后落盘），供 /images/{id} 路由读取。
+	// 与 gateway 构造 provider 时用的是同一个目录。
+	images *imagegen.Store
 }
 
 // New builds a Server.
 func New(cfg *config.Config, gw *gateway.Gateway, log *logx.Logger) *Server {
-	s := &Server{cfg: cfg, gw: gw, log: log, started: time.Now()}
+	s := &Server{
+		cfg:     cfg,
+		gw:      gw,
+		log:     log,
+		started: time.Now(),
+		images:  imagegen.NewStore(filepath.Join(cfg.DataDir, "generated_images")),
+	}
 	s.http = &http.Server{
 		Addr:              net.JoinHostPort(cfg.Server.Host, strconv.Itoa(cfg.Server.Port)),
 		Handler:           s,
@@ -131,6 +145,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.serveLogged(w, r, s.handleGeminiGenerate)
 	case r.Method == http.MethodGet && path == "/healthz":
 		s.handleHealth(w, r)
+	case r.Method == http.MethodGet && strings.HasPrefix(path, "/images/"):
+		// Generated images are fetched by whatever renders the reply (a browser,
+		// an image proxy), which cannot present an API key. The id is the only
+		// secret: 128 random bits, unguessable, and swept after a week.
+		s.handleImage(w, r)
 	case r.Method == http.MethodGet && path == "/":
 		s.handleHealth(w, r)
 	case r.Method == http.MethodGet && path == "/admin/raccoon/redirect":
@@ -171,6 +190,10 @@ const omniMountPrefix = "/omni"
 // serveLogged 包裹一次 chat/responses 调用：注入路由记账、捕获状态码与首字节
 // 时间，出口把结果写进请求记录。未注入记录器时退化为直接调用（零开销）。
 func (s *Server) serveLogged(w http.ResponseWriter, r *http.Request, fn func(http.ResponseWriter, *http.Request)) {
+	// 把调用方用的对外地址注入上下文：生图类 provider（geminiweb）要拼出客户端
+	// 真能取到的图片 URL。放在这里是因为所有 AI 端点都经过它，而只有这一层知道
+	// 自己被怎么寻址。前缀要补回来——本服务收到的是 StripPrefix 之后的路径。
+	r = r.WithContext(provider.WithImageBase(r.Context(), util.PublicBase(r)+omniMountPrefix))
 	if s.reqlog == nil && s.usage == nil {
 		fn(w, r)
 		return
@@ -889,6 +912,29 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 	body, _ := json.Marshal(info)
 	writeJSON(w, 200, body)
+}
+
+// handleImage serves a stored AI-generated image by id.
+//
+// Deliberately unauthenticated: the URL ends up inside a chat reply, and the
+// fetch comes from a browser or an image proxy that has no API key. The id is the
+// only secret — 128 random bits, unguessable — and the file is swept after
+// imagegen.Retention. The id is validated by the store, so no crafted value can
+// reach outside the image directory.
+func (s *Server) handleImage(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimPrefix(r.URL.Path, "/images/")
+	f, mime, err := s.images.Open(id)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, openai.ErrorJSON("not_found", "image not found"))
+		return
+	}
+	defer f.Close()
+	w.Header().Set("Content-Type", mime)
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	// ServeContent adds Content-Length, honours Range, and closes the loop on
+	// conditional requests. No modtime is passed: the id is unique per image, so
+	// revalidation buys nothing.
+	http.ServeContent(w, r, id, time.Time{}, f)
 }
 
 // ListenAndServe blocks serving requests.

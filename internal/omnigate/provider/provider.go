@@ -200,6 +200,26 @@ type CookieRotator interface {
 	RotatesCookie() bool
 }
 
+// imageBaseKey carries the public address the caller used to reach the gateway.
+type imageBaseKey struct{}
+
+// WithImageBase attaches the gateway's public base URL to ctx so a provider that
+// produces image links (geminiweb) can build a URL the client can actually
+// fetch. It is set by the inbound server, which is the only layer that knows how
+// it was addressed. Absent = no links are emitted.
+func WithImageBase(ctx context.Context, base string) context.Context {
+	return context.WithValue(ctx, imageBaseKey{}, base)
+}
+
+// ImageBase returns the public base URL attached by WithImageBase ("" if none).
+func ImageBase(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	s, _ := ctx.Value(imageBaseKey{}).(string)
+	return s
+}
+
 // MaxSample bounds how many upstream bytes a stream keeps for diagnostics.
 const MaxSample = 600
 

@@ -10,6 +10,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/wuxianggujun/omnigate-panel/internal/imageintent"
+	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/imagegen"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/openai"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/provider"
 	"github.com/wuxianggujun/omnigate-panel/internal/outbound"
@@ -36,6 +38,9 @@ type Provider struct {
 	name   string
 	client *Client
 	models []string
+	// images keeps AI-generated images on disk so a reply can link to them
+	// instead of inlining megabytes of base64. Nil = inline as a data URI.
+	images *imagegen.Store
 
 	mu       sync.Mutex
 	sessions map[string]*session
@@ -71,6 +76,11 @@ func (p *Provider) SetProxy(u *url.URL) { p.client.SetProxy(u) }
 
 // SetProxySelector routes outbound requests through the proxy pool.
 func (p *Provider) SetProxySelector(sel outbound.Selector) { p.client.SetProxySelector(sel) }
+
+// SetImageStore attaches the store used to persist AI-generated images. Without
+// one a generated image is inlined as a data URI (or dropped when there is no
+// public base URL to link to).
+func (p *Provider) SetImageStore(s *imagegen.Store) { p.images = s }
 
 // RotatesCookie marks this provider as one whose credential cookie the upstream
 // rotates; the gateway persists acc.Cookie after each call so a restart keeps it.
@@ -110,7 +120,14 @@ func (p *Provider) StreamChat(ctx context.Context, acc *provider.Account, in pro
 	}
 	// Persist any cookie rotation the upstream attached to this response.
 	acc.Cookie = s.jar.header()
-	return newWebStream(resp.Body), nil
+	// An image-generation turn is buffered: the generated image's link has to
+	// precede the text, and the image is only known once the upstream finishes.
+	return newWebStream(ctx, p.client, resp.Body, webStreamOpts{
+		buffer:    imageintent.MaybeImageGeneration(in.Prompt),
+		store:     p.images,
+		imageBase: provider.ImageBase(ctx),
+		jar:       s.jar,
+	}), nil
 }
 
 // TokenExpired reports whether the account has no healthy session for its current

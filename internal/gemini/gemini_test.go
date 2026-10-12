@@ -153,28 +153,6 @@ func TestRequestToChatKeepsToolsOnIdiom(t *testing.T) {
 	}
 }
 
-// TestImageIntent：关键词表的关键分界（收窄匹配 + draw-a 习语闭集）。
-func TestImageIntent(t *testing.T) {
-	for _, tc := range []struct {
-		text string
-		want bool
-	}{
-		{"画一张猫的图片", true},
-		{"来张图", true},
-		{"draw a cat", true},
-		{"generate an image of a dog", true},
-		{"draw a conclusion", false},
-		{"draw a map of the kingdom", false}, // 习语闭集优先，安全的一侧
-		{"生成一份报告", false},
-		{"create a plan", false},
-		{"", false},
-	} {
-		if got := isImageGenerationIntent(tc.text); got != tc.want {
-			t.Errorf("isImageGenerationIntent(%q) = %v, want %v", tc.text, got, tc.want)
-		}
-	}
-}
-
 // TestChatResponseToGemini：非流式 chat 响应 → Gemini 形态（parts + usageMetadata）。
 func TestChatResponseToGemini(t *testing.T) {
 	body := []byte(`{"choices":[{"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}],

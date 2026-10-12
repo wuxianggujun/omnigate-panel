@@ -18,11 +18,11 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/util"
 	"github.com/wuxianggujun/omnigate-panel/internal/panelauth"
 )
 
@@ -292,20 +292,7 @@ func setCaptureCORS(w http.ResponseWriter) {
 
 // panelPublicBase 由请求推断面板对外地址（用于拼接脚本里的回传 URL）。
 func panelPublicBase(r *http.Request) string {
-	scheme := "https"
-	if p := strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")); p != "" {
-		scheme = p
-	} else {
-		host := r.Host
-		if h, _, err := net.SplitHostPort(host); err == nil {
-			host = h
-		}
-		// 裸主机名 / localhost / 字面 IP 都按明文 http 处理。
-		if !strings.Contains(host, ".") || strings.EqualFold(host, "localhost") || net.ParseIP(host) != nil {
-			scheme = "http"
-		}
-	}
-	return scheme + "://" + r.Host
+	return util.PublicBase(r)
 }
 
 // newAPICaptureSnippet 生成让用户在 New API 站点控制台粘贴的抓取脚本。

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/wuxianggujun/omnigate-panel/internal/imageintent"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/openai"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/util"
 )
@@ -64,7 +65,7 @@ func RequestToChat(model string, raw []byte, stream bool) (*ChatRequest, error) 
 	// 生图意图必须在未拍平的 contents 上判断：拍平之后 functionResponse 已被渲染
 	// 成 "[Tool result: …]" 文本，字符串层面分不清「用户真在要图」和「工具结果里
 	// 提到了图」，误判会静默丢掉客户端声明的 tools。
-	intent := isImageGenerationIntent(lastUserText(contents))
+	intent := imageintent.IsImageGeneration(lastUserText(contents))
 
 	tools, dropped := parseTools(top)
 	if intent {

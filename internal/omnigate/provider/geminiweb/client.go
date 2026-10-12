@@ -382,6 +382,97 @@ func (c *Client) generate(ctx context.Context, jar *cookieJar, sessionToken, ses
 }
 
 // ---------------------------------------------------------------------------
+// generated-image download
+
+// Image download tuning. A bare lh3 URL only yields a compressed thumbnail, so a
+// size suffix is appended; 2048px is enough for a preview at a fraction of the
+// bytes of full resolution.
+const (
+	imageSizeSuffix    = "=s2048"
+	imageDownloadLimit = 32 << 20 // bytes
+	imageReferer       = "https://gemini.google.com/"
+)
+
+// downloadImage fetches one generated image's bytes and returns them with the
+// upstream's content type (empty when the image could not be had).
+//
+// lh3 URLs 302 through lh3→fife→lh3 and the cookie is dropped on the
+// cross-domain hop, which turns the followed request into a 403. So the first
+// hop is taken *without* following redirects, and its Location is re-fetched with
+// the cookie.
+func (c *Client) downloadImage(ctx context.Context, jar *cookieJar, rawURL string) ([]byte, string) {
+	tail := rawURL
+	if i := strings.LastIndex(rawURL, "/"); i >= 0 {
+		tail = rawURL[i+1:]
+	}
+	full := rawURL
+	if !strings.Contains(tail, "=s") && !strings.Contains(tail, "=w") {
+		full += imageSizeSuffix
+	}
+
+	resp, err := c.imageRequest(ctx, jar, full, false)
+	if err != nil {
+		return nil, ""
+	}
+	// Captured before the body is drained: a 302 carries the next hop here and
+	// no image bytes.
+	loc := resp.Header.Get("Location")
+	if body, mime := readImageResponse(resp); len(body) > 0 {
+		return body, mime
+	}
+	if loc == "" {
+		return nil, ""
+	}
+	resp2, err := c.imageRequest(ctx, jar, loc, true)
+	if err != nil {
+		return nil, ""
+	}
+	return readImageResponse(resp2)
+}
+
+// imageRequest issues one GET for an image. follow=false returns the first
+// redirect instead of chasing it (see downloadImage).
+func (c *Client) imageRequest(ctx context.Context, jar *cookieJar, u string, follow bool) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", provider.BrowserUA)
+	req.Header.Set("Accept-Language", provider.AcceptLanguage)
+	req.Header.Set("Accept", "image/avif,image/webp,image/apng,image/*,*/*;q=0.8")
+	req.Header.Set("Referer", imageReferer)
+	if h := jar.header(); h != "" {
+		req.Header.Set("Cookie", h)
+	}
+	if follow {
+		return c.http.Do(req)
+	}
+	// Copy the client so the no-redirect rule applies to this request only; the
+	// Transport (and therefore the proxy configuration) is shared.
+	noRedirect := *c.http
+	noRedirect.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	return noRedirect.Do(req)
+}
+
+// readImageResponse consumes resp and returns its bytes when it really is an
+// image. The body is always closed and drained so the connection is reused.
+func readImageResponse(resp *http.Response) ([]byte, string) {
+	if resp == nil {
+		return nil, ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || !strings.HasPrefix(resp.Header.Get("Content-Type"), "image/") {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
+		return nil, ""
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, imageDownloadLimit))
+	if err != nil || len(body) == 0 {
+		return nil, ""
+	}
+	return body, resp.Header.Get("Content-Type")
+}
+
+// ---------------------------------------------------------------------------
 // helpers
 
 func randReqID() int {

@@ -6,6 +6,9 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"fmt"
+	"net"
+	"net/http"
+	"strings"
 )
 
 // UUID returns a random RFC-4122-v4-looking hex string (no dashes), used for
@@ -94,3 +97,30 @@ func Collapse(s string) string {
 // Quote is a small helper for building JSON error strings without importing
 // encoding/json at the call site.
 func Quote(s string) string { return fmt.Sprintf("%q", s) }
+
+// PublicBase reconstructs the address a client used to reach us, for building
+// URLs that are handed back in a response (image links, capture snippets).
+//
+// X-Forwarded-Proto wins when a reverse proxy set it. Otherwise the scheme is
+// guessed from the host: a bare hostname, localhost or a literal IP is served
+// over plain http, anything with a dot (a real domain) over https. That is a
+// heuristic, not a promise — behind a TLS-terminating proxy the header is the
+// reliable signal, and openresty sets it.
+func PublicBase(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	scheme := "https"
+	if p := strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")); p != "" {
+		scheme = p
+	} else {
+		host := r.Host
+		if h, _, err := net.SplitHostPort(host); err == nil {
+			host = h
+		}
+		if !strings.Contains(host, ".") || strings.EqualFold(host, "localhost") || net.ParseIP(host) != nil {
+			scheme = "http"
+		}
+	}
+	return scheme + "://" + r.Host
+}

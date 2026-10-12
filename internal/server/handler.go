@@ -896,8 +896,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 不在候选域，或**所在域已让位于更高优先域**——域优先级高于会话粘性：裸名设置了
 			// 优先域（如 deepseek→global）时，历史粘在次选域（cn）的会话不应永久旁路该偏好，
 			// 只要首选域仍有可用号就放弃粘性、回落普通轮换（成功时按既有路径重绑到新号）。
+			// P6：粘性号本身若在快过期优先层内则不让位（快过期层 > 域偏好），继续烧它的快过期积分。
 			if acct == nil || !realmIn(realms, acct.Realm()) ||
-				h.cfg.Pool.PreferRealmAvailable(acct.Realm(), bareModel, realms) {
+				h.cfg.Pool.PreferRealmOverSticky(acct.UID, acct.Realm(), bareModel, realms) {
 				unbindSticky()
 				acct = nil
 			}

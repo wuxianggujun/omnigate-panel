@@ -157,6 +157,9 @@ func (p *Pool) AssignUIDsForModelRealm(model, realm string) []string {
 
 // AssignUIDsForModelRealms 按 realms 顺序合并各域的分配候选（供会话粘性分配用）。
 // 各域互斥（一个账号只属一个域），直接拼接即可。realms 为空 → 退化为不过滤。
+//
+// P6 跨域快过期优先：先看全池（跨域）有没有该模型的快过期优先层成员，有就整份返回——
+// 否则新会话会被粘性分配绑到 global，cn 的快过期号永远接不到新会话。层为空时照旧按域序拼接。
 func (p *Pool) AssignUIDsForModelRealms(model string, realms []string) []string {
 	if len(realms) == 0 {
 		return p.AssignUIDsForModelRealm(model, "")
@@ -164,9 +167,31 @@ func (p *Pool) AssignUIDsForModelRealms(model string, realms []string) []string 
 	if len(realms) == 1 {
 		return p.AssignUIDsForModelRealm(model, realms[0])
 	}
+	if tier := p.assignExpiringTierForModel(model); len(tier) > 0 {
+		return tier
+	}
 	var out []string
 	for _, realm := range realms {
 		out = append(out, p.AssignUIDsForModelRealm(model, realm)...)
 	}
 	return out
+}
+
+// assignExpiringTierForModel 返回全池（跨域）内该模型的快过期优先层 uid（P6 的粘性侧入口）。
+// 层口径与 AssignUIDsForModelRealm 一致（preferExpiring 关闭 / 层为空时返回 nil）。
+func (p *Pool) assignExpiringTierForModel(model string) []string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if !p.preferExpiring {
+		return nil
+	}
+	now := time.Now()
+	all := p.availableUIDsForModelRealmLocked(model, "", now)
+	tier := make([]string, 0, len(all))
+	for _, uid := range all {
+		if expiringPreferred(p.byUID[uid], now) {
+			tier = append(tier, uid)
+		}
+	}
+	return tier
 }

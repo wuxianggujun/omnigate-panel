@@ -42,6 +42,9 @@ func (p *Pool) PickExcludingForRealm(tried map[string]bool, reqModel, realm stri
 // PickExcludingForRealms 有序域选号：按 realms 顺序先取第一个「有健康号」的域；所有域
 // 都没有健康号时，再按顺序取冷却兜底号（跨域回退）。realms 为空 → 退化为不过滤。
 //
+// 优先级（P6 后）：成本层 > 快过期(跨域) > 域偏好 > 权重。故先跑一趟「跨域快过期」选号
+// （pickLocked expiringOnly），命中即用；未命中再按 realms 顺序逐域挑。
+//
 // 分两阶段的原因：单域 pick 在无健康候选时会「捞」本域冷却号（pickEarliestExpiryLocked），
 // 若直接逐域调用它，首选域的冷却号会挡住次选域的健康号——达不到「首选域没号就跨域回退」
 // 的语义。故先只找健康号，全都没有才退到冷却兜底。
@@ -54,13 +57,20 @@ func (p *Pool) PickExcludingForRealms(tried map[string]bool, reqModel string, re
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	// P6 跨域快过期优先（成本层仍是最高层）：先把候选收窄到「全池最优成本层里的有效
+	// 快过期号」，命中即用——快过期层不再被域偏好挡住。旧实现里域偏好排在最外，global
+	// 一有号，cn 的快过期号就永远进不了候选，快过期积分只能烂在账上。该层为空（无快
+	// 过期号 / 量不足 / 都不可用）时照旧按域序走，行为与旧实现逐字一致。
+	if a := p.pickLocked(tried, reqModel, "", false, true); a != nil {
+		return a
+	}
 	for _, realm := range realms {
-		if a := p.pickLocked(tried, reqModel, realm, false); a != nil {
+		if a := p.pickLocked(tried, reqModel, realm, false, false); a != nil {
 			return a
 		}
 	}
 	for _, realm := range realms {
-		if a := p.pickLocked(tried, reqModel, realm, true); a != nil {
+		if a := p.pickLocked(tried, reqModel, realm, true, false); a != nil {
 			return a
 		}
 	}
@@ -82,6 +92,30 @@ func (p *Pool) PreferRealmAvailable(stickyRealm, reqModel string, realms []strin
 	for _, realm := range realms {
 		if realm == stickyRealm {
 			return false // 已到粘性域：其之前的域都无可用号
+		}
+		if p.realmHasCapacityLocked(realm, reqModel, now) {
+			return true
+		}
+	}
+	return false
+}
+
+// PreferRealmOverSticky 报告「是否应放弃粘性号、改由有序域选号重绑」。在 PreferRealmAvailable
+// 的域优先级之上叠加 P6 快过期优先：粘性号本身若处于快过期优先层（且对该模型可用，调用方
+// 已用 PickByUIDForModel 校验过），则不让位——否则「快过期积分优先消耗」会被历史粘性绑定
+// 永久旁路（域偏好 > 会话粘性，但快过期层 > 域偏好）。
+//
+// 调用方须先做 realmIn(realms, stickyRealm) 校验（stickyRealm 不在 realms 时按不可用处理）。
+func (p *Pool) PreferRealmOverSticky(stickyUID, stickyRealm, reqModel string, realms []string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	now := time.Now()
+	if e := p.byUID[stickyUID]; e != nil && p.preferExpiring && expiringPreferred(e, now) {
+		return false // 粘性号在快过期层内：不让位，继续烧它的快过期积分
+	}
+	for _, realm := range realms {
+		if realm == stickyRealm {
+			return false
 		}
 		if p.realmHasCapacityLocked(realm, reqModel, now) {
 			return true
@@ -123,12 +157,16 @@ func (p *Pool) realmHasCapacityLocked(realm, reqModel string, now time.Time) boo
 func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.pickLocked(tried, reqModel, realm, true)
+	return p.pickLocked(tried, reqModel, realm, true, false)
 }
 
 // pickLocked 是 pick 的锁内实现（调用方必须已持 p.mu 写锁）。allowCooldownFallback=false
 // 时无健康候选直接返回 nil（不捞冷却号）——供 PickExcludingForRealms 分两阶段调用。
-func (p *Pool) pickLocked(tried map[string]bool, reqModel, realm string, allowCooldownFallback bool) *auth.Auth {
+//
+// expiringOnly=true 时语义收窄为「跨域快过期专用趟」（P6）：realm 传 ""、且只在**全池
+// 最优成本层**里的有效快过期号中选；该层为空则返回 nil，交回调用方按域序走。此模式下
+// 不触发条件探索（探索只应发生在真实选号趟，避免空手而归还白耗一次探索窗口）。
+func (p *Pool) pickLocked(tried map[string]bool, reqModel, realm string, allowCooldownFallback, expiringOnly bool) *auth.Auth {
 	now := time.Now()
 	realmOK := func(e *entry) bool { return realm == "" || e.a.Realm() == realm }
 	healthyOf := func(e *entry) bool { return realmOK(e) && e.healthy(now) }
@@ -214,7 +252,7 @@ func (p *Pool) pickLocked(tried map[string]bool, reqModel, realm string, allowCo
 	// timer 同锁写入：并发 pick 串行进入写锁，只有一个进入者能通过窗口判定
 	//（天然防重复探索）。key = realm + "\x1f" + reqModel：同模型名可跨域，
 	// 探索节奏按 (域, 模型) 独立；realm==""（Pick 老语义）单独成键。
-	if p.costExploreInterval > 0 && bestTier == 0 && reqModel != "" {
+	if !expiringOnly && p.costExploreInterval > 0 && bestTier == 0 && reqModel != "" {
 		for _, e := range cands {
 			if ti, _ := costTier(e); ti == 1 {
 				hasTier1 = true
@@ -260,7 +298,11 @@ func (p *Pool) pickLocked(tried map[string]bool, reqModel, realm string, allowCo
 		}
 		if len(tier) > 0 {
 			ws = tier
+		} else if expiringOnly {
+			return nil // P6 跨域快过期专用趟：最优成本层内无有效快过期号 → 交回调用方按域序走
 		}
+	} else if expiringOnly {
+		return nil // P6：快过期优先总开关关闭时不存在该层，专用趟直接空手返回
 	}
 	// P5 分级加权基准：候选集内最大快过期量（0 = 无快过期成员 → routingWeightOf 退化为普通权重）。
 	var maxExpiring int64

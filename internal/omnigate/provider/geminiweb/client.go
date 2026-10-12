@@ -59,6 +59,18 @@ var (
 // Client talks to the Gemini Web frontend endpoints.
 type Client struct {
 	http *http.Client
+	// uploadURL overrides where attachments are posted; empty means
+	// contentPushURL. It is a field so a test can point the upload at a local
+	// server without touching the real endpoint.
+	uploadURL string
+}
+
+// uploadEndpoint is the attachment upload URL.
+func (c *Client) uploadEndpoint() string {
+	if c.uploadURL != "" {
+		return c.uploadURL
+	}
+	return contentPushURL
 }
 
 // NewClient builds a client with a direct transport; SetProxy / SetProxySelector
@@ -333,20 +345,20 @@ func (c *Client) batchexecute(ctx context.Context, jar *cookieJar, sessionToken,
 
 // generate posts one turn to StreamGenerate and returns the raw response so the
 // caller can stream it.
-func (c *Client) generate(ctx context.Context, jar *cookieJar, sessionToken, sessionUUID, prompt, model, convID string, thinking bool) (*http.Response, error) {
+func (c *Client) generate(ctx context.Context, jar *cookieJar, sessionToken, sessionUUID, prompt, model, convID string, files []fileRef, thinking bool) (*http.Response, error) {
 	if strings.TrimSpace(sessionToken) == "" {
 		return nil, &UpstreamError{Status: 401, Message: "缺少会话 token"}
 	}
 	var encoded string
 	extra := map[string]string{}
 	if thinking {
-		encoded = encodePayloadThinking(prompt, model, convID, nil, "", sessionUUID)
+		encoded = encodePayloadThinking(prompt, model, convID, files, "", sessionUUID)
 		for k, v := range buildModelHeaderThinking(model, sessionUUID) {
 			extra[k] = v
 		}
 		extra["x-goog-ext-525005358-jspb"] = `["` + sessionUUID + `",1]`
 	} else {
-		encoded = encodePayload(prompt, model, convID, nil, "")
+		encoded = encodePayload(prompt, model, convID, files, "")
 		for k, v := range buildModelHeader(model) {
 			extra[k] = v
 		}

@@ -80,6 +80,12 @@ type ChatInput struct {
 	// Messages is the structured form used by OpenAI-compatible providers.
 	Messages []openai.Message
 	Tools    []openai.Tool
+	// Attachments are the caller's non-text message parts (images, files) in
+	// order. Only a provider that can actually carry them uses this — geminiweb
+	// uploads each one and injects the resulting id into the payload. A text-only
+	// provider ignores it, and the prompt it receives already records that
+	// something was dropped.
+	Attachments []openai.Attachment
 	// ReasoningEffort is the OpenAI thinking tier (minimal/low/medium/high)
 	// forwarded to reasoning-capable upstreams; empty = not requested.
 	ReasoningEffort string

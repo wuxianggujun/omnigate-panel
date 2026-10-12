@@ -4,21 +4,50 @@ package openai
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"strings"
 )
 
-// Content accepts either a plain string or an array of {type,text} parts and
-// always marshals back to a plain string, matching how most clients read it.
+// Attachment is one non-text content part of a message: an image or a file the
+// caller attached.
+//
+// Content flattens text parts into Text and keeps everything else here, so a
+// provider that can actually carry an attachment (geminiweb uploads it upstream
+// and injects the resulting id into the payload) forwards it instead of dropping
+// it. Only request bodies are ever parsed into this — our own replies are
+// text-only, and Content still marshals back to a plain string.
+type Attachment struct {
+	// Type is the part type as the caller sent it ("image_url", "file", …).
+	Type string
+	// MIME and Filename describe the payload; both may be empty.
+	MIME     string
+	Filename string
+	// Data holds the decoded bytes of an inline part (a data: URL). Nil when the
+	// part points at a URL instead.
+	Data []byte
+	// URL is where a non-inline part lives ("" for inline parts).
+	URL string
+}
+
+// Inline reports whether the attachment carries its own bytes.
+func (a Attachment) Inline() bool { return len(a.Data) > 0 }
+
+// Content accepts either a plain string or an array of parts. Text parts are
+// flattened into Text; non-text parts are collected into Attachments. It always
+// marshals back to a plain string, matching how most clients read it.
 type Content struct {
 	Text string
+	// Attachments are the non-text parts of an array-form content (see
+	// Attachment). Always empty for the plain string form.
+	Attachments []Attachment
 }
 
 // UnmarshalJSON implements json.Unmarshaler.
 func (c *Content) UnmarshalJSON(b []byte) error {
 	b = bytes.TrimSpace(b)
+	c.Text, c.Attachments = "", nil
 	if len(b) == 0 || string(b) == "null" {
-		c.Text = ""
 		return nil
 	}
 	if b[0] == '"' {
@@ -29,23 +58,137 @@ func (c *Content) UnmarshalJSON(b []byte) error {
 		c.Text = s
 		return nil
 	}
-	var parts []struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
-	}
+	var parts []json.RawMessage
 	if err := json.Unmarshal(b, &parts); err != nil {
 		// Unknown shape: keep the raw text so nothing is silently lost.
 		c.Text = string(b)
 		return nil
 	}
 	var sb strings.Builder
-	for _, p := range parts {
-		if p.Type == "" || p.Type == "text" {
-			sb.WriteString(p.Text)
+	parsed := 0
+	for _, raw := range parts {
+		var p struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
 		}
+		if err := json.Unmarshal(raw, &p); err != nil {
+			continue
+		}
+		parsed++
+		if p.Type == "" || p.Type == "text" || p.Type == "input_text" {
+			sb.WriteString(p.Text)
+			continue
+		}
+		if att, ok := parseAttachment(p.Type, raw); ok {
+			c.Attachments = append(c.Attachments, att)
+		}
+	}
+	if parsed == 0 && len(parts) > 0 {
+		// Nothing in the array looked like a part object; keep the raw JSON
+		// rather than replacing it with an empty string.
+		c.Text, c.Attachments = string(b), nil
+		return nil
 	}
 	c.Text = sb.String()
 	return nil
+}
+
+// parseAttachment decodes one non-text part into an Attachment. It understands
+// the shapes our three inbound dialects can produce: the OpenAI image_url/file
+// parts (what the Anthropic and Responses translators emit too).
+func parseAttachment(typ string, raw json.RawMessage) (Attachment, bool) {
+	switch typ {
+	case "image_url", "input_image":
+		return parseImagePart(typ, raw)
+	case "file", "input_file":
+		return parseFilePart(typ, raw)
+	}
+	return Attachment{}, false
+}
+
+// parseImagePart reads {"image_url":{"url":…}} and the bare-string variant. A
+// data: URL carries its own bytes, so it is decoded here and the URL cleared.
+func parseImagePart(typ string, raw json.RawMessage) (Attachment, bool) {
+	var p struct {
+		ImageURL json.RawMessage `json:"image_url"`
+	}
+	if json.Unmarshal(raw, &p) != nil || len(p.ImageURL) == 0 {
+		return Attachment{}, false
+	}
+	att := Attachment{Type: typ}
+	if p.ImageURL[0] == '"' {
+		if json.Unmarshal(p.ImageURL, &att.URL) != nil {
+			return Attachment{}, false
+		}
+	} else {
+		var obj struct {
+			URL      string `json:"url"`
+			MIMEType string `json:"mime_type"`
+			Filename string `json:"filename"`
+		}
+		if json.Unmarshal(p.ImageURL, &obj) != nil {
+			return Attachment{}, false
+		}
+		att.URL, att.MIME, att.Filename = obj.URL, obj.MIMEType, obj.Filename
+	}
+	if att.URL == "" {
+		return Attachment{}, false
+	}
+	if data, mime, ok := decodeDataURL(att.URL); ok {
+		att.Data, att.URL = data, ""
+		if att.MIME == "" {
+			att.MIME = mime
+		}
+	}
+	return att, true
+}
+
+// parseFilePart reads {"file":{"filename":…,"file_data":"data:…"}}. A part that
+// only references a file_id is skipped: nothing here has a file store to resolve
+// it against, and uploading an empty part would be worse than dropping it.
+func parseFilePart(typ string, raw json.RawMessage) (Attachment, bool) {
+	var p struct {
+		File json.RawMessage `json:"file"`
+	}
+	if json.Unmarshal(raw, &p) != nil || len(p.File) == 0 {
+		return Attachment{}, false
+	}
+	var obj struct {
+		Filename string `json:"filename"`
+		FileData string `json:"file_data"`
+	}
+	if json.Unmarshal(p.File, &obj) != nil {
+		return Attachment{}, false
+	}
+	data, mime, ok := decodeDataURL(obj.FileData)
+	if !ok {
+		return Attachment{}, false
+	}
+	att := Attachment{Type: typ, Filename: obj.Filename, Data: data}
+	if mime != "" {
+		att.MIME = mime
+	}
+	return att, true
+}
+
+// decodeDataURL decodes "data:<mime>;base64,<payload>".
+func decodeDataURL(s string) ([]byte, string, bool) {
+	if !strings.HasPrefix(s, "data:") {
+		return nil, "", false
+	}
+	comma := strings.IndexByte(s, ',')
+	if comma < 0 {
+		return nil, "", false
+	}
+	meta := s[len("data:"):comma]
+	if !strings.HasSuffix(meta, ";base64") {
+		return nil, "", false
+	}
+	data, err := base64.StdEncoding.DecodeString(strings.TrimSpace(s[comma+1:]))
+	if err != nil || len(data) == 0 {
+		return nil, "", false
+	}
+	return data, strings.TrimSuffix(meta, ";base64"), true
 }
 
 // MarshalJSON implements json.Marshaler.

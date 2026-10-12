@@ -1,6 +1,7 @@
 package gemini
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -50,9 +51,9 @@ func RequestToChat(model string, raw []byte, stream bool) (*ChatRequest, error) 
 		return nil, fmt.Errorf("contents is required")
 	}
 
-	var msgs []openai.Message
+	msgs := make([]map[string]any, 0, len(contents)+1)
 	if sys := systemText(top); sys != "" {
-		msgs = append(msgs, openai.Message{Role: "system", Content: openai.Content{Text: sys}})
+		msgs = append(msgs, map[string]any{"role": "system", "content": sys})
 	}
 	// Gemini has no tool-call ids; OpenAI's tool result messages need one. Match
 	// each functionResponse back to the id minted for the functionCall of the same
@@ -190,7 +191,12 @@ func partText(raw json.RawMessage) string {
 // functionCall becomes an assistant tool_calls entry and a functionResponse a
 // role="tool" message, so a provider with native tool support (and the prompt
 // emulation used by prompt-based providers) both see the tool loop.
-func contentToMessages(c geminiContent, callIDs map[string]string) []openai.Message {
+//
+// The messages are raw maps rather than openai.Message because an inline image has
+// to be emitted as a content parts array: openai.Content marshals back to a plain
+// string, which would drop the image on the way to the gateway. The chat layer
+// parses that array back into openai.Content.Attachments.
+func contentToMessages(c geminiContent, callIDs map[string]string) []map[string]any {
 	role := c.Role
 	switch role {
 	case "model":
@@ -200,8 +206,9 @@ func contentToMessages(c geminiContent, callIDs map[string]string) []openai.Mess
 	}
 
 	var texts []string
+	var atts []map[string]any
 	var calls []openai.ToolCall
-	var results []openai.Message
+	var results []map[string]any
 
 	for _, p := range c.Parts {
 		if t := partText(p); t != "" {
@@ -225,41 +232,91 @@ func contentToMessages(c geminiContent, callIDs map[string]string) []openai.Mess
 			if id == "" {
 				id = name
 			}
-			results = append(results, openai.Message{
-				Role:       "tool",
-				Name:       name,
-				ToolCallID: id,
-				Content:    openai.Content{Text: text},
+			results = append(results, map[string]any{
+				"role":         "tool",
+				"name":         name,
+				"tool_call_id": id,
+				"content":      text,
 			})
 			continue
 		}
 		if raw := rawAlt(m, "inlineData", "inline_data"); len(raw) > 0 {
-			// The chat layer this pipeline reuses is text-only (openai.Content
-			// drops every non-text part), so an attachment cannot be forwarded as
-			// an image_url. Degrade to a marker instead of silently dropping it —
-			// the same call the Anthropic layer makes for images inside a
-			// tool_result block.
-			texts = append(texts, "[image omitted]")
+			// Inline bytes travel with the request, so they are forwarded as an
+			// image part — a provider that can carry one (geminiweb) uploads it
+			// instead of the model never seeing the image. Only an undecodable part
+			// degrades to a marker.
+			if part, ok := inlineImagePart(raw); ok {
+				atts = append(atts, part)
+			} else {
+				texts = append(texts, "[image omitted]")
+			}
 			continue
 		}
 		if raw := rawAlt(m, "fileData", "file_data"); len(raw) > 0 {
+			// fileData references a URI we cannot fetch on the caller's behalf.
 			texts = append(texts, "[file omitted]")
 			continue
 		}
 	}
 
-	var out []openai.Message
-	if len(calls) > 0 {
-		out = append(out, openai.Message{
-			Role:      "assistant",
-			Content:   openai.Content{Text: strings.Join(texts, " ")},
-			ToolCalls: calls,
+	var out []map[string]any
+	switch {
+	case len(calls) > 0:
+		out = append(out, map[string]any{
+			"role":       "assistant",
+			"content":    strings.Join(texts, " "),
+			"tool_calls": calls,
 		})
-	} else if len(texts) > 0 {
-		out = append(out, openai.Message{Role: role, Content: openai.Content{Text: strings.Join(texts, " ")}})
+	case len(texts) > 0 || len(atts) > 0:
+		out = append(out, map[string]any{"role": role, "content": contentValue(texts, atts)})
 	}
 	out = append(out, results...)
 	return out
+}
+
+// contentValue renders a message's content: a plain string when nothing was
+// attached, or the OpenAI parts array when something was.
+func contentValue(texts []string, atts []map[string]any) any {
+	text := strings.Join(texts, " ")
+	if len(atts) == 0 {
+		return text
+	}
+	parts := make([]map[string]any, 0, len(atts)+1)
+	if text != "" {
+		parts = append(parts, map[string]any{"type": "text", "text": text})
+	}
+	return append(parts, atts...)
+}
+
+// inlineImagePart renders a Gemini inlineData part as an OpenAI image_url part. The
+// payload is base64 in the request already, so nothing is fetched; it is decoded
+// once to reject a malformed part and then re-encoded into a canonical data URL.
+func inlineImagePart(raw json.RawMessage) (map[string]any, bool) {
+	var m map[string]json.RawMessage
+	if json.Unmarshal(raw, &m) != nil {
+		return nil, false
+	}
+	var data string
+	if err := json.Unmarshal(rawAlt(m, "data"), &data); err != nil || strings.TrimSpace(data) == "" {
+		return nil, false
+	}
+	decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(data))
+	if err != nil || len(decoded) == 0 {
+		return nil, false
+	}
+	mime := ""
+	if v := rawAlt(m, "mimeType", "mime_type"); len(v) > 0 {
+		_ = json.Unmarshal(v, &mime)
+	}
+	if mime == "" {
+		mime = "application/octet-stream"
+	}
+	return map[string]any{
+		"type": "image_url",
+		"image_url": map[string]any{
+			"url": "data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(decoded),
+		},
+	}, true
 }
 
 // parseFunctionCall translates a Gemini functionCall part into an OpenAI tool

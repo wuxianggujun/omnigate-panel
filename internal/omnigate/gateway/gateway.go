@@ -250,6 +250,8 @@ func New(cfg *config.Config, st *state.State, log *logx.Logger, opts ...Option) 
 			// Generated images are stored under the data dir (a bind mount) so
 			// the /images/{id} route can serve them across restarts.
 			gw.SetImageStore(imagegen.NewStore(filepath.Join(cfg.DataDir, "generated_images")))
+			// An attachment that fails to upload must not disappear silently.
+			gw.SetLogger(g.log.Warn)
 			prov = gw
 		default:
 			return nil, fmt.Errorf("provider %q: unknown type %q", p.Name, p.Type)
@@ -847,7 +849,7 @@ func (g *Gateway) buildInput(prov provider.Provider, model string, req *openai.C
 	}
 	// Prompt-based providers need emulated tool calling.
 	if hasTools && (prov.Type() == "runable" || prov.Type() == "geminiweb") {
-		return provider.ChatInput{
+		in := provider.ChatInput{
 			ChatID:          util.UUID(),
 			Model:           model,
 			Prompt:          clamp(toolcall.BuildToolPrompt(req.Messages, req.Tools)),
@@ -855,6 +857,8 @@ func (g *Gateway) buildInput(prov provider.Provider, model string, req *openai.C
 			Incognito:       incognito,
 			Mode:            g.cfg.Mode,
 		}
+		in.Attachments = collectAttachments(prov, req.Messages)
+		return in
 	}
 
 	var in provider.ChatInput
@@ -888,10 +892,25 @@ func (g *Gateway) buildInput(prov provider.Provider, model string, req *openai.C
 			p = sys + "\n\n" + p
 		}
 		in.Prompt = clamp(p)
+		in.Attachments = collectAttachments(prov, req.Messages)
 	} else {
 		in.Messages = req.Messages
 	}
 	return in
+}
+
+// collectAttachments gathers the non-text parts of every message, for providers
+// that can actually carry them. A text-only provider gets nothing: handing it
+// attachments would only invite it to pretend it forwarded something.
+func collectAttachments(p provider.Provider, msgs []openai.Message) []openai.Attachment {
+	if p.Type() != "geminiweb" {
+		return nil
+	}
+	var out []openai.Attachment
+	for _, m := range msgs {
+		out = append(out, m.Content.Attachments...)
+	}
+	return out
 }
 
 // markStreamFailure 回填流式请求的失败观测。HTTP 头（200）在首字节前已发出、无法

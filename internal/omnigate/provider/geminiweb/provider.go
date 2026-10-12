@@ -41,6 +41,9 @@ type Provider struct {
 	// images keeps AI-generated images on disk so a reply can link to them
 	// instead of inlining megabytes of base64. Nil = inline as a data URI.
 	images *imagegen.Store
+	// logf reports non-fatal upstream problems (an attachment that could not be
+	// uploaded). Nil = silent.
+	logf func(format string, args ...any)
 
 	mu       sync.Mutex
 	sessions map[string]*session
@@ -82,6 +85,33 @@ func (p *Provider) SetProxySelector(sel outbound.Selector) { p.client.SetProxySe
 // public base URL to link to).
 func (p *Provider) SetImageStore(s *imagegen.Store) { p.images = s }
 
+// SetLogger attaches a logger for non-fatal upstream problems — chiefly an
+// attachment that could not be uploaded, which would otherwise vanish without a
+// trace. Nil = silent.
+func (p *Provider) SetLogger(fn func(format string, args ...any)) { p.logf = fn }
+
+// warn reports a non-fatal problem when a logger is attached.
+func (p *Provider) warn(format string, args ...any) {
+	if p.logf != nil {
+		p.logf(format, args...)
+	}
+}
+
+// attachmentLabel names an attachment for a log line without dumping its bytes.
+func attachmentLabel(att openai.Attachment) string {
+	name := att.Filename
+	if name == "" {
+		name = att.Type
+	}
+	switch {
+	case len(att.Data) > 0:
+		return fmt.Sprintf("%s (%s, %d 字节)", name, att.MIME, len(att.Data))
+	case att.URL != "":
+		return fmt.Sprintf("%s (%s, %s)", name, att.MIME, att.URL)
+	}
+	return name
+}
+
 // RotatesCookie marks this provider as one whose credential cookie the upstream
 // rotates; the gateway persists acc.Cookie after each call so a restart keeps it.
 func (p *Provider) RotatesCookie() bool { return true }
@@ -109,9 +139,22 @@ func (p *Provider) StreamChat(ctx context.Context, acc *provider.Account, in pro
 	if err != nil {
 		return nil, err
 	}
+	// Attachments are uploaded before the turn: the payload references them by the
+	// id the upload returns. A failed upload is reported instead of dropped
+	// silently — the caller would otherwise get an answer that ignored the image
+	// it attached, with nothing to explain why.
+	var files []fileRef
+	for _, att := range in.Attachments {
+		ref, ok := p.client.uploadAttachment(ctx, s.jar, s.pushID, att)
+		if !ok {
+			p.warn("geminiweb: 附件上传失败（已跳过）: %s", attachmentLabel(att))
+			continue
+		}
+		files = append(files, ref)
+	}
 	model := resolveModel(in.Model, s.familyModel)
 	thinking := strings.TrimSpace(in.ReasoningEffort) != ""
-	resp, err := p.client.generate(ctx, s.jar, s.sessionToken, s.sessionUUID, in.Prompt, model, "", thinking)
+	resp, err := p.client.generate(ctx, s.jar, s.sessionToken, s.sessionUUID, in.Prompt, model, "", files, thinking)
 	if err != nil {
 		if Unauthorized(err) {
 			p.markUnhealthy(acc, err)

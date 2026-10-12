@@ -1046,9 +1046,27 @@
         <div class="og-msg" id="naMsg"></div>
       </div>
 
+      <!-- OmniGate · Gemini Web（gemini.google.com）：粘贴 Google Cookie -->
+      <div id="addTabOgGemini" class="tab-panel" hidden>
+        <div class="og-fields">
+          <label>账号名（留空 = 自动命名）<input id="gwLabel" placeholder="留空 = 自动命名"></label>
+        </div>
+        <div class="og-hint">Gemini Web 没有可用的 OAuth 跳转，账号凭证就是<b>该 Google 账号在 <code>gemini.google.com</code> 上的 Cookie</b>（网页 JS 读不到，只能手动复制一次）：</div>
+        <div class="og-hint" style="margin-top:6px">① 点「打开 Gemini」，用目标账号登录；<br>② 按 <b>F12</b> → <b>Application（应用）</b> → <b>Cookies</b> → <code>https://gemini.google.com</code>；<br>③ 复制 <code>__Secure-1PSID</code> 与 <code>__Secure-1PSIDTS</code> 两个值，拼成 <code>名称=值; 名称=值</code> 一行（也可以把整段 Cookie 直接粘进来）；<br>④ 粘到下面点「保存并校验」——服务端会先拿它跑一次真实会话，失败会当场告诉你原因，坏 Cookie 不会入库。</div>
+        <div class="og-row" style="margin-top:8px">
+          <button id="btnGwOpenLogin">打开 Gemini</button>
+        </div>
+        <div class="og-row" style="margin-top:8px">
+          <textarea id="gwCookie" spellcheck="false" style="width:100%;height:104px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;resize:vertical" placeholder="__Secure-1PSID=...; __Secure-1PSIDTS=..."></textarea>
+        </div>
+        <div class="og-row" style="margin-top:8px">
+          <button class="primary" id="btnGwSave">保存并校验</button>
+          <span class="og-msg" id="gwMsg"></span>
+        </div>
+      </div>
+
       <!-- OmniGate · openai 等：无需账号 -->
-      <div id="addTabOgNone" class="tab-panel" hidden>
-        <div class="og-hint" style="margin-top:0">该供应商类型（openai）不使用「账号」——直接在上游供应商页配置 <code>base_url</code> / <code>api_key</code> / <code>models</code> 即可。</div>
+      <div id="addTabOgNone" class="tab-panel" hidden>        <div class="og-hint" style="margin-top:0">该供应商类型（openai）不使用「账号」——直接在上游供应商页配置 <code>base_url</code> / <code>api_key</code> / <code>models</code> 即可。</div>
         <div class="og-row" style="margin-top:10px">
           <button id="btnOgGoProv">去「上游供应商」配置</button>
         </div>

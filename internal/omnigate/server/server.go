@@ -133,6 +133,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.handleTraeAdmin(w, r)
+	case strings.HasPrefix(path, "/admin/geminiweb/"):
+		if !s.authorized(w, r) {
+			return
+		}
+		s.handleGeminiWebAdmin(w, r)
 	default:
 		writeJSON(w, 404, openai.ErrorJSON("not_found", "not found"))
 	}
@@ -509,6 +514,104 @@ func (s *Server) handleRaccoonAdmin(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeJSON(w, 404, openai.ErrorJSON("not_found", "unknown admin route"))
 	}
+}
+
+// handleGeminiWebAdmin serves /admin/geminiweb/* — Gemini Web accounts are added
+// by pasting the account's Google cookies (there is no OAuth redirect to
+// capture), so this is a token-style flow.
+func (s *Server) handleGeminiWebAdmin(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/admin/geminiweb/")
+	switch {
+	case r.Method == http.MethodPost && path == "token":
+		var req struct {
+			Provider string `json:"provider"`
+			Label    string `json:"label"`
+			Cookie   string `json:"cookie"`
+			Token    string `json:"token"`
+		}
+		if err := decodeBody(r, &req); err != nil {
+			s.adminError(w, err)
+			return
+		}
+		cookie := req.Cookie
+		if cookie == "" {
+			cookie = req.Token
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
+		defer cancel()
+		res, err := s.gw.GeminiWebSetToken(ctx, s.geminiWebProviderOrDefault(req.Provider), req.Label, cookie)
+		if err != nil {
+			s.adminError(w, err)
+			return
+		}
+		s.writeValue(w, 200, map[string]any{"ok": true, "account": res})
+	case r.Method == http.MethodGet && path == "accounts":
+		ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
+		defer cancel()
+		res, err := s.gw.GeminiWebAccounts(ctx, s.geminiWebProviderOrDefault(r.URL.Query().Get("provider")))
+		if err != nil {
+			s.adminError(w, err)
+			return
+		}
+		s.writeValue(w, 200, map[string]any{"accounts": res})
+	case r.Method == http.MethodPost && path == "checkin":
+		var req struct {
+			Provider string `json:"provider"`
+			Label    string `json:"label"`
+		}
+		if err := decodeBody(r, &req); err != nil {
+			s.adminError(w, err)
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 180*time.Second)
+		defer cancel()
+		res, err := s.gw.GeminiWebCheckin(ctx, s.geminiWebProviderOrDefault(req.Provider), req.Label)
+		if err != nil {
+			s.adminError(w, err)
+			return
+		}
+		s.writeValue(w, 200, map[string]any{"results": res})
+	case r.Method == http.MethodPost && path == "remove":
+		var req struct {
+			Provider string `json:"provider"`
+			Label    string `json:"label"`
+		}
+		if err := decodeBody(r, &req); err != nil {
+			s.adminError(w, err)
+			return
+		}
+		if req.Label == "" {
+			s.adminError(w, fmt.Errorf("label 不能为空"))
+			return
+		}
+		removed := s.gw.GeminiWebRemoveAccount(s.geminiWebProviderOrDefault(req.Provider), req.Label)
+		s.writeValue(w, 200, map[string]any{"ok": true, "removed": removed})
+	default:
+		writeJSON(w, 404, openai.ErrorJSON("not_found", "unknown admin route"))
+	}
+}
+
+// geminiWebProviderOrDefault resolves the provider for /admin/geminiweb/*: an
+// explicit name wins, otherwise prefer the default provider when it is a
+// geminiweb one, otherwise the first geminiweb provider configured.
+func (s *Server) geminiWebProviderOrDefault(name string) string {
+	if name != "" {
+		return name
+	}
+	if s.cfg.DefaultProvider != "" {
+		if p := s.cfg.Provider(s.cfg.DefaultProvider); p != nil && p.Type == "geminiweb" {
+			return s.cfg.DefaultProvider
+		}
+	}
+	for _, p := range s.cfg.Providers {
+		if p.Type == "geminiweb" {
+			return p.Name
+		}
+	}
+	if len(s.cfg.Providers) > 0 {
+		return s.cfg.Providers[0].Name
+	}
+	return ""
 }
 
 // handleRaccoonRedirect is the unauthenticated browser callback for the

@@ -877,8 +877,8 @@ function ogRowHtml(p, a) {
   else if (avail != null) balHtml = '<span class="num">' + esc(avail) + '</span>';
   else balHtml = '<span style="color:var(--ink-3)">—</span>';
   const acts = '<button class="xs ghost" data-src="omni" data-a="ogbalance" data-prov="' + esc(p.name) + '" data-label="' + esc(label) + '" title="从上游刷新该账号积分（余额）">积分</button>' +
-    ((p.type === 'raccoon' || p.type === 'newapi')
-      ? '<button class="xs ghost" data-src="omni" data-a="ogcheckin" data-prov="' + esc(p.name) + '" data-label="' + esc(label) + '">签到</button>'
+    ((p.type === 'raccoon' || p.type === 'newapi' || p.type === 'geminiweb')
+      ? '<button class="xs ghost" data-src="omni" data-a="ogcheckin" data-prov="' + esc(p.name) + '" data-label="' + esc(label) + '">' + (p.type === 'geminiweb' ? '验活' : '签到') + '</button>'
       : '') +
     (p.type === 'newapi'
       ? '<button class="xs ghost" data-src="omni" data-a="ogrefresh" data-prov="' + esc(p.name) + '" data-label="' + esc(label) + '" title="轮换该账号的会话 access_token">刷新</button>'
@@ -1078,8 +1078,10 @@ $('accBody').addEventListener('click', async ev => {
         await api('omni/newapi/setkey', { method: 'POST', body: JSON.stringify({ provider: prov, label, api_key: k }) });
         toast('已更新「' + label + '」的聊天密钥', 'ok');
       } else if (a === 'ogremove') {
-        if (b.dataset.type && b.dataset.type !== 'raccoon') {
-          // runable / openai 等账号是 omnigate.json 静态配置，须改配置后热生效。
+        // 运行时账号（浏览器登录 / 粘贴凭证建立的：raccoon / trae / newapi /
+        // geminiweb）走 OmniRemove；其余（runable 等写在 omnigate.json 里的）走配置删除。
+        const dynTypes = ['raccoon', 'trae', 'newapi', 'geminiweb'];
+        if (b.dataset.type && !dynTypes.includes(b.dataset.type)) {
           await removeOmniAccountFromConfig(prov, label);
         } else {
           await api('omni/account/remove', { method: 'POST', body: JSON.stringify({ provider: prov, label }) });
@@ -2036,13 +2038,14 @@ function addTabsForSource(src) {
   if (t === 'raccoon') return [['ogauth', '浏览器登录'], ['ogtoken', '粘贴 Token']];
   if (t === 'trae') return [['ogauth', '浏览器登录']];
   if (t === 'newapi') return [['ognewapi', '浏览器登录']];
+  if (t === 'geminiweb') return [['oggemini', '粘贴 Cookie']];
   if (t === 'runable') return [['ogcreds', '浏览器登录']];
   return [['ognone', '说明']];
 }
 const ADD_PANELS = {
   login: 'addTabLogin', import: 'addTabImport', bundle: 'addTabBundle',
   ogauth: 'addTabOgAuth', ogtoken: 'addTabOgToken', ogcreds: 'addTabOgCreds',
-  ognewapi: 'addTabOgNewAPI', ognone: 'addTabOgNone',
+  ognewapi: 'addTabOgNewAPI', oggemini: 'addTabOgGemini', ognone: 'addTabOgNone',
 };
 async function openAdd() {
   // 来源列表依赖 OmniGate 账号聚合；首次打开若尚未加载则先取一次。
@@ -2092,7 +2095,14 @@ function switchAddTab(tab) {
   if (tab === 'ogtoken' && $('tokLabel')) $('tokLabel').value = ogNextLabel();
   if (tab === 'ogcreds' && $('ogAcctLabel')) $('ogAcctLabel').value = ogNextLabel();
   if (tab === 'ognewapi' && $('naLabel')) { $('naLabel').value = ogNextLabel(); resetNaAuthPanel(); }
-  ogMsg('authMsg', ''); ogMsg('tokenMsg', ''); ogMsg('ogCredsMsg', ''); ogMsg('naMsg', '');
+  if (tab === 'oggemini' && $('gwLabel')) { $('gwLabel').value = ogNextLabel(); resetOgGeminiPanel(); }
+  ogMsg('authMsg', ''); ogMsg('tokenMsg', ''); ogMsg('ogCredsMsg', ''); ogMsg('naMsg', ''); ogMsg('gwMsg', '');
+}
+
+// resetOgGeminiPanel 把 Gemini Web 粘贴面板复位到「未开始」态。
+function resetOgGeminiPanel() {
+  if ($('gwCookie')) $('gwCookie').value = '';
+  if ($('btnGwSave')) $('btnGwSave').disabled = false;
 }
 
 // resetOgAuthPanel 把 raccoon 浏览器登录面板复位到「未开始」态（切页 / 关闭时调用）。
@@ -4264,7 +4274,7 @@ function omniModelsText(p) { return Array.isArray(p.models) ? p.models.join('\n'
 
 function provCard(p, i) {
   const type = p.type || 'runable';
-  const typeOpts = ['runable', 'raccoon', 'trae', 'newapi', 'openai']
+  const typeOpts = ['runable', 'raccoon', 'trae', 'newapi', 'geminiweb', 'openai']
     .map(t => '<option value="' + t + '"' + (t === type ? ' selected' : '') + '>' + t + '</option>').join('');
   const raccoonFields = type === 'raccoon' ? '' +
       '<label>main_origin<input data-i="' + i + '" data-f="main_origin" value="' + esc(p.main_origin || '') + '" placeholder="https://..."></label>' +
@@ -4276,6 +4286,8 @@ function provCard(p, i) {
       '<label>oauth_host<input data-i="' + i + '" data-f="oauth_host" value="' + esc(p.oauth_host || '') + '" placeholder="留空 = 默认"></label>' : '';
   const deviceField = type === 'runable' ? '' +
       '<label>device_header<input data-i="' + i + '" data-f="device_header" value="' + esc(p.device_header || '') + '" placeholder="留空 = 默认"></label>' : '';
+  const geminiField = type === 'geminiweb' ? '' +
+      '<div class="og-hint og-full" style="margin-top:2px">Gemini Web 不需要 base_url / api_key：账号凭证是 <code>gemini.google.com</code> 的 Google Cookie。保存本供应商后，去「账号池 → 添加账号 → 选它 → 粘贴 Cookie」。models 留空 = 用内置的 <code>gemini-pro / gemini-flash / gemini-flash-thinking / gemini-flash-lite</code>。</div>' : '';
   return '<div class="og-card">' +
     '<div class="og-row" style="justify-content:space-between">' +
       '<div class="og-t">供应商 #' + (i + 1) + ' <span class="tag mute">' + esc(type) + '</span></div>' +
@@ -4286,7 +4298,7 @@ function provCard(p, i) {
       '<label>类型<select data-i="' + i + '" data-f="type">' + typeOpts + '</select></label>' +
       '<label class="og-full">base_url<input data-i="' + i + '" data-f="base_url" value="' + esc(p.base_url || '') + '" placeholder="https://api.example.com/v1"></label>' +
       '<label class="og-full">api_key<input data-i="' + i + '" data-f="api_key" value="' + esc(p.api_key || '') + '" placeholder="上游密钥（openai 类用）；已脱敏，不改 = 保持原值"></label>' +
-      deviceField + raccoonFields + traeFields +
+      deviceField + raccoonFields + traeFields + geminiField +
       '<label class="og-full">models（逗号或换行分隔，留空 = 自动发现）<textarea data-i="' + i + '" data-f="models" rows="2">' + esc(omniModelsText(p)) + '</textarea></label>' +
     '</div>' +
     '<div class="og-sep"></div>' +
@@ -4525,7 +4537,7 @@ function ogAcctCount() {
 }
 function ogNextLabel() {
   const t = addSourceType(addSource);
-  const base = t === 'raccoon' ? '浣熊账号' : (t === 'trae' ? 'TRAE账号' : (t === 'runable' ? 'runable账号' : (t === 'newapi' ? '账号' : '账号')));
+  const base = t === 'raccoon' ? '浣熊账号' : (t === 'trae' ? 'TRAE账号' : (t === 'runable' ? 'runable账号' : (t === 'geminiweb' ? 'gemini账号' : '账号')));
   return base + (ogAcctCount() + 1);
 }
 
@@ -4871,8 +4883,33 @@ async function copyNaScript() {
   catch (e) { ogMsg('naMsg', '复制失败：请手动选中脚本框内容复制', 'err'); }
 }
 
-// refreshAllNewAPI 统一刷新：遍历当前可见的 New API 账号，逐个轮换会话 access_token。
-// 列表已按归属过滤，所以普通用户只会刷新到自己的账号。
+// saveOgGemini 用粘贴的 Google Cookie 添加/更新一个 Gemini Web 账号。服务端会先拿它
+// 跑一次真实会话获取来校验（失败即拒、不入库），并顺带回报该账号可用的模型数。
+async function saveOgGemini() {
+  const label = ($('gwLabel').value || '').trim();
+  const cookie = ($('gwCookie').value || '').trim();
+  if (!cookie) { ogMsg('gwMsg', '请先粘贴 Cookie', 'err'); return; }
+  const btn = $('btnGwSave');
+  btn.disabled = true;
+  ogMsg('gwMsg', '正在校验…');
+  try {
+    const data = await apiAbs('/omni/admin/geminiweb/token', {
+      method: 'POST',
+      body: JSON.stringify({ provider: provName(), label, cookie }),
+    });
+    const acc = (data && data.account) || {};
+    ogMsg('gwMsg', '已保存：' + (acc.label || label || '账号')
+      + (acc.models ? '（可用模型 ' + acc.models + ' 个）' : ''), 'ok');
+    $('gwCookie').value = '';
+    await loadOverview(true);
+  } catch (e) {
+    ogMsg('gwMsg', '保存失败：' + e.message, 'err');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// refreshAllNewAPI 统一刷新：遍历当前可见的 New API 账号，逐个轮换会话 access_token。// 列表已按归属过滤，所以普通用户只会刷新到自己的账号。
 async function refreshAllNewAPI() {
   const targets = [];
   (lastOmni || []).forEach(p => {
@@ -5295,6 +5332,9 @@ async function saveOutbound() {
   on('btnOpenNaSignin', openNaSignin);
   on('btnCopyNaScript', copyNaScript);
   on('btnRefreshAll', refreshAllNewAPI);
+  // Gemini Web（gemini.google.com）：粘贴 Google Cookie
+  on('btnGwSave', saveOgGemini);
+  on('btnGwOpenLogin', () => window.open('https://gemini.google.com/app', '_blank', 'noopener'));
   on('btnOgGoProv', () => { closeAdd(); go('providers'); history.replaceState(null, '', '#providers'); });
   on('addSource', switchAddSource, 'change');
   on('btnLoadModels', loadUpstreamModels);

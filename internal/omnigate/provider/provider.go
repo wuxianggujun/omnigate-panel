@@ -192,6 +192,14 @@ type AccountModelLister interface {
 	ListModelsWithAccount(ctx context.Context, acc *Account) ([]openai.Model, error)
 }
 
+// CookieRotator is an optional Provider capability: the upstream rotates the
+// account's credential cookie on its responses (geminiweb). When a Provider
+// implements it and RotatesCookie reports true, the gateway persists acc.Cookie
+// after each call so a restart does not lose the rotation.
+type CookieRotator interface {
+	RotatesCookie() bool
+}
+
 // MaxSample bounds how many upstream bytes a stream keeps for diagnostics.
 const MaxSample = 600
 

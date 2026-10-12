@@ -20,6 +20,7 @@ import (
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/logx"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/openai"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/provider"
+	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/provider/geminiweb"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/provider/newapi"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/provider/openaibackend"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/provider/raccoon"
@@ -204,6 +205,9 @@ var (
 	_ interface {
 		SetProxySelector(outbound.Selector)
 	} = (*newapi.Provider)(nil)
+	_ interface {
+		SetProxySelector(outbound.Selector)
+	} = (*geminiweb.Provider)(nil)
 )
 
 // New builds a Gateway from config and state.
@@ -240,6 +244,8 @@ func New(cfg *config.Config, st *state.State, log *logx.Logger, opts ...Option) 
 			prov = trae.NewProvider(p.Name, p.AgentHost, p.UgHost, p.OAuthHost)
 		case "newapi":
 			prov = newapi.NewProvider(p.Name, p.BaseURL, p.Models)
+		case "geminiweb":
+			prov = geminiweb.NewProvider(p.Name, p.Models)
 		default:
 			return nil, fmt.Errorf("provider %q: unknown type %q", p.Name, p.Type)
 		}
@@ -835,13 +841,14 @@ func (g *Gateway) buildInput(prov provider.Provider, model string, req *openai.C
 		return out
 	}
 	// Prompt-based providers need emulated tool calling.
-	if hasTools && prov.Type() == "runable" {
+	if hasTools && (prov.Type() == "runable" || prov.Type() == "geminiweb") {
 		return provider.ChatInput{
-			ChatID:    util.UUID(),
-			Model:     model,
-			Prompt:    clamp(toolcall.BuildToolPrompt(req.Messages, req.Tools)),
-			Incognito: incognito,
-			Mode:      g.cfg.Mode,
+			ChatID:          util.UUID(),
+			Model:           model,
+			Prompt:          clamp(toolcall.BuildToolPrompt(req.Messages, req.Tools)),
+			ReasoningEffort: req.ReasoningEffort,
+			Incognito:       incognito,
+			Mode:            g.cfg.Mode,
 		}
 	}
 
@@ -868,6 +875,14 @@ func (g *Gateway) buildInput(prov provider.Provider, model string, req *openai.C
 	} else if prov.Type() == "runable" {
 		in.ChatID = g.getConv(toolcall.ConvKey(model, req.Messages)).chatID
 		in.Prompt = clamp(g.runablePrompt(model, req.Messages, true))
+	} else if prov.Type() == "geminiweb" {
+		// Gemini Web 不认 OpenAI 消息数组，也没有可复用的服务端会话 id：把整段
+		// 历史（含 system）压成一条 prompt，每次自带上下文。
+		p := toolcall.Flatten(req.Messages)
+		if sys := toolcall.SystemText(req.Messages); sys != "" {
+			p = sys + "\n\n" + p
+		}
+		in.Prompt = clamp(p)
 	} else {
 		in.Messages = req.Messages
 	}
@@ -950,7 +965,7 @@ func (g *Gateway) runChat(ctx context.Context, provName string, prov provider.Pr
 	limit := g.promptLimit(prov)
 
 	// Prompt-based providers need emulated tool calling.
-	if hasTools && prov.Type() == "runable" {
+	if hasTools && (prov.Type() == "runable" || prov.Type() == "geminiweb") {
 		stream, err := g.openStream(ctx, provName, prov, in)
 		if err != nil {
 			return nil, friendlyUpstreamErr(provName, limit, err)
@@ -1157,6 +1172,14 @@ func (g *Gateway) openStream(ctx context.Context, provName string, prov provider
 			if err != nil && tr != nil && tr.Unauthorized(err) {
 				if rerr := g.refreshToken(ctx, provName, tr, acc); rerr == nil {
 					stream, err = prov.StreamChat(ctx, acc, in)
+				}
+			}
+			// 上游在响应里轮换了 Cookie（geminiweb）：变了才落盘，重启后不必重新粘贴。
+			if err == nil && acc.Cookie != "" {
+				if cr, ok := prov.(provider.CookieRotator); ok && cr.RotatesCookie() {
+					if g.st.Cookie(provName, acc.Label, "") != acc.Cookie {
+						g.st.SetCookie(provName, acc.Label, acc.Cookie)
+					}
 				}
 			}
 			// runable 会话是用户手动粘贴的，过期时上游回 401/403：记账供面板预警。

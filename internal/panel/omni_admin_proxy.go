@@ -29,8 +29,8 @@ import (
 	"github.com/wuxianggujun/omnigate-panel/internal/panelauth"
 )
 
-// omniAdminKinds 允许代理的 OmniGate 管理子域（raccoon / trae）。
-var omniAdminKinds = map[string]bool{"raccoon": true, "trae": true}
+// omniAdminKinds 允许代理的 OmniGate 管理子域（raccoon / trae / geminiweb）。
+var omniAdminKinds = map[string]bool{"raccoon": true, "trae": true, "geminiweb": true}
 
 // omniAdminSubs 允许代理的子路径白名单。
 var omniAdminSubs = map[string]bool{

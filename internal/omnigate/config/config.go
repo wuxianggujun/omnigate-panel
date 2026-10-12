@@ -401,6 +401,8 @@ func (c *Config) applyDefaults() {
 		case "newapi":
 			// BaseURL 必填（每个 New API 站点不同，例如 https://api.justwoker.icu），
 			// 没有通用缺省，留空由 provider 自身报错。
+		case "geminiweb":
+			// 无 BaseURL：客户端固定打 gemini.google.com；账号凭证是 Google Cookie。
 		}
 	}
 }
@@ -419,7 +421,7 @@ func (c *Config) validate() error {
 		}
 		seen[p.Name] = true
 		switch p.Type {
-		case "runable", "openai", "raccoon", "trae", "newapi":
+		case "runable", "openai", "raccoon", "trae", "newapi", "geminiweb":
 		default:
 			return fmt.Errorf("provider %q: unknown type %q", p.Name, p.Type)
 		}

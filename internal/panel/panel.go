@@ -332,6 +332,7 @@ func (p *Panel) routes() {
 	// 打标/过滤/校验。前端不再直连 /omni/admin/*，普通 user 无需持有 api_key。
 	p.mux.HandleFunc("/panel/api/omni/admin/raccoon/", p.tenant(p.omniAdminProxy))
 	p.mux.HandleFunc("/panel/api/omni/admin/trae/", p.tenant(p.omniAdminProxy))
+	p.mux.HandleFunc("/panel/api/omni/admin/geminiweb/", p.tenant(p.omniAdminProxy))
 	p.mux.HandleFunc("POST /panel/api/login/start", p.tenant(p.loginStart))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/revive", p.tenant(p.accountRevive))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/disable", p.tenant(p.accountDisable))

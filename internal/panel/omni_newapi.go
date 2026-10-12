@@ -167,6 +167,46 @@ func (p *Panel) omniAccountRefresh(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, d)
 }
 
+// omniNewAPISetKeyReq 面板「补填聊天密钥」请求体。
+type omniNewAPISetKeyReq struct {
+	Provider string `json:"provider"`
+	Label    string `json:"label"`
+	APIKey   string `json:"api_key"`
+}
+
+// omniNewAPISetKey 更新某 New API 账号的聊天 API Key（sk-）。普通用户只能改自己的。
+func (p *Panel) omniNewAPISetKey(w http.ResponseWriter, r *http.Request) {
+	if p.cfg.OmniNewAPISetKey == nil {
+		writeErr(w, http.StatusNotImplemented, "omnigate not enabled")
+		return
+	}
+	var req omniNewAPISetKeyReq
+	if err := decodeBody(r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad_request")
+		return
+	}
+	req.Provider = strings.TrimSpace(req.Provider)
+	req.Label = strings.TrimSpace(req.Label)
+	req.APIKey = strings.TrimSpace(req.APIKey)
+	if req.Provider == "" || req.Label == "" {
+		writeErr(w, http.StatusBadRequest, "provider/label 不能为空")
+		return
+	}
+	if req.APIKey == "" {
+		writeErr(w, http.StatusBadRequest, "API Key 不能为空")
+		return
+	}
+	if !p.requireOmni(w, r, req.Provider, req.Label) {
+		return
+	}
+	if err := p.cfg.OmniNewAPISetKey(req.Provider, req.Label, req.APIKey); err != nil {
+		writeErr(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	log.Printf("panel: New API 更新聊天密钥 %s/%s", req.Provider, req.Label)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
 // setCaptureCORS 放开抓取端点的跨域（脚本跑在 New API 站点 origin 上）。
 func setCaptureCORS(w http.ResponseWriter) {
 	h := w.Header()

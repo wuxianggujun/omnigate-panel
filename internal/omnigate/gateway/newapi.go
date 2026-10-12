@@ -142,30 +142,43 @@ func (g *Gateway) NewAPICapture(ctx context.Context, stateID string, p NewAPICap
 		strings.TrimSpace(p.SessionCookie), p.ExpiresAt, name, userID, pend.apiKey), nil
 }
 
-// NewAPISetToken 允许手动粘贴 access_token / session（抓取失败时的兜底）。
-// 目前仅作为服务端能力保留，面板暂未暴露入口。
-func (g *Gateway) NewAPISetToken(ctx context.Context, providerName, label, accessToken, sid, apiKey string) (*NewAPILoginResult, error) {
-	np, err := g.newapiProvider(providerName)
-	if err != nil {
-		return nil, err
+// NewAPISetAPIKey updates an existing account's chat API key (sk-...). The key is
+// what /v1/chat/completions authenticates with, so an account added without one
+// (or with a wrong one) can be fixed here without a full browser re-capture.
+func (g *Gateway) NewAPISetAPIKey(providerName, label, apiKey string) error {
+	if _, err := g.newapiProvider(providerName); err != nil {
+		return err
 	}
-	access := strings.TrimSpace(accessToken)
-	if access == "" {
-		return nil, fmt.Errorf("access_token 不能为空")
-	}
+	label = strings.TrimSpace(label)
+	apiKey = strings.TrimSpace(apiKey)
 	if label == "" {
-		label = fmt.Sprintf("账号 %d", len(g.Accounts(providerName))+1)
+		return fmt.Errorf("label 不能为空")
 	}
-	name, userID := "", ""
-	sctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	if self, serr := np.Client().Self(sctx, access); serr == nil {
-		name = self.DisplayName
-		if self.UserID > 0 {
-			userID = fmt.Sprintf("%d", self.UserID)
+	if apiKey == "" {
+		return fmt.Errorf("API Key 不能为空")
+	}
+	g.accountsMu.Lock()
+	found := false
+	for _, a := range g.accounts[providerName] {
+		if a.Label == label {
+			a.APIKey = apiKey
+			found = true
+			break
 		}
 	}
-	cancel()
-	return g.upsertNewAPIAccount(providerName, label, access, strings.TrimSpace(sid), "", 0, name, userID, strings.TrimSpace(apiKey)), nil
+	g.accountsMu.Unlock()
+	if !found {
+		return fmt.Errorf("账号「%s」不存在", label)
+	}
+	// 持久化：保留 DynAccount 其余字段，只换 APIKey。
+	for _, d := range g.st.DynAccounts(providerName) {
+		if d.Label == label {
+			d.APIKey = apiKey
+			g.st.UpsertDynAccount(providerName, d)
+			break
+		}
+	}
+	return nil
 }
 
 func (g *Gateway) upsertNewAPIAccount(providerName, label, access, sid, cookie string, expiresAt int64, name, userID, apiKey string) *NewAPILoginResult {

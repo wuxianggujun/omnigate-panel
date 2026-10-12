@@ -882,6 +882,7 @@ function ogRowHtml(p, a) {
       : '') +
     (p.type === 'newapi'
       ? '<button class="xs ghost" data-src="omni" data-a="ogrefresh" data-prov="' + esc(p.name) + '" data-label="' + esc(label) + '" title="轮换该账号的会话 access_token">刷新</button>'
+        + '<button class="xs ghost" data-src="omni" data-a="ogkey" data-prov="' + esc(p.name) + '" data-label="' + esc(label) + '" title="设置/更新聊天用的 sk- 密钥">密钥</button>'
       : '') +
     '<button class="xs ghost danger" data-src="omni" data-a="ogremove" data-type="' + esc(p.type || '') + '" data-prov="' + esc(p.name) + '" data-label="' + esc(label) + '">移除</button>';
   return '<tr title="' + esc(p.name + ' / ' + label) + '">' +
@@ -1069,6 +1070,13 @@ $('accBody').addEventListener('click', async ev => {
         await api('omni/account/refresh', { method: 'POST', body: JSON.stringify({ provider: prov, label }) });
         toast('已刷新「' + label + '」的会话', 'ok');
         await refreshOmniBalances(true);
+      } else if (a === 'ogkey') {
+        const key = prompt('粘贴「' + label + '」在本站的聊天 API Key（sk-…）：', '');
+        if (key == null) return;
+        const k = key.trim();
+        if (!k) { toast('API Key 不能为空', 'err'); return; }
+        await api('omni/newapi/setkey', { method: 'POST', body: JSON.stringify({ provider: prov, label, api_key: k }) });
+        toast('已更新「' + label + '」的聊天密钥', 'ok');
       } else if (a === 'ogremove') {
         if (b.dataset.type && b.dataset.type !== 'raccoon') {
           // runable / openai 等账号是 omnigate.json 静态配置，须改配置后热生效。

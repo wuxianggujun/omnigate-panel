@@ -499,6 +499,7 @@ func main() {
 		pcfg.OmniNewAPIAuthorize = omni.NewAPIAuthorize
 		pcfg.OmniNewAPICapture = omni.NewAPICapture
 		pcfg.OmniNewAPICaptureStatus = omni.NewAPICaptureStatus
+		pcfg.OmniNewAPISetKey = omni.NewAPISetKey
 		pcfg.OmniRefresh = omni.NewAPIRefresh
 		// 面板 → OmniGate 管理端点代理：raccoon/TRAE 的授权/回调/账号列表/签到/
 		// 移除由面板注入 api_key 转发（多租户下普通 user 不持有网关 api_key）。

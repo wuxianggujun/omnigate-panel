@@ -147,10 +147,12 @@ type Config struct {
 	//	OmniNewAPIAuthorize  登记一次性 state，返回 {state, signin_url}
 	//	OmniNewAPICapture    脚本回传鉴权包（payload 为原始 JSON 体）→ 落库账号
 	//	OmniNewAPICaptureStatus 轮询 state 是否仍在等待
+	//	OmniNewAPISetKey     更新某账号的聊天 API Key（sk-）
 	//	OmniRefresh          统一刷新：轮换某 provider/账号的会话 access_token
 	OmniNewAPIAuthorize     func(provider, label, apiKey string) (any, error)
 	OmniNewAPICapture       func(state string, payload json.RawMessage) (any, error)
 	OmniNewAPICaptureStatus func(state string) (bool, error)
+	OmniNewAPISetKey        func(provider, label, apiKey string) error
 	OmniRefresh             func(provider, label string) (any, error)
 }
 
@@ -317,6 +319,8 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("OPTIONS /panel/api/omni/newapi/capture", p.omniNewAPICapturePreflight)
 	// 统一刷新：轮换 New API 账号的会话 access_token（单账号 / 整 provider）。
 	p.mux.HandleFunc("POST /panel/api/omni/account/refresh", p.tenant(p.omniAccountRefresh))
+	// 更新某账号的聊天 API Key（sk-）。
+	p.mux.HandleFunc("POST /panel/api/omni/newapi/setkey", p.tenant(p.omniNewAPISetKey))
 	// OmniGate 登录类管理端点代理（raccoon/trae 的 authorize/callback/token/
 	// accounts/checkin/remove）：面板注入 api_key 转发到进程内 OmniGate，并按归属
 	// 打标/过滤/校验。前端不再直连 /omni/admin/*，普通 user 无需持有 api_key。

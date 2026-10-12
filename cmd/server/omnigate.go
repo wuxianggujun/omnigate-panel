@@ -723,3 +723,15 @@ func (m *omniManager) NewAPIRefresh(provider, label string) (any, error) {
 	}
 	return map[string]any{"results": res}, nil
 }
+
+// NewAPISetKey 更新某 New API 账号的聊天 API Key（sk-）。
+func (m *omniManager) NewAPISetKey(provider, label, apiKey string) error {
+	rt := m.cur.Load()
+	if rt == nil {
+		return errors.New("omnigate 未启用")
+	}
+	if rt.gw.ProviderType(provider) != "newapi" {
+		return fmt.Errorf("provider %q 不是 New API", provider)
+	}
+	return rt.gw.NewAPISetAPIKey(provider, label, apiKey)
+}

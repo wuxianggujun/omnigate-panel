@@ -821,7 +821,10 @@ function ogBalKey(prov, label) { return prov + '\u0000' + label; }
 function ogRowHtml(p, a) {
   const label = a.label || '';
   const title = a.name || label || '(未命名)';
-  const ogAuthBad = !!a.auth_invalid;
+  // 余额缓存里也带 auth_invalid：默认列表走的是不查余额的快速路径，那条路径不标
+  // 授权失效，靠 60s 一次的余额刷新补齐。
+  const bi = omniBalInfo[ogBalKey(p.name, label)] || {};
+  const ogAuthBad = !!(a.auth_invalid || bi.auth_invalid);
   const status = ogAuthBad
     ? '<span class="tag bad">授权失效</span>'
     : (a.has_token
@@ -830,7 +833,7 @@ function ogRowHtml(p, a) {
   // 授权失效角标：raccoon / trae 的 refresh_token 被上游吊销或过期后，自动续期失败，
   // 只能重新登录。不标出来面板会一直显示「已授权」，但调用全是 401。
   const ogAuthTag = ogAuthBad
-    ? ' <span class="tag bad" title="' + esc(a.auth_error || 'access_token 已失效且自动刷新失败，请重新登录该账号') + '">⚠ 需重新登录</span>'
+    ? ' <span class="tag bad" title="' + esc(a.auth_error || bi.auth_error || 'access_token 已失效且自动刷新失败，请重新登录该账号') + '">⚠ 需重新登录</span>'
     : '';
   // 限流冷却角标：上游对某账号回 429 后网关会冷却它并优先绕开，这里把剩余时间
   // 如实显示，避免「明明有账号却报无可用账号」时看不出原因。
@@ -867,7 +870,6 @@ function ogRowHtml(p, a) {
     ogExpTag = ' <span class="tag hot" title="' + esc(t) + '">快过期 ' + a.credits_expiring
       + (ogExpLeft > 0 ? ' · ' + dur(ogExpLeft) : '') + '</span>';
   }
-  const bi = omniBalInfo[ogBalKey(p.name, label)] || {};
   const avail = bi.available != null ? bi.available : a.available;
   const berr = bi.balance_error || a.balance_error;
   let balHtml;
@@ -965,7 +967,12 @@ async function loadOverview(quiet) {
     // 否则「加了账号但总数还是 WorkBuddy 的 23」，很容易让人以为账号没加进去。
     const omniList = await loadOmniAccounts();
     const ogAccts = [];
-    (omniList || []).forEach(p => (p.accounts || []).forEach(a => ogAccts.push(a)));
+    (omniList || []).forEach(p => (p.accounts || []).forEach(a => {
+      // 默认列表不带 auth_invalid，用余额缓存补齐，否则顶部「健康」数会把已失效的
+      // 账号也算进去（看着有号，实际调用全 401）。
+      const bi = omniBalInfo[ogBalKey(p.name, a.label)] || {};
+      ogAccts.push(bi.auth_invalid ? Object.assign({}, a, { auth_invalid: true }) : a);
+    }));
     const ogTotal = ogAccts.length;
     const ogAvail = ogAccts.filter(ogUsable).length;
     // 注意：局部变量不能叫 ogCooling——它会遮蔽同名函数 ogCooling(a)，导致
@@ -4185,7 +4192,12 @@ async function refreshOmniBalances(force) {
     const provs = Array.isArray(data.providers) ? data.providers : [];
     const next = {};
     provs.forEach(p => (p.accounts || []).forEach(a => {
-      next[ogBalKey(p.name, a.label)] = { available: a.available, balance_error: a.balance_error };
+      next[ogBalKey(p.name, a.label)] = {
+        available: a.available, balance_error: a.balance_error,
+        // 默认列表走不查余额的快速路径、不标授权失效；这里把余额路径的判定缓存下来，
+        // 供账号行渲染与顶部统计使用。
+        auth_invalid: a.auth_invalid, auth_error: a.auth_error,
+      };
     }));
     omniBalInfo = next;
   } catch (e) { /* OmniGate 未启用或无余额能力 */ }

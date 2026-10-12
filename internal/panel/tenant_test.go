@@ -391,3 +391,85 @@ func TestOmniAdminProxyRejectsUnknownSubpath(t *testing.T) {
 		t.Fatal("白名单外子路径不应被转发")
 	}
 }
+
+// fingerprint 改的是全局供应商设置（与 /panel/api/omni/config 同级）：普通 user
+// 即使猜到路径也必须 403，绝不转发——否则可越权篡改全局 TLS 指纹。
+func TestOmniAdminProxyFingerprintAdminOnly(t *testing.T) {
+	called := false
+	p := New(Config{Version: "test", APIKey: "k",
+		OmniAdmin: http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true })})
+	r := reqAs("alice", panelauth.RoleUser)
+	r.Method = "POST"
+	r.URL.Path = "/panel/api/omni/admin/geminiweb/fingerprint"
+	w := httptest.NewRecorder()
+	p.omniAdminProxy(w, r)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("普通 user 改全局指纹应 403，得到 %d", w.Code)
+	}
+	if called {
+		t.Fatal("被拒绝的请求不应转发到 OmniGate")
+	}
+}
+
+// 多段子路径（如 chats/delete）必须整段转发，而不是只转发首段。
+func TestOmniAdminProxyForwardsMultiSegmentSubpath(t *testing.T) {
+	var got string
+	p := New(Config{Version: "test", APIKey: "k",
+		OmniAdmin: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			got = r.URL.Path
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		})})
+	r := reqAs("admin", panelauth.RoleAdmin)
+	r.Method = "POST"
+	r.URL.Path = "/panel/api/omni/admin/geminiweb/chats/delete"
+	w := httptest.NewRecorder()
+	p.omniAdminProxy(w, r)
+	if got != "/admin/geminiweb/chats/delete" {
+		t.Fatalf("转发路径 = %q want /admin/geminiweb/chats/delete", got)
+	}
+}
+
+// 账号级运维（gems / chats / keepalive）：普通 user 不带 label 会落到池里第一个
+// 账号，因此空 label 也必须 403（仅 admin/viewer 放行），绝不转发。
+func TestOmniAdminProxyAccountOpsRequireOwnership(t *testing.T) {
+	for _, sub := range []string{"gems", "chats", "chats/delete", "chats/cleanup", "keepalive"} {
+		t.Run(sub, func(t *testing.T) {
+			called := false
+			p := New(Config{Version: "test", APIKey: "k",
+				OmniAdmin: http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true })})
+			r := reqAs("alice", panelauth.RoleUser)
+			r.Method = "POST"
+			r.URL.Path = "/panel/api/omni/admin/geminiweb/" + sub
+			w := httptest.NewRecorder()
+			p.omniAdminProxy(w, r)
+			if w.Code != http.StatusForbidden {
+				t.Fatalf("普通 user 无归属应 403，得到 %d", w.Code)
+			}
+			if called {
+				t.Fatal("被拒绝的请求不应转发")
+			}
+		})
+	}
+}
+
+// 归属正确的 label 才放行（普通 user 运维自己的账号）。
+func TestOmniAdminProxyAccountOpsAllowOwnedLabel(t *testing.T) {
+	called := false
+	p := New(Config{Version: "test", APIKey: "k",
+		OmniAdmin: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			called = true
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		})})
+	p.ownership.Set(omniOwnerKey("geminiweb", "acc1"), "alice")
+	r := reqAs("alice", panelauth.RoleUser)
+	r.Method = "GET"
+	r.URL.Path = "/panel/api/omni/admin/geminiweb/gems"
+	r.URL.RawQuery = "provider=geminiweb&label=acc1"
+	w := httptest.NewRecorder()
+	p.omniAdminProxy(w, r)
+	if !called {
+		t.Fatalf("自有账号的 gems 应被转发，得到 %d", w.Code)
+	}
+}

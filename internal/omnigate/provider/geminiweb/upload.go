@@ -14,6 +14,7 @@ import (
 
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/openai"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/provider"
+	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/provider/geminiweb/fingerprint"
 )
 
 // contentPushURL is where Gemini Web accepts attachment uploads. The response
@@ -35,7 +36,7 @@ const (
 // upload protocol the moment any X-Goog-Upload-* header is present, and answers
 // "Multipart body does not contain 2 or 3 parts" — the multipart form only works
 // with the plain Origin/Referer/X-Tenant-Id/Push-ID combination.
-func (c *Client) uploadAttachment(ctx context.Context, jar *cookieJar, pushID string, att openai.Attachment) (fileRef, bool) {
+func (c *Client) uploadAttachment(ctx context.Context, jar *fingerprint.Jar, pushID string, att openai.Attachment) (fileRef, bool) {
 	data, filename, mime, ok := c.attachmentBytes(ctx, att)
 	if !ok {
 		return fileRef{}, false
@@ -72,7 +73,7 @@ func (c *Client) uploadAttachment(ctx context.Context, jar *cookieJar, pushID st
 	req.Header.Set("Push-ID", pushID)
 	req.Header.Set("User-Agent", provider.BrowserUA)
 	req.Header.Set("Accept-Language", provider.AcceptLanguage)
-	if h := jar.header(); h != "" {
+	if h := jar.CookieHeader(); h != "" {
 		req.Header.Set("Cookie", h)
 	}
 
@@ -81,7 +82,7 @@ func (c *Client) uploadAttachment(ctx context.Context, jar *cookieJar, pushID st
 		return fileRef{}, false
 	}
 	defer resp.Body.Close()
-	jar.updateFrom(resp)
+	jar.UpdateFromResponse(resp)
 	if resp.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
 		return fileRef{}, false

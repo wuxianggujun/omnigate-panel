@@ -22,6 +22,7 @@ import (
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/openai"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/provider"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/provider/geminiweb"
+	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/provider/geminiweb/fingerprint"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/provider/newapi"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/provider/openaibackend"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/provider/raccoon"
@@ -252,6 +253,32 @@ func New(cfg *config.Config, st *state.State, log *logx.Logger, opts ...Option) 
 			gw.SetImageStore(imagegen.NewStore(filepath.Join(cfg.DataDir, "generated_images")))
 			// An attachment that fails to upload must not disappear silently.
 			gw.SetLogger(g.log.Warn)
+			// Anti-detection / protocol-masquerade layer (ported from gemini2api):
+			// dynamic Chrome headers, TLS ClientHello impersonation, request jitter,
+			// a persistent cookie store, and background version sync.
+			if fp := cfg.Fingerprint; fp != nil {
+				rt := fingerprint.NewRuntime(fingerprint.Options{
+					ConfigPath:          fp.ConfigPath,
+					CookieDir:           fp.CookieDir,
+					JitterEnabled:       fp.JitterEnabled,
+					VersionSyncEnabled:  fp.VersionSyncEnabled,
+					VersionSyncInterval: time.Duration(fp.VersionSyncIntervalHours) * time.Hour,
+					TLSEnabled:          fp.TLSImpersonationEnabled(),
+					Logf:                g.log.Warn,
+				})
+				gw.SetFingerprint(rt)
+				gw.StartFingerprintSync(context.Background())
+			}
+			// Opt-in background keep-alive (gclient.py's _auto_refresh_loop):
+			// rotate each account's cookie and rebuild its session so an idle
+			// pool stays warm. Off by default — on-demand refresh already covers
+			// an active gateway.
+			if m := cfg.Maintenance; m != nil && m.KeepaliveEnabled {
+				provName := p.Name
+				gw.StartKeepAlive(context.Background(),
+					time.Duration(m.KeepaliveIntervalMinutes)*time.Minute,
+					func() []*provider.Account { return g.Accounts(provName) })
+			}
 			prov = gw
 		default:
 			return nil, fmt.Errorf("provider %q: unknown type %q", p.Name, p.Type)

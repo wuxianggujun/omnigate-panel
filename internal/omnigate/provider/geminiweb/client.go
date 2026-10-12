@@ -11,12 +11,13 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/provider"
+	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/provider/geminiweb/fingerprint"
 	"github.com/wuxianggujun/omnigate-panel/internal/outbound"
 )
 
@@ -59,10 +60,62 @@ var (
 // Client talks to the Gemini Web frontend endpoints.
 type Client struct {
 	http *http.Client
+	// base is the concrete transport that SetProxy / SetProxySelector mutate and
+	// that the TLS impersonator attaches to; http wraps it (decompression layer,
+	// and the proxy-pool failover wrapper when a selector is installed).
+	base   *http.Transport
+	dialer *net.Dialer
+	// fp is the anti-detection runtime (header builder / TLS impersonator /
+	// jitter / cookie persistence). nil falls back to a shared in-memory default.
+	fp *fingerprint.Runtime
 	// uploadURL overrides where attachments are posted; empty means
 	// contentPushURL. It is a field so a test can point the upload at a local
 	// server without touching the real endpoint.
 	uploadURL string
+	// batchURL overrides the batchexecute endpoint; empty means batchexecuteURL.
+	// It is a field so a test can point the RPCs (status / gems / chats) at a
+	// local server without touching the real endpoint.
+	batchURL string
+}
+
+// defaultFP is the shared fallback runtime used when a Client was built without
+// one (e.g. a bare &Client{} in a test, or before SetFingerprint). It carries the
+// built-in fingerprint, jitter off, TLS off, and no persistence.
+var (
+	defaultFPOnce sync.Once
+	defaultFP     *fingerprint.Runtime
+)
+
+func defaultRuntime() *fingerprint.Runtime {
+	defaultFPOnce.Do(func() {
+		defaultFP = fingerprint.NewRuntime(fingerprint.Options{})
+	})
+	return defaultFP
+}
+
+// runtime returns the client's fingerprint runtime, falling back to the shared
+// default so callers never have to nil-check.
+func (c *Client) runtime() *fingerprint.Runtime {
+	if c != nil && c.fp != nil {
+		return c.fp
+	}
+	return defaultRuntime()
+}
+
+// SetFingerprint attaches an anti-detection runtime: its header builder drives
+// every request's headers, its TLS impersonator (when enabled) takes over the
+// direct HTTPS handshake, and its jitter paces the requests. A nil runtime (or
+// one with TLS disabled) leaves the transport's standard handshake in place.
+func (c *Client) SetFingerprint(rt *fingerprint.Runtime) {
+	if c == nil {
+		return
+	}
+	c.fp = rt
+	if rt == nil || c.base == nil {
+		return
+	}
+	rt.TLS().Apply(c.base, c.dialer)
+	c.base.CloseIdleConnections()
 }
 
 // uploadEndpoint is the attachment upload URL.
@@ -73,141 +126,83 @@ func (c *Client) uploadEndpoint() string {
 	return contentPushURL
 }
 
+// batchEndpoint is the batchexecute RPC URL.
+func (c *Client) batchEndpoint() string {
+	if c.batchURL != "" {
+		return c.batchURL
+	}
+	return batchexecuteURL
+}
+
 // NewClient builds a client with a direct transport; SetProxy / SetProxySelector
-// re-route it.
+// re-route it, and SetFingerprint layers the anti-detection runtime on top.
 func NewClient() *Client {
-	return &Client{
-		http: &http.Client{
-			Transport: &http.Transport{
-				DialContext:           (&net.Dialer{Timeout: 20 * time.Second}).DialContext,
-				ResponseHeaderTimeout: 180 * time.Second,
-				ForceAttemptHTTP2:     true,
-			},
-		},
+	dialer := &net.Dialer{Timeout: 20 * time.Second}
+	base := &http.Transport{
+		DialContext:           dialer.DialContext,
+		ResponseHeaderTimeout: 180 * time.Second,
+		ForceAttemptHTTP2:     true,
+	}
+	c := &Client{base: base, dialer: dialer, fp: defaultRuntime()}
+	c.rebuildHTTP()
+	return c
+}
+
+// rebuildHTTP rebuilds the outer http.Client so it wraps the current base
+// transport with the decompression layer. The fingerprint headers advertise
+// br/zstd, so Go will not auto-decompress and the wrapper must.
+func (c *Client) rebuildHTTP() {
+	if c == nil || c.base == nil {
+		return
+	}
+	c.http = &http.Client{
+		Transport: fingerprint.DecompressTransport{Base: c.base},
 	}
 }
 
 // SetProxy routes this client's outbound requests through u (nil = direct).
 func (c *Client) SetProxy(u *url.URL) {
-	if u == nil {
+	if c == nil || c.base == nil || u == nil {
 		return
 	}
-	if tr, ok := c.http.Transport.(*http.Transport); ok {
-		tr.Proxy = http.ProxyURL(u)
-		tr.CloseIdleConnections()
-	}
+	c.base.Proxy = http.ProxyURL(u)
+	c.base.CloseIdleConnections()
 }
 
 // SetProxySelector routes this client's outbound requests through the proxy pool
 // selected per request by sel (nil = direct).
 func (c *Client) SetProxySelector(sel outbound.Selector) {
-	if c == nil || c.http == nil {
+	if c == nil || c.base == nil || sel == nil {
 		return
 	}
-	base, ok := c.http.Transport.(*http.Transport)
-	if !ok {
-		return
+	if c.http == nil {
+		c.rebuildHTTP()
 	}
-	c.http.Transport = outbound.WrapTransport(base, sel)
+	c.http.Transport = fingerprint.DecompressTransport{Base: outbound.WrapTransport(c.base, sel)}
 }
 
-// setNavHeaders stamps a document navigation (the Google → Gemini handshake).
+// setNavHeaders stamps a document navigation (the Google → Gemini handshake)
+// using the fingerprint header builder, so UA / Sec-CH-UA / Sec-Fetch-* stay
+// consistent with the configured Chrome version.
 func (c *Client) setNavHeaders(req *http.Request) {
-	req.Header.Set("User-Agent", provider.BrowserUA)
+	c.runtime().Headers().Apply(req, req.Method, "")
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-	req.Header.Set("Accept-Language", provider.AcceptLanguage)
-	req.Header.Set("Sec-Fetch-Site", "none")
-	req.Header.Set("Sec-Fetch-Mode", "navigate")
-	req.Header.Set("Sec-Fetch-Dest", "document")
 }
 
 // setXHRHeaders stamps a same-origin XHR (the batchexecute / StreamGenerate
 // calls). accept overrides the default Accept when non-empty.
 func (c *Client) setXHRHeaders(req *http.Request, accept string) {
-	req.Header.Set("User-Agent", provider.BrowserUA)
+	c.runtime().Headers().Apply(req, req.Method, "")
 	if accept == "" {
 		accept = "*/*"
 	}
 	req.Header.Set("Accept", accept)
-	req.Header.Set("Accept-Language", provider.AcceptLanguage)
-	req.Header.Set("Sec-Fetch-Site", "same-origin")
-	req.Header.Set("Sec-Fetch-Mode", "cors")
-	req.Header.Set("Sec-Fetch-Dest", "empty")
-	req.Header.Set("Origin", "https://gemini.google.com")
-	req.Header.Set("Referer", "https://gemini.google.com/app")
 }
 
-// ---------------------------------------------------------------------------
-// cookie jar
-
-// cookieJar keeps an account's Google cookies and merges rotations the upstream
-// returns on any response (__Secure-1PSIDTS rotates; __Secure-1PSID is stable).
-type cookieJar struct {
-	vals map[string]string
-}
-
-func parseCookies(raw string) *cookieJar {
-	j := &cookieJar{vals: map[string]string{}}
-	for _, part := range strings.Split(raw, ";") {
-		part = strings.TrimSpace(part)
-		if part == "" {
-			continue
-		}
-		k, v, ok := strings.Cut(part, "=")
-		if !ok {
-			continue
-		}
-		k = strings.TrimSpace(k)
-		if k == "" {
-			continue
-		}
-		j.vals[k] = strings.TrimSpace(v)
-	}
-	return j
-}
-
-func (j *cookieJar) get(k string) string {
-	if j == nil {
-		return ""
-	}
-	return j.vals[k]
-}
-
-func (j *cookieJar) set(k, v string) {
-	if j == nil || k == "" || v == "" {
-		return
-	}
-	j.vals[k] = v
-}
-
-// header renders the jar as a Cookie header value (sorted for stability).
-func (j *cookieJar) header() string {
-	if j == nil || len(j.vals) == 0 {
-		return ""
-	}
-	names := make([]string, 0, len(j.vals))
-	for k := range j.vals {
-		names = append(names, k)
-	}
-	sort.Strings(names)
-	parts := make([]string, 0, len(names))
-	for _, k := range names {
-		parts = append(parts, k+"="+j.vals[k])
-	}
-	return strings.Join(parts, "; ")
-}
-
-// updateFrom merges Set-Cookie values from a response.
-func (j *cookieJar) updateFrom(resp *http.Response) {
-	if j == nil || resp == nil {
-		return
-	}
-	for _, ck := range resp.Cookies() {
-		if ck.Name == "" {
-			continue
-		}
-		j.set(ck.Name, ck.Value)
-	}
+// pace applies the configured inter-request jitter for a scenario profile
+// (navigation / api_call / cookie_rotate). It is a no-op when jitter is off.
+func (c *Client) pace(ctx context.Context, profile string) {
+	c.runtime().Jitter().Apply(ctx, profile)
 }
 
 // ---------------------------------------------------------------------------
@@ -215,7 +210,7 @@ func (j *cookieJar) updateFrom(resp *http.Response) {
 
 // acquire walks the Google → Gemini handshake, collecting rotated cookies and
 // extracting the SNlM0e token and upload push id the generate endpoint needs.
-func (c *Client) acquire(ctx context.Context, jar *cookieJar) (token, pushID string, err error) {
+func (c *Client) acquire(ctx context.Context, jar *fingerprint.Jar) (token, pushID string, err error) {
 	var body string
 	for _, u := range []string{googleHomeURL, geminiHomeURL, geminiAppENURL} {
 		body, err = c.getPage(ctx, jar, u)
@@ -240,21 +235,22 @@ func (c *Client) acquire(ctx context.Context, jar *cookieJar) (token, pushID str
 }
 
 // getPage fetches one HTML page, merging rotated cookies into jar.
-func (c *Client) getPage(ctx context.Context, jar *cookieJar, u string) (string, error) {
+func (c *Client) getPage(ctx context.Context, jar *fingerprint.Jar, u string) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return "", err
 	}
 	c.setNavHeaders(req)
-	if h := jar.header(); h != "" {
+	if h := jar.CookieHeader(); h != "" {
 		req.Header.Set("Cookie", h)
 	}
+	c.pace(ctx, "navigation")
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return "", err
 	}
 	defer resp.Body.Close()
-	jar.updateFrom(resp)
+	jar.UpdateFromResponse(resp)
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 	if resp.StatusCode >= 400 {
 		return "", &UpstreamError{Status: resp.StatusCode, Message: clip(string(raw))}
@@ -265,7 +261,7 @@ func (c *Client) getPage(ctx context.Context, jar *cookieJar, u string) (string,
 // rotateCookies asks Google to rotate __Secure-1PSIDTS. This is ordinary
 // credential maintenance (the same call the browser makes), invoked on demand
 // when a session has gone stale — not a background keep-alive loop.
-func (c *Client) rotateCookies(ctx context.Context, jar *cookieJar) error {
+func (c *Client) rotateCookies(ctx context.Context, jar *fingerprint.Jar) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, rotateCookiesURL,
 		strings.NewReader(`[000,"-0000000000000000000"]`))
 	if err != nil {
@@ -274,15 +270,16 @@ func (c *Client) rotateCookies(ctx context.Context, jar *cookieJar) error {
 	c.setXHRHeaders(req, "*/*")
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Origin", "https://accounts.google.com")
-	if h := jar.header(); h != "" {
+	if h := jar.CookieHeader(); h != "" {
 		req.Header.Set("Cookie", h)
 	}
+	c.pace(ctx, "cookie_rotate")
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
-	jar.updateFrom(resp)
+	jar.UpdateFromResponse(resp)
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode >= 400 {
 		return &UpstreamError{Status: resp.StatusCode, Message: "RotateCookies 失败"}
@@ -292,7 +289,7 @@ func (c *Client) rotateCookies(ctx context.Context, jar *cookieJar) error {
 
 // status calls otAQ7b (GetUserStatus) to learn which concrete models the account
 // currently has, keyed by family.
-func (c *Client) status(ctx context.Context, jar *cookieJar, sessionToken string) (map[string]string, error) {
+func (c *Client) status(ctx context.Context, jar *fingerprint.Jar, sessionToken string) (map[string]string, error) {
 	raw, err := c.batchexecute(ctx, jar, sessionToken, "otAQ7b", "[]")
 	if err != nil {
 		return nil, err
@@ -302,7 +299,7 @@ func (c *Client) status(ctx context.Context, jar *cookieJar, sessionToken string
 
 // batchexecute performs one generic RPC, reusing the heartbeat URL params and
 // headers template.
-func (c *Client) batchexecute(ctx context.Context, jar *cookieJar, sessionToken, rpcID, payload string) (string, error) {
+func (c *Client) batchexecute(ctx context.Context, jar *fingerprint.Jar, sessionToken, rpcID, payload string) (string, error) {
 	if strings.TrimSpace(sessionToken) == "" {
 		return "", &UpstreamError{Status: 401, Message: "缺少会话 token"}
 	}
@@ -318,7 +315,7 @@ func (c *Client) batchexecute(ctx context.Context, jar *cookieJar, sessionToken,
 	q.Set("source-path", "/app")
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		batchexecuteURL+"?"+q.Encode(), strings.NewReader(form.Encode()))
+		c.batchEndpoint()+"?"+q.Encode(), strings.NewReader(form.Encode()))
 	if err != nil {
 		return "", err
 	}
@@ -327,15 +324,16 @@ func (c *Client) batchexecute(ctx context.Context, jar *cookieJar, sessionToken,
 	req.Header.Set("x-goog-ext-525001261-jspb", "[1,null,null,null,null,null,null,null,[4]]")
 	req.Header.Set("x-goog-ext-73010989-jspb", "[0]")
 	req.Header.Set("X-Same-Domain", "1")
-	if h := jar.header(); h != "" {
+	if h := jar.CookieHeader(); h != "" {
 		req.Header.Set("Cookie", h)
 	}
+	c.pace(ctx, "api_call")
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return "", err
 	}
 	defer resp.Body.Close()
-	jar.updateFrom(resp)
+	jar.UpdateFromResponse(resp)
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 	if resp.StatusCode >= 400 {
 		return "", &UpstreamError{Status: resp.StatusCode, Message: clip(string(raw))}
@@ -345,7 +343,7 @@ func (c *Client) batchexecute(ctx context.Context, jar *cookieJar, sessionToken,
 
 // generate posts one turn to StreamGenerate and returns the raw response so the
 // caller can stream it.
-func (c *Client) generate(ctx context.Context, jar *cookieJar, sessionToken, sessionUUID, prompt, model, convID string, files []fileRef, thinking bool) (*http.Response, error) {
+func (c *Client) generate(ctx context.Context, jar *fingerprint.Jar, sessionToken, sessionUUID, prompt, model, convID string, files []fileRef, thinking bool) (*http.Response, error) {
 	if strings.TrimSpace(sessionToken) == "" {
 		return nil, &UpstreamError{Status: 401, Message: "缺少会话 token"}
 	}
@@ -377,14 +375,14 @@ func (c *Client) generate(ctx context.Context, jar *cookieJar, sessionToken, ses
 	for k, v := range extra {
 		req.Header.Set(k, v)
 	}
-	if h := jar.header(); h != "" {
+	if h := jar.CookieHeader(); h != "" {
 		req.Header.Set("Cookie", h)
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, err
 	}
-	jar.updateFrom(resp)
+	jar.UpdateFromResponse(resp)
 	if resp.StatusCode >= 400 {
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		resp.Body.Close()
@@ -412,7 +410,7 @@ const (
 // cross-domain hop, which turns the followed request into a 403. So the first
 // hop is taken *without* following redirects, and its Location is re-fetched with
 // the cookie.
-func (c *Client) downloadImage(ctx context.Context, jar *cookieJar, rawURL string) ([]byte, string) {
+func (c *Client) downloadImage(ctx context.Context, jar *fingerprint.Jar, rawURL string) ([]byte, string) {
 	tail := rawURL
 	if i := strings.LastIndex(rawURL, "/"); i >= 0 {
 		tail = rawURL[i+1:]
@@ -444,7 +442,7 @@ func (c *Client) downloadImage(ctx context.Context, jar *cookieJar, rawURL strin
 
 // imageRequest issues one GET for an image. follow=false returns the first
 // redirect instead of chasing it (see downloadImage).
-func (c *Client) imageRequest(ctx context.Context, jar *cookieJar, u string, follow bool) (*http.Response, error) {
+func (c *Client) imageRequest(ctx context.Context, jar *fingerprint.Jar, u string, follow bool) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return nil, err
@@ -453,7 +451,7 @@ func (c *Client) imageRequest(ctx context.Context, jar *cookieJar, u string, fol
 	req.Header.Set("Accept-Language", provider.AcceptLanguage)
 	req.Header.Set("Accept", "image/avif,image/webp,image/apng,image/*,*/*;q=0.8")
 	req.Header.Set("Referer", imageReferer)
-	if h := jar.header(); h != "" {
+	if h := jar.CookieHeader(); h != "" {
 		req.Header.Set("Cookie", h)
 	}
 	if follow {

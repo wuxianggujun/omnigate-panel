@@ -32,14 +32,26 @@ import (
 // omniAdminKinds 允许代理的 OmniGate 管理子域（raccoon / trae / geminiweb）。
 var omniAdminKinds = map[string]bool{"raccoon": true, "trae": true, "geminiweb": true}
 
-// omniAdminSubs 允许代理的子路径白名单。
+// omniAdminSubs 允许代理的子路径白名单（多段子路径按首段匹配）。
 var omniAdminSubs = map[string]bool{
-	"authorize": true,
-	"callback":  true,
-	"token":     true,
-	"accounts":  true,
-	"checkin":   true,
-	"remove":    true,
+	"authorize":   true,
+	"callback":    true,
+	"token":       true,
+	"accounts":    true,
+	"checkin":     true,
+	"remove":      true,
+	"fingerprint": true,
+	"gems":        true,
+	"chats":       true,
+	"keepalive":   true,
+}
+
+// firstSeg 返回子路径的首段（"chats/delete" → "chats"）。
+func firstSeg(sub string) string {
+	if i := strings.IndexByte(sub, '/'); i >= 0 {
+		return sub[:i]
+	}
+	return sub
 }
 
 // captureWriter 缓冲下游 handler 的响应（状态码 + 体），供代理解析后再写出。
@@ -72,8 +84,16 @@ func (p *Panel) omniAdminProxy(w http.ResponseWriter, r *http.Request) {
 	}
 	rest := strings.TrimPrefix(r.URL.Path, "/panel/api/omni/admin/")
 	kind, sub, ok := strings.Cut(rest, "/")
-	if !ok || !omniAdminKinds[kind] || !omniAdminSubs[sub] {
+	// sub 可能是多段（如 chats/delete）：白名单只看首段，转发保留完整子路径。
+	if !ok || !omniAdminKinds[kind] || !omniAdminSubs[firstSeg(sub)] {
 		writeErr(w, http.StatusNotFound, "not_found")
+		return
+	}
+
+	// fingerprint 改的是全局供应商设置（与 /panel/api/omni/config 同级），只允许
+	// 管理员读写；普通 user / viewer 即使猜到路径也不能改全局 TLS 指纹。
+	if sub == "fingerprint" && roleOf(r) != panelauth.RoleAdmin {
+		writeErr(w, http.StatusForbidden, "admin_required")
 		return
 	}
 
@@ -89,7 +109,7 @@ func (p *Panel) omniAdminProxy(w http.ResponseWriter, r *http.Request) {
 
 	// 归属守卫：authorize/token/callback 会新增账号 → 先确认 label 未被别人占用；
 	// checkin/remove 是既有账号操作 → 必须已经属于自己。
-	switch sub {
+	switch firstSeg(sub) {
 	case "authorize", "token", "callback":
 		if label != "" && !p.claimOmniLabel(r, provider, label) {
 			writeErr(w, http.StatusConflict, "账号名「"+label+"」已被其他用户占用，请换一个")
@@ -97,6 +117,13 @@ func (p *Panel) omniAdminProxy(w http.ResponseWriter, r *http.Request) {
 		}
 	case "checkin", "remove":
 		if label != "" && !p.requireOmni(w, r, provider, label) {
+			return
+		}
+	case "gems", "chats", "keepalive":
+		// 账号级运维（自定义 Gem / 会话历史 / 保活）：label 必须属于调用者。
+		// 这里不跳过空 label —— 空 label 会落到「池里第一个账号」，普通 user
+		// 若不带 label 就能操作别人的账号，所以空 label 仅 admin/viewer 放行。
+		if !p.requireOmni(w, r, provider, label) {
 			return
 		}
 	}

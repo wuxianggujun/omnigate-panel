@@ -880,6 +880,11 @@ function ogRowHtml(p, a) {
     ((p.type === 'raccoon' || p.type === 'newapi' || p.type === 'geminiweb')
       ? '<button class="xs ghost" data-src="omni" data-a="ogcheckin" data-prov="' + esc(p.name) + '" data-label="' + esc(label) + '">' + (p.type === 'geminiweb' ? '验活' : '签到') + '</button>'
       : '') +
+    (p.type === 'geminiweb'
+      ? '<button class="xs ghost" data-src="omni" data-a="ogchats" data-prov="' + esc(p.name) + '" data-label="' + esc(label) + '" title="管理该账号在 Gemini 网页端的会话（查看 / 删除 / 清理旧会话）">会话</button>'
+        + '<button class="xs ghost" data-src="omni" data-a="oggems" data-prov="' + esc(p.name) + '" data-label="' + esc(label) + '" title="管理该账号的自定义 Gem（人格）">Gems</button>'
+        + '<button class="xs ghost" data-src="omni" data-a="ogkeepalive" data-prov="' + esc(p.name) + '" data-label="' + esc(label) + '" title="主动轮换 Cookie 并重建会话，避免会话到期后首次请求失败">保活</button>'
+      : '') +
     (p.type === 'newapi'
       ? '<button class="xs ghost" data-src="omni" data-a="ogrefresh" data-prov="' + esc(p.name) + '" data-label="' + esc(label) + '" title="轮换该账号的会话 access_token">刷新</button>'
         + '<button class="xs ghost" data-src="omni" data-a="ogkey" data-prov="' + esc(p.name) + '" data-label="' + esc(label) + '" title="设置/更新聊天用的 sk- 密钥">密钥</button>'
@@ -1077,6 +1082,15 @@ $('accBody').addEventListener('click', async ev => {
         if (!k) { toast('API Key 不能为空', 'err'); return; }
         await api('omni/newapi/setkey', { method: 'POST', body: JSON.stringify({ provider: prov, label, api_key: k }) });
         toast('已更新「' + label + '」的聊天密钥', 'ok');
+      } else if (a === 'ogchats') {
+        openGChats(prov, label);
+      } else if (a === 'oggems') {
+        openGems(prov, label);
+      } else if (a === 'ogkeepalive') {
+        const d = await apiAbs('/omni/admin/geminiweb/keepalive', { method: 'POST', body: JSON.stringify({ provider: prov, label }) });
+        const results = (d && d.results) || [];
+        const parts = results.map(x => x.label + '：' + (x.error ? ('失败 ' + x.error) : (x.msg || (x.success ? '成功' : '未成功'))));
+        toast(parts.join('；') || '保活完成', results.some(x => x.error) ? 'err' : 'ok');
       } else if (a === 'ogremove') {
         // 运行时账号（浏览器登录 / 粘贴凭证建立的：raccoon / trae / newapi /
         // geminiweb）走 OmniRemove；其余（runable 等写在 omnigate.json 里的）走配置删除。
@@ -4263,10 +4277,318 @@ async function loadOmniConfig() {
     if ($('crRefresh')) $('crRefresh').value = cr.refresh_interval || '';
     renderProvEditor();
     renderKeyEditor();
+    renderFingerprint();
     ogMsg('cfgMsg', '已加载 ' + omniCfg.providers.length + ' 个供应商', 'ok');
   } catch (e) {
     $('provEditor').innerHTML = '<div class="empty">供应商配置不可用：' + esc(e.message) + '</div>';
     ogMsg('cfgMsg', '加载失败：' + e.message, 'err');
+  }
+}
+
+/* ── 反检测指纹（Gemini Web 的 TLS / 请求头协议伪装） ──
+ *
+ * 状态 / 切换目标 / 手动同步都走面板代理
+ * /panel/api/omni/admin/geminiweb/fingerprint（面板服务端注入 api_key 转发到
+ * 进程内 OmniGate）。只有 type=geminiweb 的供应商有指纹运行态，故下拉只列它们。
+ * 后端路由见 internal/omnigate/server/server.go 的 handleGeminiWebAdmin。 */
+
+// renderFingerprint 重建供应商下拉（保留当前选中项），随后拉取该供应商的指纹状态。
+function renderFingerprint() {
+  const sel = $('fpProvider');
+  if (!sel) return;
+  const provs = ((omniCfg && omniCfg.providers) || [])
+    .filter(p => (p.type || '') === 'geminiweb')
+    .map(p => p.name).filter(Boolean);
+  const prev = sel.value;
+  sel.innerHTML = provs.length
+    ? provs.map(n => '<option value="' + esc(n) + '">' + esc(n) + '</option>').join('')
+    : '<option value="">（没有 geminiweb 供应商）</option>';
+  if (prev && provs.indexOf(prev) >= 0) sel.value = prev;
+  const has = provs.length > 0;
+  ['btnFpApply', 'btnFpSync', 'fpTarget'].forEach(id => { const el = $(id); if (el) el.disabled = !has; });
+  loadFingerprintStatus();
+}
+
+// loadFingerprintStatus 拉取当前所选供应商的指纹运行态并渲染。
+async function loadFingerprintStatus() {
+  const sel = $('fpProvider');
+  const box = $('fpStatus');
+  if (!sel || !box) return;
+  const prov = sel.value;
+  if (!prov) {
+    box.innerHTML = '<div class="empty">先在「供应商」里添加并保存一个 <code>geminiweb</code> 类型供应商，再回来查看指纹状态。</div>';
+    if ($('fpTarget')) $('fpTarget').innerHTML = '';
+    if ($('fpNote')) $('fpNote').textContent = '';
+    return;
+  }
+  try {
+    const d = await apiAbs('/omni/admin/geminiweb/fingerprint?provider=' + encodeURIComponent(prov));
+    renderFingerprintStatus((d && d.fingerprint) || {});
+  } catch (e) {
+    box.innerHTML = '<div class="empty">指纹状态不可用：' + esc(e.message) + '</div>';
+    ogMsg('fpMsg', '读取失败：' + e.message, 'err');
+  }
+}
+
+// fpTag 把布尔开关渲染成 ok/mute 角标。
+function fpTag(on, onText, offText) {
+  return on ? '<span class="tag ok">' + esc(onText) + '</span>'
+            : '<span class="tag mute">' + esc(offText) + '</span>';
+}
+
+// renderFingerprintStatus 把状态快照渲染成一张状态卡 + 更新目标下拉。
+function renderFingerprintStatus(fp) {
+  const box = $('fpStatus');
+  if (!box) return;
+  // 目标下拉 = 本构建可用的 impersonate 目标（tls_supported）+ 当前值（兼容旧值）。
+  const supported = Array.isArray(fp.tls_supported) ? fp.tls_supported.slice() : [];
+  const cur = fp.impersonate_target || '';
+  if (cur && supported.indexOf(cur) < 0) supported.push(cur);
+  supported.sort();
+  const tsel = $('fpTarget');
+  if (tsel) {
+    tsel.innerHTML = supported.length
+      ? supported.map(t => '<option value="' + esc(t) + '">' + esc(t) + '</option>').join('')
+      : '<option value="">（无可用目标）</option>';
+    if (cur) tsel.value = cur;
+  }
+  const val = html => '<span style="color:var(--ink-2)">' + html + '</span>';
+  const plat = (fp.platform && typeof fp.platform === 'object')
+    ? [fp.platform.os, fp.platform.os_version, fp.platform.arch].filter(Boolean).join(' / ')
+    : (fp.platform || '');
+  const rows = [
+    ['Chrome 版本', (fp.chrome_full ? esc(fp.chrome_full) : '—')
+      + (fp.chrome_major ? ' <span class="tag mute">major ' + esc(String(fp.chrome_major)) + '</span>' : '')],
+    ['TLS 伪装目标', cur ? '<span class="tag">' + esc(cur) + '</span>' : '—'],
+    ['运行平台', plat ? esc(plat) : '—'],
+    ['TLS 伪装', fpTag(fp.tls_enabled, '已启用', '已关闭')],
+    ['请求抖动', fpTag(fp.jitter_enabled, '已启用', '已关闭')],
+    ['版本同步', fpTag(fp.version_sync_running, '后台运行中',
+      (fp.version_sync_enabled ? '已启用（未运行）' : '未启用'))],
+    ['会话保活', fpTag(fp.keepalive_running, '后台运行中', '未启用')],
+    ['同步间隔', fp.version_sync_hours ? esc(String(fp.version_sync_hours)) + ' 小时' : '—'],
+    ['配置路径', fp.config_path ? '<code>' + esc(fp.config_path) + '</code>' : '（内存默认，不落盘）'],
+    ['Cookie 目录', fp.cookie_dir ? '<code>' + esc(fp.cookie_dir) + '</code>' : '（内存，不落盘）'],
+    ['最近更新', fp.last_updated ? esc(fp.last_updated) : '—'],
+  ];
+  const order = Array.isArray(fp.header_order) ? fp.header_order.join(' → ') : '';
+  const vers = (fp.version_map && typeof fp.version_map === 'object')
+    ? Object.keys(fp.version_map).join(', ') : '';
+  box.innerHTML = '<div class="og-card">' +
+    '<div class="og-t">运行态快照 <span class="tag mute">' + esc(fp.impersonate_target || '—') + '</span></div>' +
+    '<div class="og-fields">' +
+      rows.map(r => '<label>' + r[0] + val(r[1]) + '</label>').join('') +
+    '</div>' +
+    (order ? '<div class="og-hint">请求头顺序：<code>' + esc(order) + '</code></div>' : '') +
+    (vers ? '<div class="og-hint">已收录版本：<code>' + esc(vers) + '</code></div>' : '') +
+  '</div>';
+  if ($('fpNote')) $('fpNote').textContent = cur ? '当前目标 ' + cur : '';
+}
+
+// fpApplyTarget 切换所选供应商的 TLS 指纹目标。
+async function fpApplyTarget() {
+  const prov = $('fpProvider') && $('fpProvider').value;
+  const target = $('fpTarget') && $('fpTarget').value;
+  if (!prov) { ogMsg('fpMsg', '请先选择供应商', 'err'); return; }
+  if (!target) { ogMsg('fpMsg', '请先选择 TLS 目标', 'err'); return; }
+  const btn = $('btnFpApply'); if (btn) btn.disabled = true;
+  ogMsg('fpMsg', '正在切换 TLS 目标…');
+  try {
+    await apiAbs('/omni/admin/geminiweb/fingerprint', {
+      method: 'POST',
+      body: JSON.stringify({ provider: prov, target: target }),
+    });
+    ogMsg('fpMsg', '已切换为 ' + target + '（对下一次直连握手生效）', 'ok');
+    await loadFingerprintStatus();
+  } catch (e) {
+    ogMsg('fpMsg', '切换失败：' + e.message, 'err');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+// fpSyncVersion 立即触发一次 Chrome 稳定版版本检查（发现新版则抬升伪装版本）。
+async function fpSyncVersion() {
+  const prov = $('fpProvider') && $('fpProvider').value;
+  if (!prov) { ogMsg('fpMsg', '请先选择供应商', 'err'); return; }
+  const btn = $('btnFpSync'); if (btn) btn.disabled = true;
+  ogMsg('fpMsg', '正在同步 Chrome 稳定版版本…（可能需要十几秒）');
+  try {
+    await apiAbs('/omni/admin/geminiweb/fingerprint', {
+      method: 'POST',
+      body: JSON.stringify({ provider: prov, sync: true }),
+    });
+    ogMsg('fpMsg', '版本同步完成', 'ok');
+    await loadFingerprintStatus();
+  } catch (e) {
+    ogMsg('fpMsg', '同步失败：' + e.message, 'err');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+/* ── 会话 / Gems 管理（Gemini Web 账号级运维） ──
+ *
+ * 都走面板代理 /panel/api/omni/admin/geminiweb/{chats,gems,keepalive}：面板服务端
+ * 注入 api_key 转发到进程内 OmniGate，并按账号归属鉴权（普通 user 只能运维自己的
+ * 账号）。后端路由见 internal/omnigate/server/server.go 的 handleGeminiWebAdmin。 */
+
+let gcTarget = null;   // 「会话管理」弹窗当前针对的账号 {prov, label}
+let gemTarget = null;  // 「Gems 管理」弹窗当前针对的账号
+
+// fmtChatTime 把会话时间戳（秒，可能为 0）渲染成可读时间。
+function fmtChatTime(ts) {
+  if (!ts) return '—';
+  const d = new Date(ts * 1000);
+  return isNaN(d.getTime()) ? '—' : d.toLocaleString();
+}
+
+function openGChats(prov, label) {
+  gcTarget = { prov, label };
+  if ($('gcWho')) $('gcWho').textContent = prov + ' / ' + label;
+  if ($('gcVeil')) $('gcVeil').classList.add('on');
+  loadGChats();
+}
+function closeGChats() { if ($('gcVeil')) $('gcVeil').classList.remove('on'); gcTarget = null; }
+
+async function loadGChats() {
+  if (!gcTarget) return;
+  const st = $('gcState'), tb = $('gcBody');
+  if (!tb) return;
+  if (st) { st.hidden = false; st.className = 'state'; st.innerHTML = '<span class="dots">加载中</span>'; }
+  tb.innerHTML = '';
+  try {
+    const d = await apiAbs('/omni/admin/geminiweb/chats?provider=' + encodeURIComponent(gcTarget.prov)
+      + '&label=' + encodeURIComponent(gcTarget.label));
+    const chats = (d && d.chats) || [];
+    if (st) st.hidden = true;
+    if (!chats.length) {
+      tb.innerHTML = '<tr><td colspan="4"><div class="empty">该账号没有网页端会话</div></td></tr>';
+      return;
+    }
+    tb.innerHTML = chats.map(c => '<tr>' +
+      '<td>' + esc(c.title || '(无标题)') + (c.pinned ? ' <span class="tag mute">置顶</span>' : '') + '</td>' +
+      '<td class="num" style="color:var(--ink-3)">' + esc(fmtChatTime(c.ts)) + '</td>' +
+      '<td class="id">' + esc(c.id) + '</td>' +
+      '<td class="c-acts"><button class="xs ghost danger" data-gcdel="' + esc(c.id) + '">删除</button></td>' +
+      '</tr>').join('');
+  } catch (e) {
+    if (st) { st.className = 'state err'; st.innerHTML = esc(e.message); }
+  }
+}
+
+async function gcDeleteChat(cid, btn) {
+  if (!gcTarget || !confirm('删除会话「' + cid + '」？该操作不可恢复。')) return;
+  if (btn) btn.disabled = true;
+  try {
+    await apiAbs('/omni/admin/geminiweb/chats/delete', {
+      method: 'POST',
+      body: JSON.stringify({ provider: gcTarget.prov, label: gcTarget.label, id: cid }),
+    });
+    toast('已删除会话', 'ok');
+    loadGChats();
+  } catch (e) {
+    toast('删除失败：' + e.message, 'err');
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function gcCleanup() {
+  if (!gcTarget) return;
+  const hours = parseFloat($('gcKeepHours') && $('gcKeepHours').value) || 24;
+  const skipPinned = $('gcSkipPinned') ? !!$('gcSkipPinned').checked : true;
+  if (!confirm('清理 ' + hours + ' 小时前的会话' + (skipPinned ? '（跳过置顶）' : '') + '？该操作不可恢复。')) return;
+  const btn = $('btnGcCleanup');
+  if (btn) { btn.disabled = true; btn.textContent = '清理中…'; }
+  try {
+    const d = await apiAbs('/omni/admin/geminiweb/chats/cleanup', {
+      method: 'POST',
+      body: JSON.stringify({ provider: gcTarget.prov, label: gcTarget.label, keep_hours: hours, skip_pinned: skipPinned }),
+    });
+    const r = (d && d.result) || {};
+    toast('清理完成：删除 ' + (r.deleted || 0) + ' 个，跳过 ' + (r.skipped || 0) + ' 个'
+      + (r.failed ? ('，失败 ' + r.failed + ' 个') : ''), r.failed ? 'err' : 'ok');
+    loadGChats();
+  } catch (e) {
+    toast('清理失败：' + e.message, 'err');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '清理旧会话'; }
+  }
+}
+
+function openGems(prov, label) {
+  gemTarget = { prov, label };
+  if ($('gemWho')) $('gemWho').textContent = prov + ' / ' + label;
+  if ($('gemVeil')) $('gemVeil').classList.add('on');
+  loadGems();
+}
+function closeGems() { if ($('gemVeil')) $('gemVeil').classList.remove('on'); gemTarget = null; }
+
+async function loadGems() {
+  if (!gemTarget) return;
+  const st = $('gemState'), tb = $('gemBody');
+  if (!tb) return;
+  if (st) { st.hidden = false; st.className = 'state'; st.innerHTML = '<span class="dots">加载中</span>'; }
+  tb.innerHTML = '';
+  try {
+    const d = await apiAbs('/omni/admin/geminiweb/gems?provider=' + encodeURIComponent(gemTarget.prov)
+      + '&label=' + encodeURIComponent(gemTarget.label));
+    const gems = (d && d.gems) || [];
+    if (st) st.hidden = true;
+    if (!gems.length) {
+      tb.innerHTML = '<tr><td colspan="4"><div class="empty">该账号还没有自定义 Gem</div></td></tr>';
+      return;
+    }
+    tb.innerHTML = gems.map(g => '<tr>' +
+      '<td>' + esc(g.name || '(未命名)') + '</td>' +
+      '<td style="color:var(--ink-3)">' + esc(g.description || '—') + '</td>' +
+      '<td style="color:var(--ink-3)">' + esc((g.prompt || '').slice(0, 120)) + '</td>' +
+      '<td class="c-acts"><button class="xs ghost danger" data-gemdel="' + esc(g.id) + '">删除</button></td>' +
+      '</tr>').join('');
+  } catch (e) {
+    if (st) { st.className = 'state err'; st.innerHTML = esc(e.message); }
+  }
+}
+
+async function gemCreate() {
+  if (!gemTarget) return;
+  const name = (($('gemName') && $('gemName').value) || '').trim();
+  const prompt = (($('gemPrompt') && $('gemPrompt').value) || '').trim();
+  const desc = (($('gemDesc') && $('gemDesc').value) || '').trim();
+  if (!name) { ogMsg('gemMsg', '名称不能为空', 'err'); return; }
+  const btn = $('btnGemCreate');
+  if (btn) btn.disabled = true;
+  ogMsg('gemMsg', '正在新建…');
+  try {
+    await apiAbs('/omni/admin/geminiweb/gems', {
+      method: 'POST',
+      body: JSON.stringify({ provider: gemTarget.prov, label: gemTarget.label, action: 'create', name, prompt, description: desc }),
+    });
+    ogMsg('gemMsg', '已新建 Gem「' + name + '」', 'ok');
+    if ($('gemName')) $('gemName').value = '';
+    if ($('gemPrompt')) $('gemPrompt').value = '';
+    if ($('gemDesc')) $('gemDesc').value = '';
+    loadGems();
+  } catch (e) {
+    ogMsg('gemMsg', '新建失败：' + e.message, 'err');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function gemDelete(gid, btn) {
+  if (!gemTarget || !confirm('删除 Gem「' + gid + '」？该操作不可恢复。')) return;
+  if (btn) btn.disabled = true;
+  try {
+    await apiAbs('/omni/admin/geminiweb/gems', {
+      method: 'POST',
+      body: JSON.stringify({ provider: gemTarget.prov, label: gemTarget.label, action: 'delete', id: gid }),
+    });
+    toast('已删除 Gem', 'ok');
+    loadGems();
+  } catch (e) {
+    toast('删除失败：' + e.message, 'err');
+    if (btn) btn.disabled = false;
   }
 }
 
@@ -5309,6 +5631,28 @@ async function saveOutbound() {
   // 网关密钥卡（按供应商收窄的客户端密钥）
   on('btnAddKey', addKey);
   on('btnSaveCfgKeys', () => saveOmniConfig('keyMsg'));
+  // 反检测指纹（Gemini Web 的 TLS / 请求头伪装）
+  on('btnFpReload', loadFingerprintStatus);
+  on('btnFpApply', fpApplyTarget);
+  on('btnFpSync', fpSyncVersion);
+  on('fpProvider', loadFingerprintStatus, 'change');
+  // Gemini Web 会话 / Gems 管理（账号级运维，走 /omni/admin/geminiweb/*）
+  on('btnCloseGChat', closeGChats);
+  on('btnGcReload', loadGChats);
+  on('btnGcCleanup', gcCleanup);
+  const gcb = $('gcBody');
+  if (gcb) gcb.addEventListener('click', ev => {
+    const b = ev.target.closest('button[data-gcdel]');
+    if (b) gcDeleteChat(b.dataset.gcdel, b);
+  });
+  on('btnCloseGem', closeGems);
+  on('btnGemReload', loadGems);
+  on('btnGemCreate', gemCreate);
+  const gmb = $('gemBody');
+  if (gmb) gmb.addEventListener('click', ev => {
+    const b = ev.target.closest('button[data-gemdel]');
+    if (b) gemDelete(b.dataset.gemdel, b);
+  });
   // 积分快过期优先（raccoon / runable 的每日·每月积分会作废）
   on('btnSaveCfgCredit', () => saveOmniConfig('crMsg'));
   const ke = $('keyEditor');

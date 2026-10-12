@@ -10,6 +10,7 @@ import (
 
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/imagegen"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/provider"
+	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/provider/geminiweb/fingerprint"
 )
 
 // webStreamOpts carries what the tail of the stream needs to turn generated
@@ -25,7 +26,7 @@ type webStreamOpts struct {
 	imageBase string
 	// jar authenticates the image download (lh3 URLs 403 without the account
 	// cookie).
-	jar *cookieJar
+	jar *fingerprint.Jar
 }
 
 // webStream turns a StreamGenerate response body into provider.Events. The

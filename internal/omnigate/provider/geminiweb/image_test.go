@@ -10,6 +10,7 @@ import (
 
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/imagegen"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/provider"
+	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/provider/geminiweb/fingerprint"
 )
 
 // imageGenPayload builds a payload whose candidate carries one generated image
@@ -96,7 +97,7 @@ func TestWebStreamBuffersImageTurn(t *testing.T) {
 			buffer:    true,
 			store:     store,
 			imageBase: "https://gw.example.com/omni",
-			jar:       parseCookies("__Secure-1PSID=x"),
+			jar:       fingerprint.Parse("__Secure-1PSID=x"),
 		})
 
 	var text string

@@ -8,12 +8,14 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/wuxianggujun/omnigate-panel/internal/imageintent"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/imagegen"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/openai"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/provider"
+	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/provider/geminiweb/fingerprint"
 	"github.com/wuxianggujun/omnigate-panel/internal/outbound"
 )
 
@@ -21,7 +23,7 @@ import (
 // cookies: the cookie jar (with rotations), the SNlM0e token, the upload push
 // id, and the account's real per-family models.
 type session struct {
-	jar          *cookieJar
+	jar          *fingerprint.Jar
 	sessionToken string
 	pushID       string
 	sessionUUID  string
@@ -41,9 +43,17 @@ type Provider struct {
 	// images keeps AI-generated images on disk so a reply can link to them
 	// instead of inlining megabytes of base64. Nil = inline as a data URI.
 	images *imagegen.Store
+	// fp is the anti-detection runtime (headers / TLS / jitter / cookie store).
+	// Nil = the client's in-memory default fingerprint.
+	fp *fingerprint.Runtime
 	// logf reports non-fatal upstream problems (an attachment that could not be
 	// uploaded). Nil = silent.
 	logf func(format string, args ...any)
+
+	// keepAliveOnce / keepAliveRun guard the opt-in background keep-alive loop
+	// (at most one goroutine per provider). See keepalive.go.
+	keepAliveOnce sync.Once
+	keepAliveRun  atomic.Bool
 
 	mu       sync.Mutex
 	sessions map[string]*session
@@ -79,6 +89,43 @@ func (p *Provider) SetProxy(u *url.URL) { p.client.SetProxy(u) }
 
 // SetProxySelector routes outbound requests through the proxy pool.
 func (p *Provider) SetProxySelector(sel outbound.Selector) { p.client.SetProxySelector(sel) }
+
+// SetFingerprint attaches the anti-detection runtime (dynamic headers, TLS
+// ClientHello impersonation, request jitter, persistent cookie store) and wires
+// it into the HTTP client. A nil runtime restores the built-in default.
+func (p *Provider) SetFingerprint(rt *fingerprint.Runtime) {
+	p.fp = rt
+	p.client.SetFingerprint(rt)
+}
+
+// fpRuntime returns the provider's runtime, falling back to the client's
+// (in-memory default) when none was attached.
+func (p *Provider) fpRuntime() *fingerprint.Runtime { return p.client.runtime() }
+
+// StartFingerprintSync starts the background Chrome version-sync loop.
+func (p *Provider) StartFingerprintSync(ctx context.Context) {
+	p.fpRuntime().StartVersionSync(ctx)
+}
+
+// FingerprintStatus returns a panel-facing snapshot of the fingerprint state,
+// extended with the geminiweb session keep-alive state (same "protocol runtime"
+// card in the panel).
+func (p *Provider) FingerprintStatus() map[string]any {
+	st := p.fpRuntime().Status()
+	st["keepalive_running"] = p.KeepAliveRunning()
+	return st
+}
+
+// SyncChromeVersion triggers one immediate Chrome version check.
+func (p *Provider) SyncChromeVersion(ctx context.Context) {
+	p.fpRuntime().SyncChromeVersion(ctx)
+}
+
+// SetChromeTarget switches the TLS impersonation target at runtime (panel
+// action). The new target takes effect on the next direct HTTPS handshake.
+func (p *Provider) SetChromeTarget(target string) error {
+	return p.fpRuntime().SetChromeTarget(target)
+}
 
 // SetImageStore attaches the store used to persist AI-generated images. Without
 // one a generated image is inlined as a data URI (or dropped when there is no
@@ -162,7 +209,7 @@ func (p *Provider) StreamChat(ctx context.Context, acc *provider.Account, in pro
 		return nil, err
 	}
 	// Persist any cookie rotation the upstream attached to this response.
-	acc.Cookie = s.jar.header()
+	acc.Cookie = s.jar.CookieHeader()
 	// An image-generation turn is buffered: the generated image's link has to
 	// precede the text, and the image is only known once the upstream finishes.
 	return newWebStream(ctx, p.client, resp.Body, webStreamOpts{
@@ -246,14 +293,19 @@ func (p *Provider) ensureSession(ctx context.Context, acc *provider.Account) (*s
 	// re-serializes sorted, so comparing against the caller's raw string would
 	// differ even when nothing rotated and force a re-handshake every request;
 	// canonicalize both sides instead.
-	jar := parseCookies(raw)
+	//
+	// The jar is keyed by __Secure-1PSID and (optionally) backed by a disk file
+	// under the fingerprint cookie dir. The passed cookie string is authoritative
+	// (MergeFrom wins), while the disk file only fills in cookies it lacks.
+	jar := p.fpRuntime().OpenJar(fingerprint.AccountKey(raw))
+	jar.MergeFrom(raw)
 	// A stale __Secure-1PSIDTS is the usual cause of a 401 on an otherwise valid
 	// cookie set: rotate it on demand (the same call the browser makes) rather
 	// than making the user paste cookies again. Not a background keep-alive loop.
 	if prev != nil && prev.source == raw && !prev.healthy {
 		_ = p.client.rotateCookies(ctx, jar)
 	}
-	s := &session{jar: jar, sessionUUID: newUUID(), source: jar.header()}
+	s := &session{jar: jar, sessionUUID: newUUID(), source: jar.CookieHeader()}
 	token, push, err := p.client.acquire(ctx, s.jar)
 	if err != nil {
 		s.lastErr = err.Error()
@@ -267,7 +319,7 @@ func (p *Provider) ensureSession(ctx context.Context, acc *provider.Account) (*s
 	}
 	s.healthy = true
 	p.store(key, s)
-	acc.Cookie = s.jar.header()
+	acc.Cookie = s.jar.CookieHeader()
 	return s, nil
 }
 

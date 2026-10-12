@@ -746,6 +746,29 @@
         </div>
       </div>
 
+      <!-- 反检测指纹（Gemini Web 的 TLS / 请求头协议伪装，按供应商热生效） -->
+      <div class="box" id="fpBox" data-admin>
+        <header>
+          <h3>反检测指纹 <span class="hint">Gemini Web 的 TLS / 请求头伪装，按供应商设置，改完即时热生效</span></h3>
+          <span class="grow"></span>
+          <span class="note" id="fpNote"></span>
+          <button class="xs" id="btnFpReload">刷新</button>
+        </header>
+        <div class="pad">
+          <div class="og-hint" style="margin-top:0">Gemini Web 直连上游时，网关会伪装成真实 Chrome 浏览器：TLS ClientHello 指纹（<code>impersonate</code>）、请求头顺序与取值、请求间隔抖动、Cookie 域名隔离。<strong>目标版本越高越像最新浏览器</strong>，但本构建的 TLS 指纹库最高支持到 <code>chrome120</code>——更高的目标会自动降级到最接近的可支持版本。<strong>经 HTTP/SOCKS 代理时 TLS 指纹不生效</strong>（回落到系统 TLS），其余伪装照常。<br>「同步 Chrome 版本」会访问 Google 的版本接口，若发现更新的稳定版会自动抬升伪装版本。仅对 <code>geminiweb</code> 类型供应商有效。</div>
+          <div class="grid2" style="margin-top:12px">
+            <label class="fld"><span class="lb">供应商</span><select id="fpProvider"></select></label>
+            <label class="fld"><span class="lb">TLS 伪装目标</span><select id="fpTarget"></select></label>
+          </div>
+          <div class="og-row" style="margin-top:2px">
+            <button id="btnFpApply">切换目标</button>
+            <button id="btnFpSync">同步 Chrome 版本</button>
+            <span class="og-msg" id="fpMsg"></span>
+          </div>
+          <div id="fpStatus" style="margin-top:12px"></div>
+        </div>
+      </div>
+
       <div class="box">
         <header>
           <h3>网关密钥 <span class="hint">按供应商收窄：决定每把客户端密钥能用哪些模型</span></h3>
@@ -886,6 +909,68 @@
       <button id="btnTaskAutoAll" class="primary">一键完成可自动任务</button>
       <button id="btnTaskReload">重新查询</button>
       <button id="btnCloseTask">关闭</button>
+    </footer>
+  </div>
+</div>
+
+<!-- Gemini Web 会话管理 -->
+<div class="veil" id="gcVeil">
+  <div class="dlg" style="width:860px">
+    <header>
+      <h3>会话管理 <span class="hint" id="gcWho"></span></h3>
+      <div class="hint">列出该 geminiweb 账号在 Gemini 网页端的会话，可逐个删除，或按保留窗口批量清理旧会话（置顶可选跳过）。操作走上游 RPC，不可恢复。</div>
+    </header>
+    <div class="body">
+      <div class="og-row" style="margin-top:0">
+        <label class="fld" style="margin:0;max-width:180px"><span class="lb">保留最近（小时）</span><input id="gcKeepHours" type="number" min="1" step="1" value="24"></label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px"><input type="checkbox" id="gcSkipPinned" checked style="width:auto"> 跳过置顶会话</label>
+        <button class="xs" id="btnGcCleanup">清理旧会话</button>
+        <button class="xs ghost" id="btnGcReload">刷新</button>
+      </div>
+      <div class="state" id="gcState"><span class="dots">加载中</span></div>
+      <div class="tbl-wrap">
+        <table class="acc md" id="gcTable">
+          <thead><tr><th>标题</th><th>时间</th><th>会话 ID</th><th class="c-acts"></th></tr></thead>
+          <tbody id="gcBody"></tbody>
+        </table>
+      </div>
+    </div>
+    <footer>
+      <span class="grow"></span>
+      <button id="btnCloseGChat">关闭</button>
+    </footer>
+  </div>
+</div>
+
+<!-- Gemini Web Gems 管理 -->
+<div class="veil" id="gemVeil">
+  <div class="dlg" style="width:860px">
+    <header>
+      <h3>Gems 管理 <span class="hint" id="gemWho"></span></h3>
+      <div class="hint">账号的自定义 Gem（保存下来的人格）。新建 / 删除走上游 RPC，改完即时生效。</div>
+    </header>
+    <div class="body">
+      <div class="grid2" style="margin-top:0">
+        <label class="fld"><span class="lb">名称</span><input id="gemName" placeholder="如：代码审查员"></label>
+        <label class="fld"><span class="lb">描述（可选）</span><input id="gemDesc" placeholder="一句话说明"></label>
+      </div>
+      <label class="fld"><span class="lb">提示词</span><textarea id="gemPrompt" rows="3" placeholder="你是一个……"></textarea></label>
+      <div class="og-row" style="margin-top:2px">
+        <button class="xs primary" id="btnGemCreate">新建 Gem</button>
+        <button class="xs ghost" id="btnGemReload">刷新</button>
+        <span class="og-msg" id="gemMsg"></span>
+      </div>
+      <div class="state" id="gemState"></div>
+      <div class="tbl-wrap">
+        <table class="acc md" id="gemTable">
+          <thead><tr><th>名称</th><th>描述</th><th>提示词</th><th class="c-acts"></th></tr></thead>
+          <tbody id="gemBody"></tbody>
+        </table>
+      </div>
+    </div>
+    <footer>
+      <span class="grow"></span>
+      <button id="btnCloseGem">关闭</button>
     </footer>
   </div>
 </div>

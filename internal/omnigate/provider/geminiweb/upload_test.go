@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/openai"
+	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/provider/geminiweb/fingerprint"
 )
 
 // TestUploadAttachment drives one upload end to end against a local server: the
@@ -46,7 +47,7 @@ func TestUploadAttachment(t *testing.T) {
 	defer ts.Close()
 
 	c := &Client{http: ts.Client(), uploadURL: ts.URL}
-	ref, ok := c.uploadAttachment(context.Background(), parseCookies("__Secure-1PSID=x"), "feeds/abc",
+	ref, ok := c.uploadAttachment(context.Background(), fingerprint.Parse("__Secure-1PSID=x"), "feeds/abc",
 		openai.Attachment{Type: "image_url", MIME: "image/png", Filename: "a.png", Data: []byte("ABC")})
 	if !ok {
 		t.Fatal("upload reported failure")
@@ -97,7 +98,7 @@ func TestUploadAttachmentDefaults(t *testing.T) {
 	c := &Client{http: ts.Client(), uploadURL: ts.URL}
 	// No filename and no mime: both must fall back rather than produce an empty
 	// part or an unparseable header.
-	_, ok := c.uploadAttachment(context.Background(), parseCookies("a=b"), "", openai.Attachment{Type: "image_url", Data: []byte("x")})
+	_, ok := c.uploadAttachment(context.Background(), fingerprint.Parse("a=b"), "", openai.Attachment{Type: "image_url", Data: []byte("x")})
 	if !ok {
 		t.Fatal("upload reported failure")
 	}
@@ -125,7 +126,7 @@ func TestUploadAttachmentFailure(t *testing.T) {
 			}))
 			defer ts.Close()
 			c := &Client{http: ts.Client(), uploadURL: ts.URL}
-			if _, ok := c.uploadAttachment(context.Background(), parseCookies("a=b"), "", openai.Attachment{Data: []byte("x")}); ok {
+			if _, ok := c.uploadAttachment(context.Background(), fingerprint.Parse("a=b"), "", openai.Attachment{Data: []byte("x")}); ok {
 				t.Fatal("upload reported success")
 			}
 		})
@@ -136,7 +137,7 @@ func TestUploadAttachmentFailure(t *testing.T) {
 // cannot be uploaded, and must not be reported as uploaded.
 func TestUploadAttachmentUnresolvable(t *testing.T) {
 	c := &Client{http: &http.Client{}}
-	if _, ok := c.uploadAttachment(context.Background(), parseCookies("a=b"), "", openai.Attachment{Type: "image_url"}); ok {
+	if _, ok := c.uploadAttachment(context.Background(), fingerprint.Parse("a=b"), "", openai.Attachment{Type: "image_url"}); ok {
 		t.Fatal("upload reported success for an empty attachment")
 	}
 }

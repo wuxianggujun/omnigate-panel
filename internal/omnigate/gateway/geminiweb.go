@@ -104,6 +104,41 @@ func (g *Gateway) upsertGeminiWebAccount(providerName, label, cookie string) {
 	})
 }
 
+// GeminiWebFingerprintStatus returns the anti-detection / protocol-masquerade
+// state for a provider (current Chrome version, TLS target, header order,
+// jitter / version-sync / TLS switches, cookie dir, available TLS targets).
+func (g *Gateway) GeminiWebFingerprintStatus(providerName string) (map[string]any, error) {
+	gp, err := g.geminiWebProvider(providerName)
+	if err != nil {
+		return nil, err
+	}
+	return gp.FingerprintStatus(), nil
+}
+
+// GeminiWebSetFingerprintTarget switches the TLS ClientHello impersonation
+// target (e.g. "chrome120"). It takes effect on the next direct HTTPS handshake.
+func (g *Gateway) GeminiWebSetFingerprintTarget(providerName, target string) error {
+	gp, err := g.geminiWebProvider(providerName)
+	if err != nil {
+		return err
+	}
+	return gp.SetChromeTarget(target)
+}
+
+// GeminiWebSyncChromeVersion triggers one immediate Chrome stable-version check
+// and, if newer, promotes the fingerprint. Bounded so a slow upstream cannot
+// hang the panel request.
+func (g *Gateway) GeminiWebSyncChromeVersion(ctx context.Context, providerName string) error {
+	gp, err := g.geminiWebProvider(providerName)
+	if err != nil {
+		return err
+	}
+	cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	gp.SyncChromeVersion(cctx)
+	return nil
+}
+
 // GeminiWebRemoveAccount drops a runtime account and its cookie.
 func (g *Gateway) GeminiWebRemoveAccount(providerName, label string) bool {
 	g.accountsMu.Lock()

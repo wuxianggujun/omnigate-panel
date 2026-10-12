@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -26,6 +27,16 @@ type Config struct {
 	// CreditRouting 控制「快过期积分优先」选号（见下方类型注释）。缺省启用。
 	CreditRouting *CreditRouting `json:"credit_routing,omitempty"`
 
+	// Fingerprint 控制 Gemini Web 供应商的反检测 / 协议伪装层（动态请求头、
+	// TLS ClientHello 伪装、请求抖动、Cookie 落盘、Chrome 版本同步）。缺省
+	// （nil）由 applyDefaults 填成一份合理默认值。
+	Fingerprint *FingerprintConfig `json:"fingerprint,omitempty"`
+
+	// Maintenance 控制 OmniGate 上游账号的后台维护循环（目前只有 geminiweb 的
+	// 会话保活）。缺省（nil）由 applyDefaults 填成关闭状态：网关本就在请求时按需
+	// 刷新会话，后台循环只在账号池长期空闲时才有意义。
+	Maintenance *MaintenanceConfig `json:"maintenance,omitempty"`
+
 	// PanelKey 是面板自己那把网关密钥（= config.json 的 api_key），由 cmd/server 在
 	// 构建运行时注入。它**恒为全量**且**绝不落盘**（json:"-"）：
 	//   - 面板前端要用它调 /omni/*，所以它必须永远有效；
@@ -33,6 +44,39 @@ type Config struct {
 	//     omnigate.json（否则轮换 api_key 后旧钥匙会残留在文件里继续可用）。
 	// 空 = 未注入（例如直接跑 OmniGate 独立二进制时）。
 	PanelKey string `json:"-"`
+}
+
+// FingerprintConfig 是 Gemini Web 反检测层的开关与路径。移植自 gemini2api 的
+// app/core/fingerprint（config / header_builder / cookie_jar / version_sync /
+// jitter）+ curl_cffi 的 impersonate 语义。
+type FingerprintConfig struct {
+	// ConfigPath 是 fingerprint.json 的落盘路径；空 = 默认 <data_dir>/fingerprint.json。
+	ConfigPath string `json:"config_path,omitempty"`
+	// CookieDir 是持久化 Cookie 的目录；空 = 默认 <data_dir>/cookies。
+	CookieDir string `json:"cookie_dir,omitempty"`
+	// JitterEnabled 打开请求间隔抖动（抹掉机器节奏）。
+	JitterEnabled bool `json:"jitter_enabled,omitempty"`
+	// VersionSyncEnabled 打开后台 Chrome 版本同步。
+	VersionSyncEnabled bool `json:"version_sync_enabled,omitempty"`
+	// VersionSyncIntervalHours 是版本同步间隔（小时）；<=0 视为 24。
+	VersionSyncIntervalHours int `json:"version_sync_interval_hours,omitempty"`
+	// TLSEnabled 打开 utls 的 TLS ClientHello 伪装。指针以便区分「未设置」
+	// （默认 true）与显式 false。
+	TLSEnabled *bool `json:"tls_enabled,omitempty"`
+}
+
+// TLSImpersonationEnabled 报告 TLS 伪装是否启用（未设置时默认 true）。
+func (f *FingerprintConfig) TLSImpersonationEnabled() bool {
+	return f == nil || f.TLSEnabled == nil || *f.TLSEnabled
+}
+
+// MaintenanceConfig 是 OmniGate 上游账号的后台维护开关。移植自 gemini2api
+// gclient.py 的 _auto_refresh_loop（定期轮换 Cookie → 重建会话 → 心跳）。
+type MaintenanceConfig struct {
+	// KeepaliveEnabled 打开 geminiweb 账号的后台保活。
+	KeepaliveEnabled bool `json:"keepalive_enabled,omitempty"`
+	// KeepaliveIntervalMinutes 是保活间隔（分钟）；<=0 视为 30。
+	KeepaliveIntervalMinutes int `json:"keepalive_interval_minutes,omitempty"`
 }
 
 // APIKey 是一把入站网关密钥。
@@ -356,6 +400,24 @@ func (c *Config) applyDefaults() {
 	}
 	if c.DataDir == "" {
 		c.DataDir = "data"
+	}
+	if c.Fingerprint == nil {
+		c.Fingerprint = &FingerprintConfig{}
+	}
+	if c.Fingerprint.ConfigPath == "" {
+		c.Fingerprint.ConfigPath = filepath.Join(c.DataDir, "fingerprint.json")
+	}
+	if c.Fingerprint.CookieDir == "" {
+		c.Fingerprint.CookieDir = filepath.Join(c.DataDir, "cookies")
+	}
+	if c.Fingerprint.VersionSyncIntervalHours <= 0 {
+		c.Fingerprint.VersionSyncIntervalHours = 24
+	}
+	if c.Maintenance == nil {
+		c.Maintenance = &MaintenanceConfig{}
+	}
+	if c.Maintenance.KeepaliveIntervalMinutes <= 0 {
+		c.Maintenance.KeepaliveIntervalMinutes = 30
 	}
 	if c.Mode == "" {
 		c.Mode = "text"

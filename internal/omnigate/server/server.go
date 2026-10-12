@@ -629,6 +629,165 @@ func (s *Server) handleGeminiWebAdmin(w http.ResponseWriter, r *http.Request) {
 		}
 		removed := s.gw.GeminiWebRemoveAccount(s.geminiWebProviderOrDefault(req.Provider), req.Label)
 		s.writeValue(w, 200, map[string]any{"ok": true, "removed": removed})
+	case (r.Method == http.MethodGet || r.Method == http.MethodPost) && path == "fingerprint":
+		var req struct {
+			Provider string `json:"provider"`
+			Target   string `json:"target"`
+			Sync     bool   `json:"sync"`
+		}
+		if r.Method == http.MethodPost {
+			if err := decodeBody(r, &req); err != nil {
+				s.adminError(w, err)
+				return
+			}
+		}
+		name := s.geminiWebProviderOrDefault(req.Provider)
+		if r.Method == http.MethodPost {
+			if req.Target != "" {
+				if err := s.gw.GeminiWebSetFingerprintTarget(name, req.Target); err != nil {
+					s.adminError(w, err)
+					return
+				}
+			}
+			if req.Sync {
+				ctx, cancel := context.WithTimeout(r.Context(), 40*time.Second)
+				defer cancel()
+				if err := s.gw.GeminiWebSyncChromeVersion(ctx, name); err != nil {
+					s.adminError(w, err)
+					return
+				}
+			}
+		}
+		st, err := s.gw.GeminiWebFingerprintStatus(name)
+		if err != nil {
+			s.adminError(w, err)
+			return
+		}
+		s.writeValue(w, 200, map[string]any{"ok": true, "fingerprint": st})
+	case r.Method == http.MethodGet && path == "gems":
+		name := s.geminiWebProviderOrDefault(r.URL.Query().Get("provider"))
+		ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+		defer cancel()
+		gems, err := s.gw.GeminiWebListGems(ctx, name, r.URL.Query().Get("label"))
+		if err != nil {
+			s.adminError(w, err)
+			return
+		}
+		s.writeValue(w, 200, map[string]any{"ok": true, "gems": gems})
+	case r.Method == http.MethodPost && path == "gems":
+		var req struct {
+			Provider    string `json:"provider"`
+			Label       string `json:"label"`
+			Action      string `json:"action"`
+			ID          string `json:"id"`
+			Name        string `json:"name"`
+			Prompt      string `json:"prompt"`
+			Description string `json:"description"`
+		}
+		if err := decodeBody(r, &req); err != nil {
+			s.adminError(w, err)
+			return
+		}
+		name := s.geminiWebProviderOrDefault(req.Provider)
+		ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+		defer cancel()
+		switch strings.ToLower(strings.TrimSpace(req.Action)) {
+		case "create":
+			id, err := s.gw.GeminiWebCreateGem(ctx, name, req.Label, req.Name, req.Prompt, req.Description)
+			if err != nil {
+				s.adminError(w, err)
+				return
+			}
+			s.writeValue(w, 200, map[string]any{"ok": true, "id": id})
+		case "update":
+			ok, err := s.gw.GeminiWebUpdateGem(ctx, name, req.Label, req.ID, req.Name, req.Prompt, req.Description)
+			if err != nil {
+				s.adminError(w, err)
+				return
+			}
+			s.writeValue(w, 200, map[string]any{"ok": true, "updated": ok})
+		case "delete":
+			ok, err := s.gw.GeminiWebDeleteGem(ctx, name, req.Label, req.ID)
+			if err != nil {
+				s.adminError(w, err)
+				return
+			}
+			s.writeValue(w, 200, map[string]any{"ok": true, "deleted": ok})
+		default:
+			s.adminError(w, fmt.Errorf("未知的 action %q（create/update/delete）", req.Action))
+		}
+	case r.Method == http.MethodGet && path == "chats":
+		name := s.geminiWebProviderOrDefault(r.URL.Query().Get("provider"))
+		recent, _ := strconv.Atoi(r.URL.Query().Get("recent"))
+		ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+		defer cancel()
+		chats, err := s.gw.GeminiWebListChats(ctx, name, r.URL.Query().Get("label"), recent)
+		if err != nil {
+			s.adminError(w, err)
+			return
+		}
+		s.writeValue(w, 200, map[string]any{"ok": true, "chats": chats})
+	case r.Method == http.MethodPost && path == "chats/delete":
+		var req struct {
+			Provider string `json:"provider"`
+			Label    string `json:"label"`
+			ID       string `json:"id"`
+		}
+		if err := decodeBody(r, &req); err != nil {
+			s.adminError(w, err)
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+		defer cancel()
+		ok, err := s.gw.GeminiWebDeleteChat(ctx, s.geminiWebProviderOrDefault(req.Provider), req.Label, req.ID)
+		if err != nil {
+			s.adminError(w, err)
+			return
+		}
+		s.writeValue(w, 200, map[string]any{"ok": true, "deleted": ok})
+	case r.Method == http.MethodPost && path == "chats/cleanup":
+		var req struct {
+			Provider   string  `json:"provider"`
+			Label      string  `json:"label"`
+			KeepHours  float64 `json:"keep_hours"`
+			SkipPinned *bool   `json:"skip_pinned"`
+		}
+		if err := decodeBody(r, &req); err != nil {
+			s.adminError(w, err)
+			return
+		}
+		if req.KeepHours <= 0 {
+			req.KeepHours = 24
+		}
+		skipPinned := true
+		if req.SkipPinned != nil {
+			skipPinned = *req.SkipPinned
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
+		defer cancel()
+		res, err := s.gw.GeminiWebCleanupChats(ctx, s.geminiWebProviderOrDefault(req.Provider), req.Label, req.KeepHours, skipPinned)
+		if err != nil {
+			s.adminError(w, err)
+			return
+		}
+		s.writeValue(w, 200, map[string]any{"ok": true, "result": res})
+	case r.Method == http.MethodPost && path == "keepalive":
+		var req struct {
+			Provider string `json:"provider"`
+			Label    string `json:"label"`
+		}
+		if err := decodeBody(r, &req); err != nil {
+			s.adminError(w, err)
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
+		defer cancel()
+		res, err := s.gw.GeminiWebKeepAlive(ctx, s.geminiWebProviderOrDefault(req.Provider), req.Label)
+		if err != nil {
+			s.adminError(w, err)
+			return
+		}
+		s.writeValue(w, 200, map[string]any{"results": res})
 	default:
 		writeJSON(w, 404, openai.ErrorJSON("not_found", "unknown admin route"))
 	}
@@ -859,7 +1018,8 @@ func (s *Server) traeProviderOrDefault(name string) string {
 	return ""
 }
 
-func (s *Server) writeValue(w http.ResponseWriter, status int, v any) {	body, err := json.Marshal(v)
+func (s *Server) writeValue(w http.ResponseWriter, status int, v any) {
+	body, err := json.Marshal(v)
 	if err != nil {
 		writeJSON(w, 500, openai.ErrorJSON("internal_error", err.Error()))
 		return

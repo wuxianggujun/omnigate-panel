@@ -181,7 +181,12 @@ func (p *Provider) ensureSession(ctx context.Context, acc *provider.Account) (*s
 	}
 	p.mu.Unlock()
 
-	s := &session{jar: parseCookies(raw), sessionUUID: newUUID(), source: raw}
+	// source is the canonical cookie string the session was built from. The jar
+	// re-serializes sorted, so comparing against the caller's raw string would
+	// differ even when nothing rotated and force a re-handshake every request;
+	// canonicalize both sides instead.
+	jar := parseCookies(raw)
+	s := &session{jar: jar, sessionUUID: newUUID(), source: jar.header()}
 	token, push, err := p.client.acquire(ctx, s.jar)
 	if err != nil {
 		s.lastErr = err.Error()

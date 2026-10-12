@@ -119,6 +119,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.serveLogged(w, r, s.handleMessages)
+	case r.Method == http.MethodGet && path == "/v1beta/models":
+		if !s.authorizedGemini(w, r) {
+			return
+		}
+		s.handleGeminiModels(w, r)
+	case r.Method == http.MethodPost && strings.HasPrefix(path, "/v1beta/models/"):
+		if !s.authorizedGemini(w, r) {
+			return
+		}
+		s.serveLogged(w, r, s.handleGeminiGenerate)
 	case r.Method == http.MethodGet && path == "/healthz":
 		s.handleHealth(w, r)
 	case r.Method == http.MethodGet && path == "/":

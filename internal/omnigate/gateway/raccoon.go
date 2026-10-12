@@ -255,16 +255,23 @@ func (g *Gateway) RaccoonAccounts(ctx context.Context, providerName string) ([]m
 	}
 	out := []map[string]any{}
 	for _, acc := range g.Accounts(providerName) {
+		// 先尝试自动续期；refresh_token 为空、或 access_token 未临近过期时是空操作。
+		g.ensureRaccoonToken(ctx, providerName, rp, acc)
 		item := map[string]any{
-			"label":      acc.Label,
-			"has_token":  acc.Cookie != "",
-			"expires_at": raccoon.TokenExpiry(acc.Cookie).Format(time.RFC3339),
+			"label":     acc.Label,
+			"has_token": acc.Cookie != "",
 		}
-		if t := raccoon.TokenExpiry(acc.Cookie); t.IsZero() {
-			delete(item, "expires_at")
+		if t := raccoon.TokenExpiry(acc.Cookie); !t.IsZero() {
+			item["expires_at"] = t.Format(time.RFC3339)
 		}
-		if acc.Cookie != "" {
-			g.ensureRaccoonToken(ctx, providerName, rp, acc)
+		// 自动续期后仍拿不到可用 access_token = 授权已失效（refresh_token 过期或被
+		// 上游吊销），只能重新登录。不标出来面板会一直显示「已授权」，但调用全是 401。
+		authInvalid := rp.TokenExpired(acc)
+		if authInvalid {
+			item["auth_invalid"] = true
+			item["auth_error"] = "access_token 已失效且自动刷新失败，请重新登录该账号"
+		}
+		if acc.Cookie != "" && !authInvalid {
 			bctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 			bal, berr := rp.Client().QueryBalance(bctx, acc.Cookie)
 			cancel()

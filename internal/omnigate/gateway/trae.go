@@ -293,6 +293,8 @@ func (g *Gateway) TraeAccounts(ctx context.Context, providerName string) ([]map[
 	}
 	out := []map[string]any{}
 	for _, acc := range g.Accounts(providerName) {
+		// 先尝试自动续期；refresh_token 为空、或 access_token 未临近过期时是空操作。
+		g.ensureTraeToken(ctx, providerName, tp, acc)
 		item := map[string]any{
 			"label":     acc.Label,
 			"has_token": acc.Cookie != "",
@@ -300,8 +302,13 @@ func (g *Gateway) TraeAccounts(ctx context.Context, providerName string) ([]map[
 		if acc.ExpiresAt > 0 {
 			item["expires_at"] = time.Unix(acc.ExpiresAt, 0).Format(time.RFC3339)
 		}
-		if acc.Cookie != "" {
-			g.ensureTraeToken(ctx, providerName, tp, acc)
+		// 自动续期后仍拿不到可用 access_token = 授权已失效，只能重新登录（同 raccoon）。
+		authInvalid := tp.TokenExpired(acc)
+		if authInvalid {
+			item["auth_invalid"] = true
+			item["auth_error"] = "access_token 已失效且自动刷新失败，请重新登录该账号"
+		}
+		if acc.Cookie != "" && !authInvalid {
 			bctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 			remain, limit, used, packs, berr := tp.Client().EntUsage(bctx, trae.AuthOf(acc))
 			cancel()

@@ -821,9 +821,17 @@ function ogBalKey(prov, label) { return prov + '\u0000' + label; }
 function ogRowHtml(p, a) {
   const label = a.label || '';
   const title = a.name || label || '(未命名)';
-  const status = a.has_token
-    ? '<span class="tag ok">已授权</span>'
-    : '<span class="tag warn">未授权</span>';
+  const ogAuthBad = !!a.auth_invalid;
+  const status = ogAuthBad
+    ? '<span class="tag bad">授权失效</span>'
+    : (a.has_token
+        ? '<span class="tag ok">已授权</span>'
+        : '<span class="tag warn">未授权</span>');
+  // 授权失效角标：raccoon / trae 的 refresh_token 被上游吊销或过期后，自动续期失败，
+  // 只能重新登录。不标出来面板会一直显示「已授权」，但调用全是 401。
+  const ogAuthTag = ogAuthBad
+    ? ' <span class="tag bad" title="' + esc(a.auth_error || 'access_token 已失效且自动刷新失败，请重新登录该账号') + '">⚠ 需重新登录</span>'
+    : '';
   // 限流冷却角标：上游对某账号回 429 后网关会冷却它并优先绕开，这里把剩余时间
   // 如实显示，避免「明明有账号却报无可用账号」时看不出原因。
   const coolMs = a.cooling_until ? parseAPITime(a.cooling_until) : 0;
@@ -875,7 +883,7 @@ function ogRowHtml(p, a) {
     '<td class="mark" aria-hidden="true"><i></i></td>' +
     '<td><span class="tag mute">' + esc(p.name) + '</span><div class="id">' + esc(p.type || '') + '</div></td>' +
     '<td class="who"><div class="nm">' + esc(title) + '</div><div class="id">' + esc(label) + (a.user_id ? ' · ' + esc(String(a.user_id).slice(0, 14)) : '') + '</div></td>' +
-    '<td>' + status + coolTag + sessTag + ogExpTag + exp + '</td>' +
+    '<td>' + status + ogAuthTag + coolTag + sessTag + ogExpTag + exp + '</td>' +
     '<td class="cred"><div class="n">' + balHtml + '</div></td>' +
     '<td class="num" style="color:var(--ink-3)">—</td>' +
     '<td class="num" style="color:var(--ink-3)">—</td>' +
@@ -942,6 +950,7 @@ function ogCooling(a) {
 // ogUsable 报告某个 OmniGate 账号是否「已授权且可用」（未冷却、会话未失效）。
 function ogUsable(a) {
   if (!a || !a.has_token) return false;
+  if (a.auth_invalid) return false;
   if (ogCooling(a)) return false;
   const v = a.session_verified_at ? parseAPITime(a.session_verified_at) : 0;
   const e = a.session_expired_at ? parseAPITime(a.session_expired_at) : 0;

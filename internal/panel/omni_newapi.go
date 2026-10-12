@@ -21,6 +21,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/wuxianggujun/omnigate-panel/internal/panelauth"
 )
@@ -50,12 +51,9 @@ func (p *Panel) omniNewAPIAuthorize(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "provider 不能为空")
 		return
 	}
-	if req.Label == "" {
-		writeErr(w, http.StatusBadRequest, "label 不能为空")
-		return
-	}
-	// 先认领 label（普通 user 只能用自己的名字），避免脚本回传后才失败。
-	if !p.claimOmniLabel(r, req.Provider, req.Label) {
+	// label 可以留空 = 自动命名（回传时用站点用户名当账号名）。留空时发起阶段还
+	// 不知道叫什么，认领不了，改在回传成功后用真实账号名落归属（见 takeNewAPIClaim）。
+	if req.Label != "" && !p.claimOmniLabel(r, req.Provider, req.Label) {
 		writeErr(w, http.StatusConflict, "账号名「"+req.Label+"」已被其他用户占用，请换一个")
 		return
 	}
@@ -72,7 +70,14 @@ func (p *Panel) omniNewAPIAuthorize(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadGateway, "上游未返回登录信息")
 		return
 	}
-	log.Printf("panel: New API 浏览器登录发起 %s/%s", req.Provider, req.Label)
+	if req.Label == "" {
+		p.rememberNewAPIClaim(stateID, req.Provider, r)
+	}
+	who := req.Label
+	if who == "" {
+		who = "（自动命名）"
+	}
+	log.Printf("panel: New API 浏览器登录发起 %s/%s", req.Provider, who)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":         true,
 		"state":      stateID,
@@ -115,8 +120,77 @@ func (p *Panel) omniNewAPICapture(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// 自动命名的账号到这一步才知道叫什么，此时给发起人落归属。
+	if lbl := omniResultLabel(d); lbl != "" {
+		p.takeNewAPIClaim(stateID, lbl)
+	}
 	log.Printf("panel: New API 浏览器登录回传完成 state=%s", stateID)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "account": d})
+}
+
+// newapiClaim 一次「自动命名」抓取会话的发起人。
+type newapiClaim struct {
+	provider string
+	owner    string
+	at       time.Time
+}
+
+// newapiClaimTTL 与网关侧 newapiPendingTTL（15 分钟）对齐。
+const newapiClaimTTL = 15 * time.Minute
+
+// rememberNewAPIClaim 记下发起人，供回传后按真实账号名落归属。只有普通 user 需要
+// （管理员/无主账号保持共享），其他角色直接忽略。
+func (p *Panel) rememberNewAPIClaim(stateID, provider string, r *http.Request) {
+	if stateID == "" || roleOf(r) != panelauth.RoleUser {
+		return
+	}
+	owner := usernameOf(r)
+	if owner == "" {
+		return
+	}
+	p.newapiClaimsMu.Lock()
+	defer p.newapiClaimsMu.Unlock()
+	if p.newapiClaims == nil {
+		p.newapiClaims = map[string]newapiClaim{}
+	}
+	for k, v := range p.newapiClaims {
+		if time.Since(v.at) > newapiClaimTTL {
+			delete(p.newapiClaims, k)
+		}
+	}
+	p.newapiClaims[stateID] = newapiClaim{provider: provider, owner: owner, at: time.Now()}
+}
+
+// takeNewAPIClaim 用回传到的真实账号名给发起人落归属。label 已被别人占用时不动
+// （不抢别人的账号），只记一条日志。
+func (p *Panel) takeNewAPIClaim(stateID, label string) {
+	p.newapiClaimsMu.Lock()
+	c, ok := p.newapiClaims[stateID]
+	delete(p.newapiClaims, stateID)
+	p.newapiClaimsMu.Unlock()
+	if !ok || c.owner == "" || label == "" || p.ownership == nil {
+		return
+	}
+	key := omniOwnerKey(c.provider, label)
+	if cur := p.ownership.Owner(key); cur != "" && cur != c.owner {
+		log.Printf("panel: New API 自动命名归属冲突 %s（已属 %s，跳过）", key, cur)
+		return
+	}
+	p.ownership.Set(key, c.owner)
+}
+
+// omniResultLabel 取抓取结果的最终账号名（自动命名时与发起请求里的空 label 不同）。
+func omniResultLabel(d any) string {
+	g, err := toGeneric(d)
+	if err != nil {
+		return ""
+	}
+	m, _ := g.(map[string]any)
+	if m == nil {
+		return ""
+	}
+	s, _ := m["label"].(string)
+	return strings.TrimSpace(s)
 }
 
 // omniNewAPICaptureStatus 轮询抓取是否完成（前端在发起后轮询）。

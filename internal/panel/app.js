@@ -4797,8 +4797,18 @@ async function startNewAPIAuth() {
     $('naAuthLoad').hidden = true;
     $('naAuthReady').hidden = false;
     $('naMode').textContent = '浏览器脚本回传';
-    startNaPoll(res.label || $('naLabel').value.trim());
     if (naSigninUrl) window.open(naSigninUrl, '_blank', 'noopener');
+    // label 留空 = 自动命名：先记下现有账号名，之后靠「多出来的那个」确认成功。
+    const lbl = res.label || $('naLabel').value.trim() || '';
+    let baseline = null;
+    if (!lbl) {
+      try {
+        const list = await api('omni/accounts');
+        const prov = (list || []).find(p => p.name === provName());
+        baseline = new Set(((prov && prov.accounts) || []).map(a => a.label));
+      } catch (e) { baseline = new Set(); }
+    }
+    startNaPoll(lbl, baseline);
   } catch (e) {
     $('naAuthLoad').hidden = true;
     $('btnStartNaAuth').disabled = false;
@@ -4807,7 +4817,8 @@ async function startNewAPIAuth() {
 }
 
 // startNaPoll 轮询抓取状态：state 从「等待」变「结束」且账号已入库即视为成功。
-function startNaPoll(label) {
+// label 为空 = 自动命名，此时靠「回传前不存在、回传后出现」的账号名来确认。
+function startNaPoll(label, baseline) {
   let tries = 0;
   naPollTimer = setInterval(async () => {
     tries++;
@@ -4824,12 +4835,15 @@ function startNaPoll(label) {
       // pending 结束：可能是回传成功，也可能只是 state 过期。用账号是否入库来确认。
       const list = await api('omni/accounts');
       const prov = (list || []).find(p => p.name === provName());
-      const hit = prov && (prov.accounts || []).some(a => a.label === label && a.has_token);
+      const accts = (prov && prov.accounts) || [];
+      const hit = label
+        ? accts.find(a => a.label === label && a.has_token)
+        : accts.find(a => a.has_token && !(baseline && baseline.has(a.label)));
       if (!hit) return; // 再等等（state 过期时最终会超时）
       stopNaPoll();
       $('naAuthReady').hidden = true;
       $('naAuthDone').hidden = false;
-      $('naAuthDone').textContent = '授权成功：' + label + '，账号已载入池中';
+      $('naAuthDone').textContent = '授权成功：' + hit.label + '，账号已载入池中';
       $('btnStartNaAuth').disabled = false;
       await loadOverview(true);
       setTimeout(closeAdd, 1600);

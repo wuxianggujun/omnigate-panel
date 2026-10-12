@@ -184,6 +184,12 @@ type Panel struct {
 	ownership *ownershipStore
 	// regLimit 自助注册限流（同 IP 固定窗口计数）。
 	regLimit *regLimiter
+
+	// newapiClaims 记下「自动命名」抓取会话的发起人（见 omni_newapi.go）。回传端点
+	// 是公开的（脚本跨域 POST，带不上面板会话），所以归属只能在发起时按 state 记下、
+	// 回传成功后用真实账号名落标。
+	newapiClaimsMu sync.Mutex
+	newapiClaims   map[string]newapiClaim
 }
 
 // tryLockAccount 尝试锁定账号的任务执行；已在执行返回 false。

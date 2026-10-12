@@ -112,14 +112,17 @@ type traePending struct {
 	at        time.Time
 }
 
-// newapiPending remembers an in-flight New API browser-login capture. The user
-// pre-fills the label + chat API key in the panel; the snippet only supplies the
-// auth bundle, so we keep the rest here until the capture arrives.
+// newapiPending remembers an in-flight New API browser-login capture. The panel
+// pre-fills the chat API key (and, optionally, the label) before starting; the
+// snippet only supplies the auth bundle, so we keep the rest here until the
+// capture arrives. autoLabel means the user left the name blank: the account is
+// then named after the site identity once the capture lands.
 type newapiPending struct {
-	provider string
-	label    string
-	apiKey   string
-	at       time.Time
+	provider  string
+	label     string
+	autoLabel bool
+	apiKey    string
+	at        time.Time
 }
 
 type modelEntry struct {

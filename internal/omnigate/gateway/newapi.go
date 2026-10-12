@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/provider"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/provider/newapi"
@@ -65,9 +66,8 @@ func (g *Gateway) NewAPIAuthorize(providerName, label, apiKey string) (map[strin
 	if err != nil {
 		return nil, err
 	}
-	if label == "" {
-		label = fmt.Sprintf("账号 %d", len(g.Accounts(providerName))+1)
-	}
+	// label 留空 = 自动命名：账号名在回传时用站点身份生成（用户不用自己起名）。
+	label = strings.TrimSpace(label)
 	stateID := util.UUID()
 	g.newapiPendMu.Lock()
 	for k, v := range g.newapiPend {
@@ -76,10 +76,11 @@ func (g *Gateway) NewAPIAuthorize(providerName, label, apiKey string) (map[strin
 		}
 	}
 	g.newapiPend[stateID] = newapiPending{
-		provider: providerName,
-		label:    label,
-		apiKey:   strings.TrimSpace(apiKey),
-		at:       time.Now(),
+		provider:  providerName,
+		label:     label,
+		autoLabel: label == "",
+		apiKey:    strings.TrimSpace(apiKey),
+		at:        time.Now(),
 	}
 	g.newapiPendMu.Unlock()
 
@@ -138,8 +139,56 @@ func (g *Gateway) NewAPICapture(ctx context.Context, stateID string, p NewAPICap
 		}
 		cancel()
 	}
-	return g.upsertNewAPIAccount(pend.provider, pend.label, access, strings.TrimSpace(p.SessionSID),
+	// 自动命名：用站点身份当账号名（用户名优先，其次数字 ID，最后退回「账号 N」）。
+	label := pend.label
+	if pend.autoLabel || label == "" {
+		label = g.newAPIAutoLabel(pend.provider, name, userID)
+	}
+	return g.upsertNewAPIAccount(pend.provider, label, access, strings.TrimSpace(p.SessionSID),
 		strings.TrimSpace(p.SessionCookie), p.ExpiresAt, name, userID, pend.apiKey), nil
+}
+
+// newAPIAutoLabel 在用户没填账号名时，用站点身份生成一个：优先用户名（站点内唯一），
+// 其次数字用户 ID，最后才退回「账号 N」占位。
+func (g *Gateway) newAPIAutoLabel(providerName, name, userID string) string {
+	if s := sanitizeLabel(name); s != "" {
+		return s
+	}
+	if s := sanitizeLabel(userID); s != "" {
+		return "u" + s
+	}
+	return fmt.Sprintf("账号 %d", len(g.Accounts(providerName))+1)
+}
+
+// sanitizeLabel 把站点用户名收成可安全当账号名 / 归属键的短字符串：丢掉控制字符、
+// 折叠空白、限长 48 个 rune（账号名会进 state.json 与归属表，不该带换行或超长串）。
+func sanitizeLabel(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	var b strings.Builder
+	prevSpace := false
+	for _, r := range s {
+		if unicode.IsSpace(r) {
+			if prevSpace || b.Len() == 0 {
+				continue
+			}
+			prevSpace = true
+			b.WriteRune(' ')
+			continue
+		}
+		if r < 0x20 || r == 0x7f {
+			continue
+		}
+		prevSpace = false
+		b.WriteRune(r)
+	}
+	out := strings.TrimSpace(b.String())
+	if rs := []rune(out); len(rs) > 48 {
+		out = string(rs[:48])
+	}
+	return out
 }
 
 // NewAPISetAPIKey updates an existing account's chat API key (sk-...). The key is

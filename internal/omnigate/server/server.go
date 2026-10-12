@@ -109,6 +109,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.serveLogged(w, r, s.handleResponses)
+	case r.Method == http.MethodPost && (path == "/v1/messages/count_tokens" || path == "/messages/count_tokens"):
+		if !s.authorizedAnthropic(w, r) {
+			return
+		}
+		s.handleCountTokens(w, r)
+	case r.Method == http.MethodPost && (path == "/v1/messages" || path == "/messages"):
+		if !s.authorizedAnthropic(w, r) {
+			return
+		}
+		s.serveLogged(w, r, s.handleMessages)
 	case r.Method == http.MethodGet && path == "/healthz":
 		s.handleHealth(w, r)
 	case r.Method == http.MethodGet && path == "/":

@@ -175,9 +175,10 @@ func (p *Provider) ensureSession(ctx context.Context, acc *provider.Account) (*s
 	key := p.sessionKey(acc)
 
 	p.mu.Lock()
-	if s := p.sessions[key]; s != nil && s.source == raw && s.healthy {
+	prev := p.sessions[key]
+	if prev != nil && prev.source == raw && prev.healthy {
 		p.mu.Unlock()
-		return s, nil
+		return prev, nil
 	}
 	p.mu.Unlock()
 
@@ -186,6 +187,12 @@ func (p *Provider) ensureSession(ctx context.Context, acc *provider.Account) (*s
 	// differ even when nothing rotated and force a re-handshake every request;
 	// canonicalize both sides instead.
 	jar := parseCookies(raw)
+	// A stale __Secure-1PSIDTS is the usual cause of a 401 on an otherwise valid
+	// cookie set: rotate it on demand (the same call the browser makes) rather
+	// than making the user paste cookies again. Not a background keep-alive loop.
+	if prev != nil && prev.source == raw && !prev.healthy {
+		_ = p.client.rotateCookies(ctx, jar)
+	}
 	s := &session{jar: jar, sessionUUID: newUUID(), source: jar.header()}
 	token, push, err := p.client.acquire(ctx, s.jar)
 	if err != nil {

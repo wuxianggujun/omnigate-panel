@@ -143,6 +143,7 @@ func (g *Gateway) NewAPICapture(ctx context.Context, stateID string, p NewAPICap
 }
 
 // NewAPISetToken 允许手动粘贴 access_token / session（抓取失败时的兜底）。
+// 目前仅作为服务端能力保留，面板暂未暴露入口。
 func (g *Gateway) NewAPISetToken(ctx context.Context, providerName, label, accessToken, sid, apiKey string) (*NewAPILoginResult, error) {
 	np, err := g.newapiProvider(providerName)
 	if err != nil {

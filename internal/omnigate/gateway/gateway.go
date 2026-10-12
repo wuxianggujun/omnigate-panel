@@ -56,6 +56,10 @@ type Gateway struct {
 	convMu sync.Mutex
 	convs  map[string]*conv
 
+	// refreshLocks 按账号串行化 token 轮换：轮换型 refresh_token 是一次性的，
+	// 定时刷新与按需刷新并发时会互相作废，并把旧 session 留在内存里。见 refreshToken。
+	refreshLocks sync.Map // key: provider+"\x00"+label -> *sync.Mutex
+
 	pendingMu sync.Mutex
 	pending   map[string]raccoonPending
 
@@ -1056,12 +1060,28 @@ type TokenRefresher interface {
 }
 
 // refreshToken mints a fresh access token via the provider and persists it.
+//
+// Rotation is serialized per account: rotating refresh tokens are single-use, so
+// two concurrent refreshes (a scheduled one and an on-demand one) would each send
+// the same session id, and the loser would invalidate the winner's session. Under
+// the lock the second caller observes the already-rotated credentials (accounts
+// are shared pointers) and rotates the new pair instead.
 func (g *Gateway) refreshToken(ctx context.Context, provName string, tr TokenRefresher, acc *provider.Account) error {
+	mu := g.accountRefreshLock(provName, acc.Label)
+	mu.Lock()
+	defer mu.Unlock()
 	if err := tr.RefreshAccount(ctx, acc); err != nil {
 		return err
 	}
 	g.st.SetTokens(provName, acc.Label, acc.Cookie, acc.RefreshToken)
 	return nil
+}
+
+// accountRefreshLock returns the per-account rotation mutex (created on demand).
+func (g *Gateway) accountRefreshLock(provName, label string) *sync.Mutex {
+	key := provName + "\x00" + label
+	m, _ := g.refreshLocks.LoadOrStore(key, &sync.Mutex{})
+	return m.(*sync.Mutex)
 }
 
 // openStream picks an account (switching on exhausted credits) and opens the stream.

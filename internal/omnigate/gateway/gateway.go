@@ -56,6 +56,10 @@ type Gateway struct {
 	// modelSaveMu 串行化落盘（tmp 文件同名，并发写会互相踩）。
 	modelSaveMu sync.Mutex
 
+	// modelMap is the global alias → target model table (see modelmap.go). Nil =
+	// inert (no mapping). Populated from the data dir by New.
+	modelMap *ModelMappingStore
+
 	convMu sync.Mutex
 	convs  map[string]*conv
 
@@ -231,6 +235,11 @@ func New(cfg *config.Config, st *state.State, log *logx.Logger, opts ...Option) 
 	}
 	for _, o := range opts {
 		o(g)
+	}
+	// Global alias → target model table (model_mapping.py). Optional: absent data
+	// dir = inert store.
+	if g.modelMap == nil && cfg.DataDir != "" {
+		g.modelMap = NewModelMappingStore(filepath.Join(cfg.DataDir, "model-mapping.json"))
 	}
 	for i := range cfg.Providers {
 		p := &cfg.Providers[i]
@@ -565,6 +574,24 @@ func (g *Gateway) ListModelsFor(ctx context.Context, allowed []string) []openai.
 			out = append(out, m)
 		}
 	}
+	// Expose configured model aliases (model_mapping) so a client can discover
+	// them. An alias is listed only when its target's provider is in scope for
+	// this key — otherwise the caller would see a name it cannot actually use.
+	seen := make(map[string]bool, len(out))
+	for _, m := range out {
+		seen[m.ID] = true
+	}
+	for _, alias := range g.ModelMappings().Aliases() {
+		if seen[alias] {
+			continue
+		}
+		pn, _ := g.route(alias)
+		if allow != nil && !allow[pn] {
+			continue
+		}
+		seen[alias] = true
+		out = append(out, openai.Model{ID: alias, Object: "model", OwnedBy: pn})
+	}
 	return out
 }
 
@@ -577,8 +604,13 @@ func (g *Gateway) ProviderOf(model string) string {
 	return name
 }
 
-// route splits a requested model into (provider, upstream model).
+// route splits a requested model into (provider, upstream model). A configured
+// global alias (modelmap.go) is resolved first, so a client can send "gpt-4o"
+// and have it route to the mapped upstream model.
 func (g *Gateway) route(model string) (string, string) {
+	if g.modelMap != nil {
+		model = g.modelMap.Resolve(model)
+	}
 	if model == "" {
 		return g.cfg.DefaultProvider, g.cfg.DefaultModel
 	}

@@ -143,6 +143,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.serveLogged(w, r, s.handleGeminiGenerate)
+	case (r.Method == http.MethodGet || r.Method == http.MethodPost || r.Method == http.MethodDelete) &&
+		(path == "/admin/model-mapping" || strings.HasPrefix(path, "/admin/model-mapping/")):
+		if !s.authorized(w, r) {
+			return
+		}
+		s.handleModelMapping(w, r)
 	case r.Method == http.MethodGet && path == "/healthz":
 		s.handleHealth(w, r)
 	case r.Method == http.MethodGet && strings.HasPrefix(path, "/images/"):
@@ -829,6 +835,47 @@ func (s *Server) handleGeminiWebAdmin(w http.ResponseWriter, r *http.Request) {
 		s.writeValue(w, 200, map[string]any{"results": res})
 	default:
 		writeJSON(w, 404, openai.ErrorJSON("not_found", "unknown admin route"))
+	}
+}
+
+// handleModelMapping serves /admin/model-mapping — the global alias → target
+// model table (ported from gemini2api's /admin/model-mapping router). GET lists,
+// POST sets ({alias,target}), DELETE {alias} removes. Changes take effect on the
+// next request (route() consults the table live).
+func (s *Server) handleModelMapping(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		s.writeValue(w, 200, map[string]any{"mappings": s.gw.ModelMappings().All()})
+	case http.MethodPost:
+		var req struct {
+			Alias  string `json:"alias"`
+			Target string `json:"target"`
+		}
+		if err := decodeBody(r, &req); err != nil {
+			s.adminError(w, err)
+			return
+		}
+		if err := s.gw.SetModelMapping(req.Alias, req.Target); err != nil {
+			s.adminError(w, err)
+			return
+		}
+		s.writeValue(w, 200, map[string]any{"ok": true, "mappings": s.gw.ModelMappings().All()})
+	case http.MethodDelete:
+		alias := strings.TrimPrefix(r.URL.Path, "/admin/model-mapping/")
+		if alias == r.URL.Path || alias == "" {
+			alias = r.URL.Query().Get("alias")
+		}
+		if strings.TrimSpace(alias) == "" {
+			s.adminError(w, fmt.Errorf("alias 不能为空"))
+			return
+		}
+		if !s.gw.DeleteModelMapping(alias) {
+			s.adminError(w, fmt.Errorf("映射「%s」不存在", alias))
+			return
+		}
+		s.writeValue(w, 200, map[string]any{"ok": true, "mappings": s.gw.ModelMappings().All()})
+	default:
+		s.adminError(w, fmt.Errorf("不支持的请求方法 %s", r.Method))
 	}
 }
 

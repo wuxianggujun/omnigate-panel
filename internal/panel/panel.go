@@ -233,11 +233,11 @@ func New(cfg Config) *Panel {
 		cfg.RedisMode = "noop"
 	}
 	p := &Panel{
-		cfg:      cfg,
-		mux:      http.NewServeMux(),
-		started:  time.Now(),
-		logs:     NewRing(500),
-		logins:   map[string]loginSession{},
+		cfg:       cfg,
+		mux:       http.NewServeMux(),
+		started:   time.Now(),
+		logs:      NewRing(500),
+		logins:    map[string]loginSession{},
 		ownership: newOwnershipStore(cfg.OwnershipFile),
 		regLimit:  newRegLimiter(5, time.Hour),
 	}
@@ -333,6 +333,11 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("/panel/api/omni/admin/raccoon/", p.tenant(p.omniAdminProxy))
 	p.mux.HandleFunc("/panel/api/omni/admin/trae/", p.tenant(p.omniAdminProxy))
 	p.mux.HandleFunc("/panel/api/omni/admin/geminiweb/", p.tenant(p.omniAdminProxy))
+	// 全局「模型名 → 实际模型」映射（model_mapping.py）：平台级设置，读取需登录、
+	// 写入仅管理员。见 omni_modelmap.go。
+	p.mux.HandleFunc("GET /panel/api/omni/model-mapping", p.privileged(p.omniModelMapProxy))
+	p.mux.HandleFunc("POST /panel/api/omni/model-mapping", p.admin(p.omniModelMapProxy))
+	p.mux.HandleFunc("DELETE /panel/api/omni/model-mapping/", p.admin(p.omniModelMapProxy))
 	p.mux.HandleFunc("POST /panel/api/login/start", p.tenant(p.loginStart))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/revive", p.tenant(p.accountRevive))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/disable", p.tenant(p.accountDisable))

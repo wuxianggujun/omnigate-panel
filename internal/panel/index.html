@@ -769,6 +769,31 @@
         </div>
       </div>
 
+      <!-- 全局模型名映射（别名 → 实际模型，热生效） -->
+      <div class="box" id="mmBox" data-admin>
+        <header>
+          <h3>模型名映射 <span class="hint">把客户端请求里的模型名改指到别的上游模型（如 gpt-4o → geminiweb/gemini-pro）</span></h3>
+          <span class="grow"></span>
+          <button class="xs" id="btnMmReload">刷新</button>
+        </header>
+        <div class="pad">
+          <div class="og-hint" style="margin-top:0">客户端仍用<strong>别名</strong>调用（别名会出现在 <code>/v1/models</code> 里），网关在路由前把它解析成<strong>目标模型</strong>再转发。目标可写全限定名（<code>provider/model</code>）或裸模型名（回落到默认 provider）。别名不能等于目标；改完即热生效，落盘 <code>data/model-mapping.json</code>。</div>
+          <div class="state" id="mmState"></div>
+          <div class="tbl-wrap">
+            <table class="acc md" id="mmTable">
+              <thead><tr><th>别名（客户端调用）</th><th>目标模型</th><th class="c-acts"></th></tr></thead>
+              <tbody id="mmBody"></tbody>
+            </table>
+          </div>
+          <div class="og-row" style="margin-top:10px">
+            <label class="fld" style="margin:0;max-width:240px"><span class="lb">别名</span><input id="mmAlias" placeholder="如 gpt-4o"></label>
+            <label class="fld" style="margin:0;max-width:300px"><span class="lb">目标模型</span><input id="mmTarget" placeholder="如 geminiweb/gemini-pro"></label>
+            <button class="xs primary" id="btnMmAdd">添加 / 更新</button>
+            <span class="og-msg" id="mmMsg"></span>
+          </div>
+        </div>
+      </div>
+
       <div class="box">
         <header>
           <h3>网关密钥 <span class="hint">按供应商收窄：决定每把客户端密钥能用哪些模型</span></h3>

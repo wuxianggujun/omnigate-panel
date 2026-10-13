@@ -4198,7 +4198,8 @@ async function ensureOmniKey() {
 // /omni/admin/<...> → /panel/api/omni/admin/<...>，面板在服务端注入 api_key 转发，
 // 并按归属打标/过滤（见 internal/panel/omni_admin_proxy.go）。鉴权走同源会话 Cookie。
 async function apiAbs(path, opts = {}) {
-  const p = path.replace(/^\/omni\/admin\//, '/panel/api/omni/admin/');
+  const p = path.replace(/^\/omni\/admin\//, '/panel/api/omni/admin/')
+                 .replace(/^\/omni\/model-mapping/, '/panel/api/omni/model-mapping');
   const h = Object.assign({}, opts.headers || {});
   if (opts.body) h['Content-Type'] = 'application/json';
   const r = await fetch(p, Object.assign({}, opts, { headers: h }));
@@ -4278,6 +4279,7 @@ async function loadOmniConfig() {
     renderProvEditor();
     renderKeyEditor();
     renderFingerprint();
+    if (isAdmin()) loadModelMappings();
     ogMsg('cfgMsg', '已加载 ' + omniCfg.providers.length + ' 个供应商', 'ok');
   } catch (e) {
     $('provEditor').innerHTML = '<div class="empty">供应商配置不可用：' + esc(e.message) + '</div>';
@@ -4423,6 +4425,64 @@ async function fpSyncVersion() {
   } catch (e) {
     ogMsg('fpMsg', '同步失败：' + e.message, 'err');
   } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+/* ── 全局模型名映射（model_mapping.py：别名 → 实际模型） ──
+ *
+ * 读取/写入都走面板代理 /panel/api/omni/model-mapping（面板服务端注入 api_key
+ * 转发到进程内 OmniGate 的 /admin/model-mapping）。平台级设置：只有管理员能看到
+ * 与修改（mmBox 带 data-admin，写入端点也走 admin 守卫）。 */
+
+async function loadModelMappings() {
+  const tb = $('mmBody'), st = $('mmState');
+  if (!tb) return;
+  if (st) { st.hidden = false; st.className = 'state'; st.innerHTML = '<span class="dots">加载中</span>'; }
+  tb.innerHTML = '';
+  try {
+    const d = await apiAbs('/omni/model-mapping');
+    const m = (d && d.mappings) || {};
+    const keys = Object.keys(m).sort();
+    if (st) st.hidden = true;
+    if (!keys.length) {
+      tb.innerHTML = '<tr><td colspan="3"><div class="empty">还没有配置任何模型名映射</div></td></tr>';
+      return;
+    }
+    tb.innerHTML = keys.map(k => '<tr>' +
+      '<td class="id">' + esc(k) + '</td>' +
+      '<td>' + esc(m[k]) + '</td>' +
+      '<td class="c-acts"><button class="xs ghost danger" data-mmdel="' + esc(k) + '">删除</button></td>' +
+      '</tr>').join('');
+  } catch (e) {
+    if (st) { st.className = 'state err'; st.innerHTML = esc(e.message); }
+  }
+}
+
+async function mmAdd() {
+  const alias = (($('mmAlias') && $('mmAlias').value) || '').trim();
+  const target = (($('mmTarget') && $('mmTarget').value) || '').trim();
+  if (!alias || !target) { ogMsg('mmMsg', '别名与目标模型都要填', 'err'); return; }
+  try {
+    await apiAbs('/omni/model-mapping', { method: 'POST', body: JSON.stringify({ alias, target }) });
+    ogMsg('mmMsg', '已保存「' + alias + '」→「' + target + '」', 'ok');
+    if ($('mmAlias')) $('mmAlias').value = '';
+    if ($('mmTarget')) $('mmTarget').value = '';
+    loadModelMappings();
+  } catch (e) {
+    ogMsg('mmMsg', '保存失败：' + e.message, 'err');
+  }
+}
+
+async function mmDelete(alias, btn) {
+  if (!confirm('删除映射「' + alias + '」？')) return;
+  if (btn) btn.disabled = true;
+  try {
+    await apiAbs('/omni/model-mapping/' + encodeURIComponent(alias), { method: 'DELETE' });
+    toast('已删除映射', 'ok');
+    loadModelMappings();
+  } catch (e) {
+    toast('删除失败：' + e.message, 'err');
     if (btn) btn.disabled = false;
   }
 }
@@ -5707,6 +5767,14 @@ async function saveOutbound() {
   on('btnFpApply', fpApplyTarget);
   on('btnFpSync', fpSyncVersion);
   on('fpProvider', loadFingerprintStatus, 'change');
+  // 全局模型名映射（model_mapping）：仅管理员可见/可改。
+  on('btnMmReload', loadModelMappings);
+  on('btnMmAdd', mmAdd);
+  const mmb = $('mmBody');
+  if (mmb) mmb.addEventListener('click', ev => {
+    const b = ev.target.closest('button[data-mmdel]');
+    if (b) mmDelete(b.dataset.mmdel, b);
+  });
   // Gemini Web 会话 / Gems 管理（账号级运维，走 /omni/admin/geminiweb/*）
   on('btnCloseGChat', closeGChats);
   on('btnGcReload', loadGChats);

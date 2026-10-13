@@ -4,10 +4,13 @@ package state
 
 import (
 	"encoding/json"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/wuxianggujun/omnigate-panel/internal/kv"
 )
 
 // State is the on-disk runtime state.
@@ -19,6 +22,10 @@ type State struct {
 	Refresh     map[string]map[string]string `json:"refresh_tokens"`
 	Runtime     map[string][]DynAccount      `json:"dyn_accounts"`
 	LastCheckin map[string]int64             `json:"last_checkin"`
+	// 可选 KV 后端（PostgreSQL）：非空且 key 非空时库为权威——读优先库、写只写库，
+	// 文件退化为「首次导入源 + 断库兜底」。见 SetBackend。
+	backend    kv.Backend
+	backendKey string
 }
 
 // DynAccount is an account added at runtime (e.g. through the Raccoon web
@@ -80,9 +87,64 @@ func Load(dir string) (*State, error) {
 	return s, nil
 }
 
+// SetBackend 指定状态 KV 后端（PostgreSQL）。库为权威：命中即用库（覆盖文件载入的
+// 状态），未命中则把当前（文件载入的）状态导入库；之后落盘写库、不再写文件。
+// b==nil 或 key=="" 时退化为纯文件模式。
+func (s *State) SetBackend(b kv.Backend, key string) error {
+	if s == nil || b == nil || key == "" {
+		return nil
+	}
+	s.mu.Lock()
+	s.backend = b
+	s.backendKey = key
+	s.mu.Unlock()
+	data, found, err := b.Load(key)
+	if err != nil {
+		return err
+	}
+	if found {
+		var loaded State
+		if err := json.Unmarshal(data, &loaded); err != nil {
+			return err
+		}
+		s.mu.Lock()
+		s.Active = loaded.Active
+		s.Cookies = loaded.Cookies
+		s.Refresh = loaded.Refresh
+		s.Runtime = loaded.Runtime
+		s.LastCheckin = loaded.LastCheckin
+		if s.Active == nil {
+			s.Active = map[string]int{}
+		}
+		if s.Cookies == nil {
+			s.Cookies = map[string]map[string]string{}
+		}
+		if s.Refresh == nil {
+			s.Refresh = map[string]map[string]string{}
+		}
+		if s.Runtime == nil {
+			s.Runtime = map[string][]DynAccount{}
+		}
+		if s.LastCheckin == nil {
+			s.LastCheckin = map[string]int64{}
+		}
+		s.mu.Unlock()
+		return nil
+	}
+	// 首次启用：把文件状态整体导入库。
+	s.Save()
+	return nil
+}
+
 func (s *State) saveLocked() {
 	b, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
+		return
+	}
+	if s.backend != nil && s.backendKey != "" {
+		if err := s.backend.Save(s.backendKey, b); err != nil {
+			log.Printf("[omnigate] 状态写后端失败: %v", err)
+		}
 		return
 	}
 	_ = os.WriteFile(s.path, b, 0o600)

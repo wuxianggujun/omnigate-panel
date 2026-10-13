@@ -24,6 +24,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/wuxianggujun/omnigate-panel/internal/kv"
 )
 
 // hourlyKeep 小时桶的保留时长；超出后折叠为日桶。
@@ -85,6 +87,14 @@ type Recorder struct {
 	buckets map[string]*bucket // key: scope|realm|uid|model|rate
 	dirty   bool
 	started time.Time
+	// lastBytes 最近一次快照的字节数（供面板 FileBytes 展示；配了后端时文件不再更新，
+	// 用这个代替 os.Stat）。持 r.mu 读写。
+	lastBytes int64
+
+	// 可选 KV 后端（PostgreSQL）：非空且 key 非空时库为权威——读优先库、写只写库，
+	// 文件退化为「首次导入源 + 断库兜底」。见 EnableBackend。
+	backend    kv.Backend
+	backendKey string
 
 	stopOnce sync.Once
 	stop     chan struct{}
@@ -106,6 +116,29 @@ func New(path string) *Recorder {
 		}
 	}
 	return r
+}
+
+// EnableBackend 指定 KV 后端（PostgreSQL）。库为权威：命中即用库，未命中则把当前
+// （文件载入的）桶导入库；之后落盘写库、不再写文件。b==nil 或 key=="" 时退化为
+// 纯文件模式。必须在 Start 之前调用。
+func (r *Recorder) EnableBackend(b kv.Backend, key string) error {
+	if r == nil || b == nil || key == "" {
+		return nil
+	}
+	r.mu.Lock()
+	r.backend = b
+	r.backendKey = key
+	r.mu.Unlock()
+	data, found, err := b.Load(key)
+	if err != nil {
+		return err
+	}
+	if found {
+		return r.loadFromBytes(data, "kv:"+key)
+	}
+	// 首次启用：把文件载入的桶整体导入库。
+	r.flush(true)
+	return nil
 }
 
 // Start 启动后台防抖落盘与折叠。Stop 前一直运行。
@@ -306,20 +339,29 @@ func (r *Recorder) load() error {
 		}
 		return err
 	}
+	return r.loadFromBytes(raw, r.path)
+}
+
+// loadFromBytes 解析一份 usage 快照并重建内存桶（替换语义：调用方应在尚未写入时调用）。
+func (r *Recorder) loadFromBytes(raw []byte, src string) error {
 	var f file
 	if err := json.Unmarshal(raw, &f); err != nil {
 		return err
 	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.buckets = make(map[string]*bucket, len(f.Buckets))
 	for i := range f.Buckets {
 		b := f.Buckets[i]
 		r.buckets[b.Scope+"|"+b.Realm+"|"+b.UID+"|"+b.Model+"|"+b.Rate] = &b
 	}
-	log.Printf("[usage] 已恢复 %d 个用量桶（%s）", len(r.buckets), r.path)
+	r.lastBytes = int64(len(raw))
+	log.Printf("[usage] 已恢复 %d 个用量桶（%s）", len(r.buckets), src)
 	return nil
 }
 
 func (r *Recorder) flush(force bool) {
-	if r == nil || r.path == "" {
+	if r == nil || (r.path == "" && (r.backend == nil || r.backendKey == "")) {
 		return
 	}
 	r.mu.Lock()
@@ -337,6 +379,16 @@ func (r *Recorder) flush(force bool) {
 	raw, err := json.Marshal(snap)
 	if err != nil {
 		log.Printf("[usage] 序列化失败: %v", err)
+		return
+	}
+	r.mu.Lock()
+	r.lastBytes = int64(len(raw))
+	r.mu.Unlock()
+	// 库为权威：配置了后端就只写库（文件冻结为最后一次已知良好状态，断库时兜底读）。
+	if r.backend != nil && r.backendKey != "" {
+		if err := r.backend.Save(r.backendKey, raw); err != nil {
+			log.Printf("[usage] 写后端失败: %v", err)
+		}
 		return
 	}
 	if err := os.MkdirAll(filepath.Dir(r.path), 0o755); err != nil {
@@ -751,7 +803,11 @@ func (r *Recorder) SnapshotWindowFiltered(w Window, nicks map[string]string, cur
 		snap.Series = append(snap.Series, Point{T: k, Scope: "hour", Agg: hourSeries[k].finish()})
 	}
 
-	if r.path != "" {
+	if r.backend != nil && r.backendKey != "" {
+		r.mu.Lock()
+		snap.FileBytes = r.lastBytes
+		r.mu.Unlock()
+	} else if r.path != "" {
 		if fi, err := os.Stat(r.path); err == nil {
 			snap.FileBytes = fi.Size()
 		}
@@ -832,9 +888,9 @@ func (r *Recorder) Describe() string {
 	}
 	r.mu.Lock()
 	n := len(r.buckets)
+	sz := r.lastBytes
 	r.mu.Unlock()
-	var sz int64
-	if r.path != "" {
+	if r.path != "" && (r.backend == nil || r.backendKey == "") {
 		if fi, err := os.Stat(r.path); err == nil {
 			sz = fi.Size()
 		}

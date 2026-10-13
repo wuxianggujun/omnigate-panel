@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/wuxianggujun/omnigate-panel/internal/auth"
+	"github.com/wuxianggujun/omnigate-panel/internal/kv"
 )
 
 var flushInterval = 5 * time.Second
@@ -79,6 +80,39 @@ func (p *Pool) RestoreFromSnapshot() {
 	}
 	// 走到这里必然是「本地存在且严格新于快照」，日志结论属实。
 	log.Printf("pool: 恢复来源=本地 state.json（较新于 Redis 快照 %s）", snap.SavedAt.Format(time.RFC3339))
+}
+
+// SetBackend 指定池状态的 KV 后端（PostgreSQL）。库为权威：命中即用库（整体替换
+// 文件载入的账号状态），未命中则把当前（文件载入的）状态导入库；之后落盘写库、
+// 不再写文件。必须在 RestoreFromSnapshot / SyncToDir 之前调用。
+// b==nil 或 key=="" 时退化为纯文件模式（现状）。
+func (p *Pool) SetBackend(b kv.Backend, key string) error {
+	if p == nil || b == nil || key == "" {
+		return nil
+	}
+	p.mu.Lock()
+	p.backend = b
+	p.backendKey = key
+	p.mu.Unlock()
+	data, found, err := b.Load(key)
+	if err != nil {
+		return err
+	}
+	if found {
+		var sf stateFile
+		if err := json.Unmarshal(data, &sf); err != nil {
+			return err
+		}
+		p.mu.Lock()
+		p.byUID = map[string]*entry{}
+		p.applyAccountsLocked(sf.Accounts)
+		p.mu.Unlock()
+		return nil
+	}
+	// 首次启用：把文件载入的状态整体导入库。
+	p.dirty.Store(true)
+	p.Flush()
+	return nil
 }
 
 // Acquire 为账号占一个在途名额；false 表示该账号已达上限（或不存在）。
@@ -229,7 +263,7 @@ func (p *Pool) applySnapshotLocked(s snapshot) {
 	p.applyAccountsLocked(s.Accounts)
 }
 func (p *Pool) saveLocked() {
-	if p.stateFp == "" {
+	if p.stateFp == "" && (p.backend == nil || p.backendKey == "") {
 		return
 	}
 	sf := p.stateOverviewLocked()
@@ -238,17 +272,25 @@ func (p *Pool) saveLocked() {
 		p.notePersistFail(err)
 		return
 	}
-	if dir := filepath.Dir(p.stateFp); dir != "" {
-		_ = os.MkdirAll(dir, 0o755)
-	}
-	tmp := p.stateFp + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
-		p.notePersistFail(err)
-		return
-	}
-	if err := os.Rename(tmp, p.stateFp); err != nil {
-		p.notePersistFail(err)
-		return
+	// 库为权威：配置了后端就只写库（文件冻结为最后一次已知良好状态，断库时兜底读）。
+	if p.backend != nil && p.backendKey != "" {
+		if err := p.backend.Save(p.backendKey, raw); err != nil {
+			p.notePersistFail(err)
+			return
+		}
+	} else {
+		if dir := filepath.Dir(p.stateFp); dir != "" {
+			_ = os.MkdirAll(dir, 0o755)
+		}
+		tmp := p.stateFp + ".tmp"
+		if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+			p.notePersistFail(err)
+			return
+		}
+		if err := os.Rename(tmp, p.stateFp); err != nil {
+			p.notePersistFail(err)
+			return
+		}
 	}
 	if p.persistFails > 0 {
 		// 从连续失败中恢复：打一条恢复日志，避免"错误打完却无人知道已恢复"。

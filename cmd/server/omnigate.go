@@ -23,6 +23,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/wuxianggujun/omnigate-panel/internal/kv"
 	omniconfig "github.com/wuxianggujun/omnigate-panel/internal/omnigate/config"
 	omnigateway "github.com/wuxianggujun/omnigate-panel/internal/omnigate/gateway"
 	omnilogx "github.com/wuxianggujun/omnigate-panel/internal/omnigate/logx"
@@ -70,12 +71,16 @@ type omniManager struct {
 	// usageRec 与 WorkBuddy 网关共用同一份用量记录器（面板「用量」页），让
 	// OmniGate 请求的 token 也计入用量视图。nil = 不计入。
 	usageRec *usage.Recorder
+
+	// pg 面板状态 KV 后端（PostgreSQL，可为 nil）。OmniGate 状态 / 模型目录缓存 /
+	// 全局模型映射经它落库（库为权威，文件仅首次导入 + 断库兜底）。
+	pg kv.Backend
 }
 
 // newOmniManager 按 cfg.OmnigateConfig 装配 OmniGate。配置文件缺失/解析失败时
 // 返回未启用的 manager（不报错，面板其余功能照常）。requestLog / usageRec 为共享
 // 记录器（可为 nil）；clientInfo 报告是否记录调用来源（可为 nil）。
-func newOmniManager(cfg *Config, requestLog *reqlog.Recorder, usageRec *usage.Recorder, clientInfo func() bool, obRT *outbound.Runtime) *omniManager {
+func newOmniManager(cfg *Config, requestLog *reqlog.Recorder, usageRec *usage.Recorder, clientInfo func() bool, obRT *outbound.Runtime, pg kv.Backend) *omniManager {
 	m := &omniManager{
 		path:       cfg.OmnigateConfig,
 		apiKey:     cfg.APIKey,
@@ -85,6 +90,7 @@ func newOmniManager(cfg *Config, requestLog *reqlog.Recorder, usageRec *usage.Re
 		reqlog:     requestLog,
 		usageRec:   usageRec,
 		clientInfo: clientInfo,
+		pg:         pg,
 	}
 	if m.path == "" {
 		return m
@@ -108,6 +114,12 @@ func newOmniManager(cfg *Config, requestLog *reqlog.Recorder, usageRec *usage.Re
 		return m
 	}
 	m.st = st
+	// OmniGate 状态可选落库：库为权威，文件仅首次导入 + 断库兜底。
+	if pg != nil {
+		if err := st.SetBackend(pg, "omnigate_state"); err != nil {
+			log.Printf("WARN: [storage] OmniGate 状态启用 PostgreSQL 后端失败，回落文件: %v", err)
+		}
+	}
 	rt, err := m.build(ocfg)
 	if err != nil {
 		log.Printf("WARN: [omnigate] 初始化网关失败，已跳过：%v", err)
@@ -137,7 +149,11 @@ func (m *omniManager) build(cfg *omniconfig.Config) (*omniRuntime, error) {
 		omnigateway.WithProxyResolver(m.proxyFor),
 		omnigateway.WithPoolResolver(m.poolFor),
 		// 模型目录跨重启持久化：重启 / 改配置后仍能立刻给出带计费价的目录。
+		// 库为权威（omnigate_model_cache），文件路径作首次导入 + 断库兜底。
 		omnigateway.WithModelCachePath(filepath.Join(cfg.DataDir, "model-cache.json")),
+		omnigateway.WithModelCacheBackend(m.pg, "omnigate_model_cache"),
+		// 全局模型映射表（glm-5.2 → atria/... 等）同样落库。
+		omnigateway.WithModelMappingBackend(m.pg, "omnigate_model_mapping"),
 	)
 	if err != nil {
 		return nil, err

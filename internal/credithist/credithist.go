@@ -30,6 +30,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/wuxianggujun/omnigate-panel/internal/kv"
 )
 
 const (
@@ -74,6 +76,10 @@ type Recorder struct {
 	series map[string][]Sample
 	dirty  bool
 	fails  int
+	// 可选 KV 后端（PostgreSQL）：非空且 key 非空时库为权威——读优先库、写只写库，
+	// 文件退化为「首次导入源 + 断库兜底」。见 EnableBackend。
+	backend    kv.Backend
+	backendKey string
 
 	stopOnce sync.Once
 	stop     chan struct{}
@@ -91,6 +97,32 @@ func New(fp string) *Recorder {
 	}
 	r.load()
 	return r
+}
+
+// EnableBackend 指定 KV 后端（PostgreSQL）。库为权威：命中即用库，未命中则把当前
+// （文件载入的）历史导入库；之后落盘写库、不再写文件。b==nil 或 key=="" 时退化为
+// 纯文件模式。必须在 Start 之前调用。
+func (r *Recorder) EnableBackend(b kv.Backend, key string) error {
+	if r == nil || b == nil || key == "" {
+		return nil
+	}
+	r.mu.Lock()
+	r.backend = b
+	r.backendKey = key
+	r.mu.Unlock()
+	data, found, err := b.Load(key)
+	if err != nil {
+		return err
+	}
+	if found {
+		r.loadFromBytes(data, "kv:"+key)
+		return nil
+	}
+	// 首次启用：把文件载入的历史整体导入库。
+	r.mu.Lock()
+	r.dirty = true
+	r.mu.Unlock()
+	return r.Save()
 }
 
 // Record 以当前时间采一次样（余额刷新 / 签到成功后调用）。
@@ -330,9 +362,10 @@ func (r *Recorder) Stop() {
 
 // Save 原子落盘（tmp + rename）。持锁完成「序列化 + 写盘」：文件只有几百 KB，
 // 换来的是绝不丢样本（释放锁后再写会让并发的 Record 被 dirty=false 抹掉）。
-// 失败只记日志（首败打完整错误，其后每 10 次提醒一次）。
+// 失败只记日志（首败打完整错误，其后每 10 次提醒一次）。配置了 KV 后端时写库、
+// 不再写文件。
 func (r *Recorder) Save() error {
-	if r == nil || r.fp == "" {
+	if r == nil || (r.fp == "" && (r.backend == nil || r.backendKey == "")) {
 		return nil
 	}
 	r.mu.Lock()
@@ -344,6 +377,19 @@ func (r *Recorder) Save() error {
 	if err != nil {
 		r.noteFail(err)
 		return err
+	}
+	// 库为权威：配置了后端就只写库（文件冻结为最后一次已知良好状态，断库时兜底读）。
+	if r.backend != nil && r.backendKey != "" {
+		if err := r.backend.Save(r.backendKey, raw); err != nil {
+			r.noteFail(err)
+			return err
+		}
+		if r.fails > 0 {
+			log.Printf("credithist: 落盘恢复（此前连续失败 %d 次）", r.fails)
+			r.fails = 0
+		}
+		r.dirty = false
+		return nil
 	}
 	if dir := filepath.Dir(r.fp); dir != "" {
 		_ = os.MkdirAll(dir, 0o755)
@@ -382,12 +428,18 @@ func (r *Recorder) load() {
 	if err != nil {
 		return
 	}
+	r.loadFromBytes(raw, r.fp)
+}
+
+// loadFromBytes 解析一份余额历史快照并重建内存序列（版本不符按空历史启动）。
+func (r *Recorder) loadFromBytes(raw []byte, src string) {
 	var f file
 	if err := json.Unmarshal(raw, &f); err != nil || f.Version != fileVersion {
-		log.Printf("credithist: 历史文件格式不符，按空历史启动 (%s)", r.fp)
+		log.Printf("credithist: 历史格式不符，按空历史启动 (%s)", src)
 		return
 	}
 	cut := time.Now().Add(-Retention).Unix()
+	r.series = map[string][]Sample{}
 	for uid, ss := range f.Series {
 		sort.Slice(ss, func(i, j int) bool { return ss[i].T < ss[j].T })
 		ss = prune(ss, cut)
@@ -399,6 +451,6 @@ func (r *Recorder) load() {
 		}
 	}
 	if len(r.series) > 0 {
-		log.Printf("credithist: 恢复 %d 个账号的余额历史 (%s)", len(r.series), r.fp)
+		log.Printf("credithist: 恢复 %d 个账号的余额历史 (%s)", len(r.series), src)
 	}
 }

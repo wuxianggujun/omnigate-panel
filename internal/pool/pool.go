@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/wuxianggujun/omnigate-panel/internal/auth"
+	"github.com/wuxianggujun/omnigate-panel/internal/kv"
 )
 
 type Pool struct {
@@ -80,6 +81,10 @@ type Pool struct {
 	stopCh chan struct{}
 	// closeOnce 保证 Close 幂等（多次调用不重复 close channel）。
 	closeOnce sync.Once
+	// backend 可选 KV 后端（PostgreSQL）：非空且 backendKey 非空时库为权威——
+	// 启动从库载入、落盘只写库，文件退化为「首次导入源 + 断库兜底」。见 SetBackend。
+	backend    kv.Backend
+	backendKey string
 }
 
 // defaultBreaker* 熔断器默认参数（FreeBuff2API 参考口径）。

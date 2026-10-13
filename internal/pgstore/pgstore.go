@@ -11,11 +11,14 @@ package pgstore
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/wuxianggujun/omnigate-panel/internal/kv"
 	"github.com/wuxianggujun/omnigate-panel/internal/panelauth"
 )
 
@@ -33,11 +36,23 @@ create table if not exists %s (
 // defaultTable 生产表名。
 const defaultTable = "panel_users"
 
+// blobSchemaTemplate 是通用「键 → 字节块」表，承载面板其余状态（会话 / 归属 /
+// 用量 / 积分历史 / 池状态 / OmniGate 状态与缓存）。各子系统把整份 JSON 快照塞进
+// 一行，键形如 "usage" / "pool_state"。表名同样用 %s 注入。
+const blobSchemaTemplate = `
+create table if not exists %s (
+    key        text        primary key,
+    value      bytea       not null,
+    updated_at timestamptz not null default now()
+);
+`
+
 // Store 是 PostgreSQL 后端。
 type Store struct {
-	pool  *pgxpool.Pool
-	label string
-	table string
+	pool      *pgxpool.Pool
+	label     string
+	table     string
+	blobTable string
 }
 
 // Open 解析 dsn、建立连接池、Ping 并建表（幂等）。任何一步失败都返回错误，
@@ -84,11 +99,17 @@ func openWithTable(ctx context.Context, dsn, table string) (*Store, error) {
 		pool.Close()
 		return nil, fmt.Errorf("pgstore: 建表失败: %w", err)
 	}
+	blobTable := table + "_kv"
+	if _, err := pool.Exec(ctx, fmt.Sprintf(blobSchemaTemplate, blobTable)); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("pgstore: 建 KV 表失败: %w", err)
+	}
 	cc := cfg.ConnConfig
 	return &Store{
-		pool:  pool,
-		label: fmt.Sprintf("%s@%s:%d/%s", cc.User, cc.Host, cc.Port, cc.Database),
-		table: table,
+		pool:      pool,
+		label:     fmt.Sprintf("%s@%s:%d/%s", cc.User, cc.Host, cc.Port, cc.Database),
+		table:     table,
+		blobTable: blobTable,
 	}, nil
 }
 
@@ -173,3 +194,69 @@ func (s *Store) SavePanelUsers(ctx context.Context, users []panelauth.User) erro
 	}
 	return nil
 }
+
+// ---------------------------------------------------------------------------
+// 通用 KV（面板其余状态）
+// ---------------------------------------------------------------------------
+//
+// Load/Save/Delete 让 *Store 直接实现 kv.Backend：各子系统把整份 JSON 快照存进
+// 一行（键 = 子系统名）。语义见 internal/kv。
+
+// Load 读取一个键；未命中返回 (nil, false, nil)。
+func (s *Store) Load(key string) ([]byte, bool, error) {
+	if s == nil || s.pool == nil {
+		return nil, false, kvErrUnavailable()
+	}
+	if key == "" {
+		return nil, false, fmt.Errorf("pgstore: 空键")
+	}
+	var v []byte
+	err := s.pool.QueryRow(context.Background(),
+		fmt.Sprintf(`select value from %s where key = $1`, s.blobTable), key).Scan(&v)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("pgstore: 读 %q: %w", key, err)
+	}
+	return v, true, nil
+}
+
+// Save 覆盖写一个键（不存在则插入）。
+func (s *Store) Save(key string, data []byte) error {
+	if s == nil || s.pool == nil {
+		return kvErrUnavailable()
+	}
+	if key == "" {
+		return fmt.Errorf("pgstore: 空键")
+	}
+	if _, err := s.pool.Exec(context.Background(), fmt.Sprintf(`
+		insert into %s (key, value, updated_at)
+		values ($1, $2, now())
+		on conflict (key) do update set value = excluded.value, updated_at = now()`, s.blobTable),
+		key, data); err != nil {
+		return fmt.Errorf("pgstore: 写 %q: %w", key, err)
+	}
+	return nil
+}
+
+// Delete 删除一个键（幂等）。
+func (s *Store) Delete(key string) error {
+	if s == nil || s.pool == nil {
+		return kvErrUnavailable()
+	}
+	if key == "" {
+		return nil
+	}
+	if _, err := s.pool.Exec(context.Background(),
+		fmt.Sprintf(`delete from %s where key = $1`, s.blobTable), key); err != nil {
+		return fmt.Errorf("pgstore: 删 %q: %w", key, err)
+	}
+	return nil
+}
+
+// kvErrUnavailable 报告后端不可用（*Store 为 nil 或连接池未就绪）。
+func kvErrUnavailable() error { return kv.ErrUnavailable }
+
+// 编译期断言：*Store 实现 kv.Backend，可直接注入各子系统。
+var _ kv.Backend = (*Store)(nil)

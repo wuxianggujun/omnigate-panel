@@ -14,9 +14,12 @@ package panel
 
 import (
 	"encoding/json"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
+
+	"github.com/wuxianggujun/omnigate-panel/internal/kv"
 )
 
 // ownershipVersion 归属表文件版本（未来格式变更时用于迁移）。
@@ -39,6 +42,10 @@ type ownershipStore struct {
 	mu   sync.RWMutex
 	path string
 	m    map[string]string
+	// 可选 KV 后端（PostgreSQL）：非空且 key 非空时库为权威——读优先库、写只写库，
+	// 文件退化为「首次导入源 + 断库兜底」。见 EnableBackend。
+	backend    kv.Backend
+	backendKey string
 }
 
 // newOwnershipStore 构造归属表；path 非空时尝试加载（失败只记为空表，不报错）。
@@ -46,6 +53,35 @@ func newOwnershipStore(path string) *ownershipStore {
 	s := &ownershipStore{path: path, m: map[string]string{}}
 	s.load()
 	return s
+}
+
+// EnableBackend 指定 KV 后端（PostgreSQL）。库为权威：命中即用库，未命中则把当前
+// （文件载入的）归属导入库；之后落盘写库、不再写文件。b==nil 或 key=="" 时退化为
+// 纯文件模式。
+func (s *ownershipStore) EnableBackend(b kv.Backend, key string) error {
+	s.mu.Lock()
+	s.backend = b
+	s.backendKey = key
+	s.mu.Unlock()
+	if b == nil || key == "" {
+		return nil
+	}
+	raw, found, err := b.Load(key)
+	if err != nil {
+		return err
+	}
+	if found {
+		var f ownershipFile
+		if err := json.Unmarshal(raw, &f); err == nil && f.Owners != nil {
+			s.mu.Lock()
+			s.m = f.Owners
+			s.mu.Unlock()
+		}
+		return nil
+	}
+	// 首次启用：把文件里的归属整体导入库。
+	s.saveLocked()
+	return nil
 }
 
 // load 从磁盘读取归属表。文件缺失/损坏都退化为空表（不阻断面板启动）。
@@ -128,13 +164,20 @@ func (s *ownershipStore) KeysOf(username string) []string {
 	return out
 }
 
-// saveLocked 原子落盘（持锁调用）。无 path（测试）时为空操作；写失败只记日志。
+// saveLocked 原子落盘（持锁调用）。无 path 且无后端（测试）时为空操作；配置了 KV
+// 后端时写库、不再写文件；写失败只记日志。
 func (s *ownershipStore) saveLocked() {
-	if s.path == "" {
+	if s.path == "" && (s.backend == nil || s.backendKey == "") {
 		return
 	}
 	raw, err := json.MarshalIndent(ownershipFile{Version: ownershipVersion, Owners: s.m}, "", "  ")
 	if err != nil {
+		return
+	}
+	if s.backend != nil && s.backendKey != "" {
+		if err := s.backend.Save(s.backendKey, raw); err != nil {
+			log.Printf("panel: 归属表写后端失败: %v", err)
+		}
 		return
 	}
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {

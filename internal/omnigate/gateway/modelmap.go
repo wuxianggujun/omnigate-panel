@@ -3,11 +3,14 @@ package gateway
 import (
 	"encoding/json"
 	"errors"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
+
+	"github.com/wuxianggujun/omnigate-panel/internal/kv"
 )
 
 // Validation errors for Set (mirrors the reference's 400 responses).
@@ -27,6 +30,9 @@ type ModelMappingStore struct {
 	mu   sync.RWMutex
 	path string
 	m    map[string]string
+	// 可选 KV 后端（PostgreSQL）：非空且 key 非空时库为权威。见 SetBackend。
+	backend    kv.Backend
+	backendKey string
 }
 
 // NewModelMappingStore constructs the store and loads it from disk (missing file
@@ -35,6 +41,44 @@ func NewModelMappingStore(path string) *ModelMappingStore {
 	s := &ModelMappingStore{path: path, m: map[string]string{}}
 	s.load()
 	return s
+}
+
+// SetBackend 指定模型映射的 KV 后端（PostgreSQL）。库为权威：命中即用库，未命中则
+// 把当前（文件载入的）映射导入库；之后落盘写库、不再写文件。b==nil 或 key=="" 时
+// 退化为纯文件模式。
+func (s *ModelMappingStore) SetBackend(b kv.Backend, key string) error {
+	if s == nil || b == nil || key == "" {
+		return nil
+	}
+	s.mu.Lock()
+	s.backend = b
+	s.backendKey = key
+	s.mu.Unlock()
+	raw, found, err := b.Load(key)
+	if err != nil {
+		return err
+	}
+	if found {
+		var onDisk map[string]string
+		if err := json.Unmarshal(raw, &onDisk); err == nil {
+			clean := map[string]string{}
+			for alias, target := range onDisk {
+				alias = strings.TrimSpace(alias)
+				target = strings.TrimSpace(target)
+				if alias == "" || target == "" || alias == target {
+					continue
+				}
+				clean[alias] = target
+			}
+			s.mu.Lock()
+			s.m = clean
+			s.mu.Unlock()
+		}
+		return nil
+	}
+	// 首次启用：把文件里的映射整体导入库。
+	s.saveLocked()
+	return nil
 }
 
 func (s *ModelMappingStore) load() {
@@ -61,11 +105,17 @@ func (s *ModelMappingStore) load() {
 
 // saveLocked atomically persists the table. Caller must hold the write lock.
 func (s *ModelMappingStore) saveLocked() {
-	if s == nil || s.path == "" {
+	if s == nil || (s.path == "" && (s.backend == nil || s.backendKey == "")) {
 		return
 	}
 	raw, err := json.MarshalIndent(s.m, "", "  ")
 	if err != nil {
+		return
+	}
+	if s.backend != nil && s.backendKey != "" {
+		if err := s.backend.Save(s.backendKey, raw); err != nil {
+			log.Printf("[omnigate] 模型映射写后端失败: %v", err)
+		}
 		return
 	}
 	if dir := filepath.Dir(s.path); dir != "" {

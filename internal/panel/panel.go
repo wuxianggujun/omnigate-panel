@@ -25,6 +25,7 @@ import (
 
 	"github.com/wuxianggujun/omnigate-panel/internal/auth"
 	"github.com/wuxianggujun/omnigate-panel/internal/credithist"
+	"github.com/wuxianggujun/omnigate-panel/internal/kv"
 	"github.com/wuxianggujun/omnigate-panel/internal/livecfg"
 	"github.com/wuxianggujun/omnigate-panel/internal/panelauth"
 	"github.com/wuxianggujun/omnigate-panel/internal/pool"
@@ -74,6 +75,11 @@ type Config struct {
 	// OwnershipFile 账号归属表文件（多租户：谁拥有哪个账号，见 ownership.go）。
 	// 空 = 纯内存（测试）；不存在时退化为「全部无主」，不影响账号本身。
 	OwnershipFile string
+
+	// OwnershipBackend / OwnershipKey 账号归属表的 KV 后端（PostgreSQL）。非空时
+	// 库为权威，文件退化为首次导入源 + 断库兜底。见 ownershipStore.EnableBackend。
+	OwnershipBackend kv.Backend
+	OwnershipKey     string
 
 	// OmniConfigPath 内置 OmniGate 引擎的配置文件（omnigate.json）路径与读写器
 	// （OmniGate 供应商配置页用）。LoadOmniConfig 返回解析后的供应商配置对象；
@@ -240,6 +246,10 @@ func New(cfg Config) *Panel {
 		logins:    map[string]loginSession{},
 		ownership: newOwnershipStore(cfg.OwnershipFile),
 		regLimit:  newRegLimiter(5, time.Hour),
+	}
+	// 归属表可选落库：库为权威，文件仅首次导入 + 断库兜底。
+	if err := p.ownership.EnableBackend(cfg.OwnershipBackend, cfg.OwnershipKey); err != nil {
+		log.Printf("panel: 归属表启用 PostgreSQL 后端失败，回落文件: %v", err)
 	}
 	p.routes()
 	return p

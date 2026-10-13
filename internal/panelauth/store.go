@@ -15,10 +15,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/wuxianggujun/omnigate-panel/internal/kv"
 )
 
 // Role 面板角色：
@@ -286,6 +289,10 @@ type Store struct {
 	// 会话落盘（可选）：让「部署/重启容器」不再把所有已登录用户踢下线。
 	persistPath string
 	lastPersist time.Time
+	// 可选 KV 后端（PostgreSQL）：非空且 key 非空时库为权威——读优先库、写只写库，
+	// 文件退化为「首次导入源 + 断库兜底」。见 EnableSessionBackend。
+	backend    kv.Backend
+	backendKey string
 }
 
 // New 用账号集合构造 Store。ttl<=0 回落 72h，maxFail<=0 回落 5，lockFor<=0 回落 15m。
@@ -350,6 +357,42 @@ type sessionDiskRec struct {
 	Expires  time.Time `json:"expires"`
 }
 
+// EnableSessionBackend 指定会话的 KV 后端（PostgreSQL）与兜底文件路径。库为权威：
+//   - 命中库：用库里的会话（文件只作断库兜底）；
+//   - 未命中库：把当前会话（先从文件载入）导入库，作为首次迁移；
+//   - 此后落盘一律写库，不再写文件（省磁盘；文件冻结为最后一次已知良好状态）。
+//
+// b==nil 或 key=="" 时退化为纯文件模式（等价 EnableSessionPersistence）。
+func (s *Store) EnableSessionBackend(b kv.Backend, key, fallbackPath string) error {
+	s.mu.Lock()
+	s.persistPath = fallbackPath
+	s.backend = b
+	s.backendKey = key
+	s.mu.Unlock()
+	if b == nil || key == "" {
+		return s.loadSessions()
+	}
+	data, found, err := b.Load(key)
+	if err != nil {
+		// 库读失败：回落文件，尽量不把已登录用户踢下线。
+		log.Printf("panelauth: 读取会话后端失败，回落文件: %v", err)
+		return s.loadSessions()
+	}
+	if found {
+		if err := s.loadSessionsFromBytes(data, "kv:"+key); err != nil {
+			log.Printf("panelauth: 解析会话后端失败，回落文件: %v", err)
+			return s.loadSessions()
+		}
+		return nil
+	}
+	// 首次启用：先把文件里的会话载入内存，再整体导入库。
+	if err := s.loadSessions(); err != nil {
+		return err
+	}
+	s.saveSessionsLocked(true)
+	return nil
+}
+
 // EnableSessionPersistence 指定会话落盘文件并载入其中仍然有效的会话。
 // 文件缺失按「没有历史会话」处理；文件损坏返回错误（调用方决定是否忽略）。
 func (s *Store) EnableSessionPersistence(path string) error {
@@ -362,7 +405,7 @@ func (s *Store) EnableSessionPersistence(path string) error {
 	return s.loadSessions()
 }
 
-// loadSessions 载入落盘会话：丢掉已过期与「账号已不存在」的条目。
+// loadSessions 从兜底文件读取会话；文件缺失/未配置时按「没有历史会话」处理。
 func (s *Store) loadSessions() error {
 	s.mu.Lock()
 	path := s.persistPath
@@ -377,9 +420,14 @@ func (s *Store) loadSessions() error {
 		}
 		return err
 	}
+	return s.loadSessionsFromBytes(b, path)
+}
+
+// loadSessionsFromBytes 解析会话 JSON 并合并进内存（丢掉已过期与「账号已不存在」的条目）。
+func (s *Store) loadSessionsFromBytes(b []byte, src string) error {
 	var recs map[string]sessionDiskRec
 	if err := json.Unmarshal(b, &recs); err != nil {
-		return fmt.Errorf("panelauth: 解析会话文件 %s: %w", path, err)
+		return fmt.Errorf("panelauth: 解析会话 %s: %w", src, err)
 	}
 	now := s.now()
 	s.mu.Lock()
@@ -397,9 +445,9 @@ func (s *Store) loadSessions() error {
 }
 
 // saveSessionsLocked 落盘（调用方须持锁）。force=false 时按 sessionPersistInterval
-// 节流；顺带清掉已过期条目，避免文件只增不减。
+// 节流；顺带清掉已过期条目，避免文件只增不减。配置了 KV 后端时写库、不再写文件。
 func (s *Store) saveSessionsLocked(force bool) {
-	if s.persistPath == "" {
+	if s.persistPath == "" && (s.backend == nil || s.backendKey == "") {
 		return
 	}
 	now := s.now()
@@ -417,6 +465,13 @@ func (s *Store) saveSessionsLocked(force bool) {
 	}
 	b, err := json.Marshal(out)
 	if err != nil {
+		return
+	}
+	// 库为权威：配置了后端就只写库（文件冻结为最后一次已知良好状态，断库时兜底读）。
+	if s.backend != nil && s.backendKey != "" {
+		if err := s.backend.Save(s.backendKey, b); err != nil {
+			log.Printf("panelauth: 会话写后端失败: %v", err)
+		}
 		return
 	}
 	tmp := s.persistPath + ".tmp"

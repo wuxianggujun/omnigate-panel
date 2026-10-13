@@ -16,6 +16,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/wuxianggujun/omnigate-panel/internal/kv"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/config"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/imagegen"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/logx"
@@ -55,6 +56,14 @@ type Gateway struct {
 	modelCachePath string
 	// modelSaveMu 串行化落盘（tmp 文件同名，并发写会互相踩）。
 	modelSaveMu sync.Mutex
+
+	// modelCacheBackend / modelCacheKey 可选 KV 后端（PostgreSQL）：非空时模型目录
+	// 落库（库为权威），文件退化为首次导入源 + 断库兜底。见 WithModelCacheBackend。
+	modelCacheBackend kv.Backend
+	modelCacheKey     string
+	// modelMapBackend / modelMapKey 全局模型映射表的 KV 后端。见 WithModelMappingBackend。
+	modelMapBackend kv.Backend
+	modelMapKey     string
 
 	// modelMap is the global alias → target model table (see modelmap.go). Nil =
 	// inert (no mapping). Populated from the data dir by New.
@@ -191,6 +200,23 @@ func WithModelCachePath(path string) Option {
 	return func(g *Gateway) { g.modelCachePath = path }
 }
 
+// WithModelCacheBackend 让模型目录落 KV 后端（PostgreSQL）。非空时库为权威：优先读库，
+// 写只写库（文件路径退化为首次导入源 + 断库兜底）。见 saveModelCache。
+func WithModelCacheBackend(b kv.Backend, key string) Option {
+	return func(g *Gateway) {
+		g.modelCacheBackend = b
+		g.modelCacheKey = key
+	}
+}
+
+// WithModelMappingBackend 让全局模型映射表落 KV 后端（PostgreSQL）。非空时库为权威。
+func WithModelMappingBackend(b kv.Backend, key string) Option {
+	return func(g *Gateway) {
+		g.modelMapBackend = b
+		g.modelMapKey = key
+	}
+}
+
 // 编译期断言：每个可代理的 Provider 都必须在 Provider 本身上实现 SetProxySelector
 // （而不只是它的 Client）。历史上 runable/raccoon 只把该方法实现在 Client 上，导致
 // 网关的类型断言静默失败、代理池从未生效（请求悄悄走了直连）。这里用编译期断言把
@@ -240,6 +266,11 @@ func New(cfg *config.Config, st *state.State, log *logx.Logger, opts ...Option) 
 	// dir = inert store.
 	if g.modelMap == nil && cfg.DataDir != "" {
 		g.modelMap = NewModelMappingStore(filepath.Join(cfg.DataDir, "model-mapping.json"))
+	}
+	if g.modelMap != nil {
+		if err := g.modelMap.SetBackend(g.modelMapBackend, g.modelMapKey); err != nil {
+			g.log.Warn("模型映射启用 PostgreSQL 后端失败，回落文件: %v", err)
+		}
 	}
 	for i := range cfg.Providers {
 		p := &cfg.Providers[i]
@@ -456,15 +487,36 @@ func (g *Gateway) models(ctx context.Context, name string) ([]openai.Model, erro
 // modelCacheFile 是模型目录落盘的格式：provider 名 -> 最近一次成功结果。
 type modelCacheFile map[string][]openai.Model
 
-// loadModelCache 从磁盘载入上次成功的模型目录。载入的条目「过期但可用」：首次访问
-// 会尝试刷新（at 为零值 → 不满足 TTL），刷新失败时由 cachedModels 兜底。
+// loadModelCache 从磁盘 / KV 后端载入上次成功的模型目录。载入的条目「过期但可用」：
+// 首次访问会尝试刷新（at 为零值 → 不满足 TTL），刷新失败时由 cachedModels 兜底。
 func (g *Gateway) loadModelCache() {
-	if g.modelCachePath == "" {
+	hasBackend := g.modelCacheBackend != nil && g.modelCacheKey != ""
+	if g.modelCachePath == "" && !hasBackend {
 		return
 	}
-	raw, err := os.ReadFile(g.modelCachePath)
-	if err != nil {
-		return // 首次启动没有缓存文件，属正常
+	var raw []byte
+	if hasBackend {
+		data, found, err := g.modelCacheBackend.Load(g.modelCacheKey)
+		switch {
+		case err != nil:
+			g.log.Warn("读取模型目录缓存后端失败: %v", err)
+		case found:
+			raw = data
+		case g.modelCachePath != "":
+			// 首次启用：回落到文件（稍后由 saveModelCache 导入库）。
+			if b, rerr := os.ReadFile(g.modelCachePath); rerr == nil {
+				raw = b
+			}
+		}
+	} else {
+		b, err := os.ReadFile(g.modelCachePath)
+		if err != nil {
+			return // 首次启动没有缓存文件，属正常
+		}
+		raw = b
+	}
+	if len(raw) == 0 {
+		return
 	}
 	var saved modelCacheFile
 	if err := json.Unmarshal(raw, &saved); err != nil {
@@ -482,14 +534,23 @@ func (g *Gateway) loadModelCache() {
 	}
 	g.modelMu.Unlock()
 	if n > 0 {
-		g.log.Info("已载入 %d 个 provider 的模型目录缓存：%s", n, g.modelCachePath)
+		g.log.Info("已载入 %d 个 provider 的模型目录缓存：%s", n, g.modelCacheLocation())
 	}
 }
 
-// saveModelCache 把当前模型目录落盘（尽力而为，失败只记日志）。原子写：先写临时文件
-// 再改名，避免进程中途挂掉留下半个文件。
+// modelCacheLocation 返回模型目录缓存的位置描述（后端优先，否则文件路径）。
+func (g *Gateway) modelCacheLocation() string {
+	if g.modelCacheBackend != nil && g.modelCacheKey != "" {
+		return "kv:" + g.modelCacheKey
+	}
+	return g.modelCachePath
+}
+
+// saveModelCache 把当前模型目录落盘（尽力而为，失败只记日志）。配置了 KV 后端时
+// 写库、不再写文件。原子写：先写临时文件再改名，避免进程中途挂掉留下半个文件。
 func (g *Gateway) saveModelCache() {
-	if g.modelCachePath == "" {
+	hasBackend := g.modelCacheBackend != nil && g.modelCacheKey != ""
+	if g.modelCachePath == "" && !hasBackend {
 		return
 	}
 	g.modelSaveMu.Lock()
@@ -507,6 +568,13 @@ func (g *Gateway) saveModelCache() {
 	}
 	raw, err := json.MarshalIndent(snapshot, "", "  ")
 	if err != nil {
+		return
+	}
+	// 库为权威：配置了后端就只写库（文件冻结为最后一次已知良好状态，断库时兜底读）。
+	if hasBackend {
+		if err := g.modelCacheBackend.Save(g.modelCacheKey, raw); err != nil {
+			g.log.Warn("写入模型目录缓存后端失败：%v", err)
+		}
 		return
 	}
 	if dir := filepath.Dir(g.modelCachePath); dir != "" {

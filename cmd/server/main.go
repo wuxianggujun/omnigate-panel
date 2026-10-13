@@ -94,6 +94,24 @@ func main() {
 	}
 	log.Printf("loaded %d account(s) from %s", len(auths), cfg.AuthDir)
 
+	// ── 状态存储后端：面板全部状态优先落用户自己的 PostgreSQL ──────────────────
+	// 数据库是权威存储，本地文件退化为镜像 + 断库兜底（详见 internal/pgstore）：
+	// 数据库连不上时仍用镜像启动，谁都登不进来这种情况不会发生。面板账号、会话、
+	// 账号归属、用量、积分历史、池状态、OmniGate 状态与缓存全部经它落库。
+	var pg *pgstore.Store
+	if cfg.Storage.UsePostgres() {
+		st, err := pgstore.Open(context.Background(), cfg.Storage.DSN)
+		if err != nil {
+			log.Printf("WARN: [storage] PostgreSQL 不可用，全部状态回落本地文件: %v", err)
+		} else {
+			pg = st
+			defer pg.Close()
+			log.Printf("[storage] 状态存储后端 = postgres (%s)", st.Label())
+		}
+	} else {
+		log.Printf("[storage] 状态存储后端 = file（本地 data/）")
+	}
+
 	// redisstore：未配置/连接失败 → Noop（纯内存模式，一切功能照常）。
 	store := redisstore.New(cfg.Upstash.URL, cfg.Upstash.Token)
 
@@ -105,6 +123,12 @@ func main() {
 		_ = store.Close()
 	}()
 	p.SetStore(store)
+	// 池状态可选落库：库为权威，文件仅首次导入 + 断库兜底。必须在恢复/对齐之前。
+	if pg != nil {
+		if err := p.SetBackend(pg, "pool_state"); err != nil {
+			log.Printf("WARN: [storage] 池状态启用 PostgreSQL 后端失败，回落 state.json: %v", err)
+		}
+	}
 	p.RestoreFromSnapshot() // 择新恢复：Redis 快照比本地新才采用，否则本地优先
 	p.SyncToDir(auths)      // 与 auths 目录对齐：新账号加入、已删除文件账号剔除（状态保留）
 
@@ -211,6 +235,11 @@ func main() {
 	// 余额快照历史（「近 N 小时消耗」/用量对账的数据源）：与 state 文件同目录，
 	// 缺省 data/credits_history.json。只记录、不参与任何路由决策。
 	creditHist := credithist.New(stateSibling(cfg.StateFile, "credits_history.json"))
+	if pg != nil {
+		if err := creditHist.EnableBackend(pg, "credits_history"); err != nil {
+			log.Printf("WARN: [storage] 积分历史启用 PostgreSQL 后端失败，回落文件: %v", err)
+		}
+	}
 	creditHist.Start()
 	defer creditHist.Stop()
 	log.Printf("[credithist] 余额快照历史已启用: %s (%s)",
@@ -289,6 +318,11 @@ func main() {
 	// datapath 由 state 文件路径推出，避免再加一个配置项。
 	usagePath := usagePathFor(cfg.StateFile)
 	rec := usage.New(usagePath)
+	if pg != nil {
+		if err := rec.EnableBackend(pg, "usage"); err != nil {
+			log.Printf("WARN: [storage] 用量启用 PostgreSQL 后端失败，回落文件: %v", err)
+		}
+	}
 	rec.Start()
 	defer rec.Stop()
 	log.Printf("[usage] 逐请求用量记录已启用: %s (%s)", usagePath, rec.Describe())
@@ -311,26 +345,9 @@ func main() {
 
 	// 内置 OmniGate 引擎（Runable / 浣熊 / 任意 OpenAI 兼容上游）：先装配，
 	// 好把供应商配置读写器注入面板（保存即热重载，无需重启进程）。
-	omni := newOmniManager(cfg, requestLog, rec, func() bool { return live.Load().RecordClientInfo }, obRT)
+	omni := newOmniManager(cfg, requestLog, rec, func() bool { return live.Load().RecordClientInfo }, obRT, pg)
 	if omni.Enabled() {
 		defer omni.Stop()
-	}
-
-	// ── 状态存储后端：面板账号优先落用户自己的 PostgreSQL ──────────────────────
-	// 数据库是权威存储，config.json 退化为镜像 + 断库兜底（详见 internal/pgstore）：
-	// 数据库连不上时仍用镜像里的账号启动，谁都登不进来这种情况不会发生。
-	var pg *pgstore.Store
-	if cfg.Storage.UsePostgres() {
-		st, err := pgstore.Open(context.Background(), cfg.Storage.DSN)
-		if err != nil {
-			log.Printf("WARN: [storage] PostgreSQL 不可用，面板账号回落 config.json 镜像: %v", err)
-		} else {
-			pg = st
-			defer pg.Close()
-			log.Printf("[storage] 面板账号存储后端 = postgres (%s)", st.Label())
-		}
-	} else {
-		log.Printf("[storage] 面板账号存储后端 = file（config.json）")
 	}
 
 	// 面板账号：以库为准；库里还没有（首次启用）就把现状导进去。
@@ -359,8 +376,9 @@ func main() {
 	authStore := panelauth.New(panelUsers, cfg.PanelAuth.SessionTTL(),
 		cfg.PanelAuth.MaxFail(), cfg.PanelAuth.LockDuration())
 	// 会话落盘：部署/重启容器后已登录用户不掉线（与 state 文件同目录，
-	// 缺省 data/panel_sessions.json）。失败只记日志——纯内存会话仍可正常工作。
-	if err := authStore.EnableSessionPersistence(stateSibling(cfg.StateFile, "panel_sessions.json")); err != nil {
+	// 缺省 data/panel_sessions.json）。库为权威时落 PostgreSQL（panel_sessions），
+	// 文件仅首次导入 + 断库兜底。失败只记日志——纯内存会话仍可正常工作。
+	if err := authStore.EnableSessionBackend(pg, "panel_sessions", stateSibling(cfg.StateFile, "panel_sessions.json")); err != nil {
 		log.Printf("panel: 会话持久化未启用：%v", err)
 	}
 
@@ -383,6 +401,9 @@ func main() {
 		// 账号归属（多租户）：谁拥有哪个账号。与 state 文件同目录，缺省
 		// data/ownership.json；缺失/损坏时退化为空映射（全部视为管理员/共享）。
 		OwnershipFile: stateSibling(cfg.StateFile, "ownership.json"),
+		// 归属表可选落库：库为权威（ownership），文件仅首次导入 + 断库兜底。
+		OwnershipBackend: pg,
+		OwnershipKey:     "ownership",
 		ConfigPath:    *cfgPath,
 		LoadConfig: func() (any, error) {
 			return Load(*cfgPath)

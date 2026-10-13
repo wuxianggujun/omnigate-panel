@@ -97,6 +97,64 @@ func TestPanelUsersRoundTrip(t *testing.T) {
 	}
 }
 
+// 通用 KV（面板其余状态）往返：未命中 → 写 → 命中 → 覆盖 → 删除。
+func TestBlobRoundTrip(t *testing.T) {
+	dsn := os.Getenv("PGSTORE_TEST_DSN")
+	if dsn == "" {
+		t.Skip("未设置 PGSTORE_TEST_DSN，跳过 PostgreSQL 集成测试")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	const table = "panel_kv_pgstore_test"
+	st, err := openWithTable(ctx, dsn, table)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer st.Close()
+	defer func() {
+		_, _ = st.pool.Exec(context.Background(), "drop table if exists "+table)
+		_, _ = st.pool.Exec(context.Background(), "drop table if exists "+table+"_kv")
+	}()
+
+	// 1) 未命中。
+	if _, found, err := st.Load("usage"); err != nil || found {
+		t.Fatalf("空表应未命中，得到 found=%v err=%v", found, err)
+	}
+	// 2) 写入 → 读回。
+	if err := st.Save("usage", []byte("v1")); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	got, found, err := st.Load("usage")
+	if err != nil || !found || string(got) != "v1" {
+		t.Fatalf("读回应为 v1，得到 %q found=%v err=%v", got, found, err)
+	}
+	// 3) 覆盖写。
+	if err := st.Save("usage", []byte("v2")); err != nil {
+		t.Fatalf("覆盖: %v", err)
+	}
+	if got, _, _ = st.Load("usage"); string(got) != "v2" {
+		t.Fatalf("覆盖后应为 v2，得到 %q", got)
+	}
+	// 4) 键之间互不影响。
+	if err := st.Save("ownership", []byte("{}")); err != nil {
+		t.Fatalf("save2: %v", err)
+	}
+	if got, _, _ = st.Load("usage"); string(got) != "v2" {
+		t.Fatalf("另一键写入不该影响 usage，得到 %q", got)
+	}
+	// 5) 删除（幂等）。
+	if err := st.Delete("usage"); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if _, found, err := st.Load("usage"); err != nil || found {
+		t.Fatalf("删除后应未命中，得到 found=%v err=%v", found, err)
+	}
+	if err := st.Delete("usage"); err != nil {
+		t.Fatalf("重复删除应幂等: %v", err)
+	}
+}
+
 func TestOpenValidatesInput(t *testing.T) {
 	ctx := context.Background()
 	if _, err := Open(ctx, ""); err == nil {

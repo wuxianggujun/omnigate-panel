@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -259,4 +260,54 @@ func (g *Gateway) GeminiWebCheckin(ctx context.Context, providerName, label stri
 		return nil, fmt.Errorf("账号「%s」不存在", label)
 	}
 	return out, nil
+}
+
+// GeminiWebHealthRecord is one account probe outcome as surfaced to the panel,
+// ported from gemini2api's /admin/health-history record shape.
+type GeminiWebHealthRecord struct {
+	Label       string    `json:"label"`
+	Valid       bool      `json:"valid"`
+	HasToken    bool      `json:"has_token"`
+	ModelsCount int       `json:"models_count"`
+	CheckedAt   time.Time `json:"checked_at"`
+	Error       string    `json:"error,omitempty"`
+}
+
+// healthHistoryReturnLimit caps the number of records the panel receives,
+// matching the reference's `records[:50]`.
+const healthHistoryReturnLimit = 50
+
+// GeminiWebHealthHistory aggregates every account's probe history for a
+// provider, newest first, capped at 50 records (gemini2api /admin/health-history).
+func (g *Gateway) GeminiWebHealthHistory(providerName string) (int, []GeminiWebHealthRecord, error) {
+	gp, err := g.geminiWebProvider(providerName)
+	if err != nil {
+		return 0, nil, err
+	}
+	all := gp.AllHealthHistory()
+	out := []GeminiWebHealthRecord{}
+	for label, recs := range all {
+		for _, r := range recs {
+			out = append(out, GeminiWebHealthRecord{
+				Label:       label,
+				Valid:       r.Valid,
+				HasToken:    r.HasToken,
+				ModelsCount: r.ModelsCount,
+				CheckedAt:   r.CheckedAt,
+				Error:       r.Error,
+			})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CheckedAt.After(out[j].CheckedAt) })
+	total := len(out)
+	if len(out) > healthHistoryReturnLimit {
+		out = out[:healthHistoryReturnLimit]
+	}
+	return total, out, nil
+}
+
+// GeminiWebCheckAccounts probes every account of a provider (the reference's
+// /admin/check-account). Each probe is recorded in the health ledger.
+func (g *Gateway) GeminiWebCheckAccounts(ctx context.Context, providerName string) ([]GeminiWebCheckinOutcome, error) {
+	return g.GeminiWebCheckin(ctx, providerName, "")
 }

@@ -884,6 +884,7 @@ function ogRowHtml(p, a) {
       ? '<button class="xs ghost" data-src="omni" data-a="ogchats" data-prov="' + esc(p.name) + '" data-label="' + esc(label) + '" title="管理该账号在 Gemini 网页端的会话（查看 / 删除 / 清理旧会话）">会话</button>'
         + '<button class="xs ghost" data-src="omni" data-a="oggems" data-prov="' + esc(p.name) + '" data-label="' + esc(label) + '" title="管理该账号的自定义 Gem（人格）">Gems</button>'
         + '<button class="xs ghost" data-src="omni" data-a="ogkeepalive" data-prov="' + esc(p.name) + '" data-label="' + esc(label) + '" title="主动轮换 Cookie 并重建会话，避免会话到期后首次请求失败">保活</button>'
+        + '<button class="xs ghost" data-src="omni" data-a="oghealth" data-prov="' + esc(p.name) + '" data-label="' + esc(label) + '" title="查看该账号最近的会话探测历史（手动验活 / 定时健康检查）">历史</button>'
       : '') +
     (p.type === 'newapi'
       ? '<button class="xs ghost" data-src="omni" data-a="ogrefresh" data-prov="' + esc(p.name) + '" data-label="' + esc(label) + '" title="轮换该账号的会话 access_token">刷新</button>'
@@ -1086,6 +1087,8 @@ $('accBody').addEventListener('click', async ev => {
         openGChats(prov, label);
       } else if (a === 'oggems') {
         openGems(prov, label);
+      } else if (a === 'oghealth') {
+        openHealthHistory(prov, label);
       } else if (a === 'ogkeepalive') {
         const d = await apiAbs('/omni/admin/geminiweb/keepalive', { method: 'POST', body: JSON.stringify({ provider: prov, label }) });
         const results = (d && d.results) || [];
@@ -4495,6 +4498,7 @@ async function mmDelete(alias, btn) {
 
 let gcTarget = null;   // 「会话管理」弹窗当前针对的账号 {prov, label}
 let gemTarget = null;  // 「Gems 管理」弹窗当前针对的账号
+let hhTarget = null;   // 「健康检查历史」弹窗当前针对的账号
 
 // fmtChatTime 把会话时间戳（秒，可能为 0）渲染成可读时间。
 function fmtChatTime(ts) {
@@ -4587,6 +4591,66 @@ function openGems(prov, label) {
   if (isAdmin()) loadGemMaps();
 }
 function closeGems() { if ($('gemVeil')) $('gemVeil').classList.remove('on'); gemTarget = null; }
+
+// 「健康检查历史」：账号最近的会话探测结果（手动验活 / 定时健康检查产生）。
+function openHealthHistory(prov, label) {
+  hhTarget = { prov, label };
+  if ($('hhWho')) $('hhWho').textContent = prov + ' / ' + label;
+  if ($('hhVeil')) $('hhVeil').classList.add('on');
+  loadHealthHistory();
+}
+function closeHealthHistory() { if ($('hhVeil')) $('hhVeil').classList.remove('on'); hhTarget = null; }
+
+// fmtHealthTime 把 RFC3339 时间戳渲染成可读本地时间。
+function fmtHealthTime(ts) {
+  if (!ts) return '—';
+  const d = new Date(ts);
+  return isNaN(d.getTime()) ? '—' : d.toLocaleString();
+}
+
+async function loadHealthHistory() {
+  if (!hhTarget) return;
+  const st = $('hhState'), tb = $('hhBody');
+  if (!tb) return;
+  if (st) { st.hidden = false; st.className = 'state'; st.innerHTML = '<span class="dots">加载中</span>'; }
+  tb.innerHTML = '';
+  try {
+    const d = await apiAbs('/omni/admin/geminiweb/health-history?provider=' + encodeURIComponent(hhTarget.prov));
+    // 只显示当前账号的记录（后端返回的是 provider 维度汇总，最多 50 条）。
+    const records = ((d && d.records) || []).filter(r => r.label === hhTarget.label);
+    if (st) st.hidden = true;
+    if (!records.length) {
+      tb.innerHTML = '<tr><td colspan="5"><div class="empty">还没有该账号的探测记录（点「验活」或等待定时健康检查）</div></td></tr>';
+      return;
+    }
+    tb.innerHTML = records.map(r => '<tr>' +
+      '<td class="id">' + esc(r.label) + '</td>' +
+      '<td>' + (r.valid ? '<span class="tag ok">有效</span>' : '<span class="tag warn">失败</span>') + '</td>' +
+      '<td class="num">' + esc(String(r.models_count || 0)) + '</td>' +
+      '<td style="color:var(--ink-3)">' + esc(fmtHealthTime(r.checked_at)) + '</td>' +
+      '<td style="color:var(--ink-3)">' + esc(r.error || '—') + '</td>' +
+      '</tr>').join('');
+  } catch (e) {
+    if (st) { st.className = 'state err'; st.innerHTML = esc(e.message); }
+  }
+}
+
+async function hhCheckAll() {
+  const prov = hhTarget ? hhTarget.prov : '';
+  const btn = $('btnHhCheck');
+  if (btn) { btn.disabled = true; btn.textContent = '检查中…'; }
+  try {
+    const d = await apiAbs('/omni/admin/geminiweb/check-account?provider=' + encodeURIComponent(prov));
+    const res = (d && d.accounts) || [];
+    const ok = res.filter(x => x.success).length;
+    ogMsg('hhMsg', '检查完成：' + ok + '/' + res.length + ' 账号有效', 'ok');
+    await loadHealthHistory();
+  } catch (e) {
+    ogMsg('hhMsg', '检查失败：' + e.message, 'err');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '检查全部账号'; }
+  }
+}
 
 async function loadGems() {
   if (!gemTarget) return;
@@ -5800,6 +5864,10 @@ async function saveOutbound() {
     const b = ev.target.closest('button[data-gemmapdel]');
     if (b) gemMapDelete(b.dataset.gemmapdel, b);
   });
+  // Gemini Web 健康检查历史（账号级探测记录）。
+  on('btnCloseHH', closeHealthHistory);
+  on('btnHhReload', loadHealthHistory);
+  on('btnHhCheck', hhCheckAll);
   // 积分快过期优先（raccoon / runable 的每日·每月积分会作废）
   on('btnSaveCfgCredit', () => saveOmniConfig('crMsg'));
   const ke = $('keyEditor');

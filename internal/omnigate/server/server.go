@@ -620,6 +620,23 @@ func (s *Server) handleGeminiWebAdmin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.writeValue(w, 200, map[string]any{"results": res})
+	case r.Method == http.MethodGet && path == "check-account":
+		ctx, cancel := context.WithTimeout(r.Context(), 180*time.Second)
+		defer cancel()
+		res, err := s.gw.GeminiWebCheckAccounts(ctx, s.geminiWebProviderOrDefault(r.URL.Query().Get("provider")))
+		if err != nil {
+			s.adminError(w, err)
+			return
+		}
+		s.writeValue(w, 200, map[string]any{"ok": true, "accounts": res})
+	case r.Method == http.MethodGet && path == "health-history":
+		name := s.geminiWebProviderOrDefault(r.URL.Query().Get("provider"))
+		total, records, err := s.gw.GeminiWebHealthHistory(name)
+		if err != nil {
+			s.adminError(w, err)
+			return
+		}
+		s.writeValue(w, 200, map[string]any{"ok": true, "total": total, "records": records})
 	case r.Method == http.MethodPost && path == "remove":
 		var req struct {
 			Provider string `json:"provider"`

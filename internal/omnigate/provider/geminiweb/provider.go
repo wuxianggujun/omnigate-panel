@@ -49,6 +49,9 @@ type Provider struct {
 	// gems maps a client-facing model name to a custom Gem + its owning account
 	// (issue #2). Nil = no Gems are exposed as model names.
 	gems *GemMappingStore
+	// health is the per-account probe ledger (check_account history), surfaced by
+	// the panel's health-history view. See health.go.
+	health *healthLedger
 	// logf reports non-fatal upstream problems (an attachment that could not be
 	// uploaded). Nil = silent.
 	logf func(format string, args ...any)
@@ -83,6 +86,7 @@ func NewProvider(name string, models []string) *Provider {
 		client:   NewClient(),
 		models:   models,
 		sessions: map[string]*session{},
+		health:   newHealthLedger(),
 	}
 }
 
@@ -307,8 +311,26 @@ type CheckResult struct {
 }
 
 // CheckAccount (re)builds the account's session and reports whether its cookies
-// still work.
+// still work. Every probe is also recorded in the account's health ledger so the
+// panel can show a probe history (check_account in gemini2api).
 func (p *Provider) CheckAccount(ctx context.Context, acc *provider.Account) *CheckResult {
+	now := time.Now().UTC()
+	res := p.checkAccount(ctx, acc)
+	rec := HealthRecord{
+		Valid:       res.Valid,
+		HasToken:    res.Valid,
+		ModelsCount: len(res.Models),
+		CheckedAt:   now,
+	}
+	if !res.Valid {
+		rec.Error = res.Error
+	}
+	p.health.record(acc.Label, rec)
+	return res
+}
+
+// checkAccount performs the actual probe without touching the health ledger.
+func (p *Provider) checkAccount(ctx context.Context, acc *provider.Account) *CheckResult {
 	s, err := p.ensureSession(ctx, acc)
 	if err != nil {
 		return &CheckResult{Valid: false, Error: err.Error()}
@@ -326,6 +348,7 @@ func (p *Provider) ResetAccount(label string) {
 	p.mu.Lock()
 	delete(p.sessions, label)
 	p.mu.Unlock()
+	p.health.forget(label)
 }
 
 // ---------------------------------------------------------------------------

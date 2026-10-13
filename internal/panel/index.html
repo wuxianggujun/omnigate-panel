@@ -1014,6 +1014,34 @@
   </div>
 </div>
 
+<!-- Gemini Web 健康检查历史 -->
+<div class="veil" id="hhVeil">
+  <div class="dlg" style="width:860px">
+    <header>
+      <h3>健康检查历史 <span class="hint" id="hhWho"></span></h3>
+      <div class="hint">每个 geminiweb 账号最近的会话探测结果（每账号最多保留 20 条，此处汇总最近 50 条，最新在前）。探测由手动「验活」与定时健康检查产生。</div>
+    </header>
+    <div class="body">
+      <div class="og-row" style="margin-top:0">
+        <button class="xs primary" id="btnHhCheck">检查全部账号</button>
+        <button class="xs ghost" id="btnHhReload">刷新</button>
+        <span class="og-msg" id="hhMsg"></span>
+      </div>
+      <div class="state" id="hhState"></div>
+      <div class="tbl-wrap">
+        <table class="acc md" id="hhTable">
+          <thead><tr><th>账号</th><th>结果</th><th>模型数</th><th>时间</th><th>错误</th></tr></thead>
+          <tbody id="hhBody"></tbody>
+        </table>
+      </div>
+    </div>
+    <footer>
+      <span class="grow"></span>
+      <button id="btnCloseHH">关闭</button>
+    </footer>
+  </div>
+</div>
+
 <!-- 开学季券码 -->
 <div class="veil" id="vcVeil">
   <div class="dlg">

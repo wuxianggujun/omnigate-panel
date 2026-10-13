@@ -737,6 +737,7 @@
             <label class="fld"><span class="lb">模式</span><select id="cfgMode"><option value="text">text</option><option value="native">native</option></select></label>
           </div>
           <label class="switch"><span class="lb">透传 reasoning</span><input type="checkbox" id="cfgReasoning"></label>
+          <label class="fld" style="margin-top:8px"><span class="lb">路由优先级 routing.prefer（裸模型名按此顺序选第一个「模型目录里真有该模型」的供应商，一行一个；都不命中回落默认 provider；带 <code>provider/</code> 前缀的请求不受影响）</span><textarea id="cfgRoutingPrefer" rows="2" spellcheck="false" placeholder="atria&#10;runable&#10;raccoon"></textarea></label>
           <div class="hr"></div>
           <div id="provEditor"></div>
           <div class="og-row" style="margin-top:10px">

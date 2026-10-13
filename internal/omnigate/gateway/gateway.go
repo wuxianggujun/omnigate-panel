@@ -714,7 +714,53 @@ func (g *Gateway) routeResolved(model string) (string, string) {
 			return model[:i], model[i+1:]
 		}
 	}
+	// 裸名：按 routing.prefer 顺序选第一个「模型目录里真有该模型」的供应商。
+	if p := g.preferProvider(model); p != "" {
+		return p, model
+	}
 	return g.cfg.DefaultProvider, model
+}
+
+// preferProvider 在裸模型名下按 routing.prefer 顺序返回第一个「模型目录里真有该
+// 模型」的供应商名；没有偏好、或都没命中时返回 ""（调用方回落 default_provider）。
+//
+// 只看缓存目录（cachedModels，不触发网络拉取）——路由必须是无阻塞的纯内存判断。
+// 目录由 models() 在列举 / 兜底时刷新，并在启动时从落盘缓存（文件或 KV 后端）恢复。
+func (g *Gateway) preferProvider(model string) string {
+	prefer := g.cfg.PreferProviders()
+	if len(prefer) == 0 || model == "" {
+		return ""
+	}
+	for _, name := range prefer {
+		if _, ok := g.providers[name]; !ok {
+			continue
+		}
+		models, ok := g.cachedModels(name)
+		if !ok {
+			continue
+		}
+		if modelInList(models, model) {
+			return name
+		}
+	}
+	return ""
+}
+
+// modelInList 判断模型目录里是否存在该模型 id：精确匹配，或目录条目的最后一段
+// 等于该名字（与 resolveModel 的短名解析同口径，故 prefer 命中后 resolveModel
+// 一定能把短名解析成完整 id）。
+func modelInList(models []openai.Model, model string) bool {
+	for _, m := range models {
+		if m.ID == model {
+			return true
+		}
+	}
+	for _, m := range models {
+		if i := strings.LastIndex(m.ID, "/"); i >= 0 && m.ID[i+1:] == model {
+			return true
+		}
+	}
+	return false
 }
 
 // modelChainFallbacks returns the ordered fallback candidates declared by a

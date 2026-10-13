@@ -72,6 +72,49 @@ func TestRouteAppliesModelMapping(t *testing.T) {
 	}
 }
 
+// TestRoutePreferByModelExistence 钉住 routing.prefer：裸模型名按偏好顺序选第一个
+// 「模型目录里真有该模型」的供应商；都没命中回落 default_provider；带前缀的请求
+// 不受偏好影响；没有偏好时保持旧行为。
+func TestRoutePreferByModelExistence(t *testing.T) {
+	g := testGateway(&scriptProvider{})
+	g.providers["alt"] = &scriptProvider{}
+	g.order = append(g.order, "alt")
+	g.cfg.Routing = &config.RoutingConfig{Prefer: []string{"alt", "fake"}}
+	g.modelCache["fake"] = modelEntry{models: []openai.Model{{ID: "m1"}, {ID: "vendor/only-fake"}}}
+	g.modelCache["alt"] = modelEntry{models: []openai.Model{{ID: "m2"}, {ID: "m1"}}}
+
+	// 两个目录都有 m1 → 取偏好里靠前的 alt。
+	if pn, m := g.route("m1"); pn != "alt" || m != "m1" {
+		t.Fatalf("route(m1) = (%q,%q), want (alt,m1)", pn, m)
+	}
+	// 只有 fake 有（末段匹配）→ 跳过没有的 alt，落到 fake。
+	if pn, m := g.route("only-fake"); pn != "fake" || m != "only-fake" {
+		t.Fatalf("route(only-fake) = (%q,%q), want (fake,only-fake)", pn, m)
+	}
+	// 都没有 → 回落 default_provider。
+	if pn, m := g.route("nope"); pn != "fake" || m != "nope" {
+		t.Fatalf("route(nope) = (%q,%q), want (fake,nope)", pn, m)
+	}
+	// 带前缀 → 前缀优先，不受偏好影响（fake 在偏好里靠后也照样命中）。
+	if pn, m := g.route("fake/m2"); pn != "fake" || m != "m2" {
+		t.Fatalf("route(fake/m2) = (%q,%q), want (fake,m2)", pn, m)
+	}
+	// 空模型名 → 默认模型。
+	if pn, m := g.route(""); pn != "fake" || m != "m" {
+		t.Fatalf("route(\"\") = (%q,%q), want (fake,m)", pn, m)
+	}
+	// 没有偏好 = 旧行为（一律 default_provider）。
+	g.cfg.Routing = nil
+	if pn, m := g.route("m1"); pn != "fake" || m != "m1" {
+		t.Fatalf("no-prefer route(m1) = (%q,%q), want (fake,m1)", pn, m)
+	}
+	// 偏好里写了不存在的 provider：跳过，不 panic。
+	g.cfg.Routing = &config.RoutingConfig{Prefer: []string{"ghost", "alt"}}
+	if pn, m := g.route("m1"); pn != "alt" || m != "m1" {
+		t.Fatalf("ghost-prefer route(m1) = (%q,%q), want (alt,m1)", pn, m)
+	}
+}
+
 // TestModelMappingChainRoundTrip 覆盖「别名 → 目标链」（引流链）：Resolve 取首个
 // 目标，Chain 返回完整链；写入时去空/去重/去自指；多目标可持久化。
 func TestModelMappingChainRoundTrip(t *testing.T) {

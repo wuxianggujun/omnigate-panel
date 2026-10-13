@@ -32,6 +32,10 @@ type Config struct {
 	// CreditRouting 控制「快过期积分优先」选号（见下方类型注释）。缺省启用。
 	CreditRouting *CreditRouting `json:"credit_routing,omitempty"`
 
+	// Routing 控制裸模型名（不带 "provider/" 前缀）的供应商选择顺序（见下方类型
+	// 注释）。缺省 nil = 旧行为（一律 default_provider）。
+	Routing *RoutingConfig `json:"routing,omitempty"`
+
 	// Fingerprint 控制 Gemini Web 供应商的反检测 / 协议伪装层（动态请求头、
 	// TLS ClientHello 伪装、请求抖动、Cookie 落盘、Chrome 版本同步）。缺省
 	// （nil）由 applyDefaults 填成一份合理默认值。
@@ -405,6 +409,33 @@ type CreditRouting struct {
 	RefreshInterval string `json:"refresh_interval,omitempty"`
 }
 
+// RoutingConfig 控制裸模型名（不带 "provider/" 前缀）的供应商选择。这是对
+// 「模型存在性」的路由：Prefer 是供应商名的有序偏好，网关按顺序取第一个「模型
+// 目录里真的有这个模型」的供应商；都没命中时回落 default_provider。带
+// "provider/" 前缀的请求不经过这里（前缀本身就是明确指定）。
+//
+// 为什么需要它：没有偏好时，任何裸模型名都会打到 default_provider——上游没有该
+// 模型就报错，客户端必须写全限定名、或在别名表里逐个映射。有了偏好，客户端只要
+// 发裸名，网关就按「谁真的有这个模型」自动选供应商（缓存目录驱动，不阻塞请求）。
+type RoutingConfig struct {
+	// Prefer 是有序的供应商偏好（按名）。空 = 旧行为（一律 default_provider）。
+	Prefer []string `json:"prefer,omitempty"`
+}
+
+// PreferProviders 返回去掉空白项后的路由优先级列表（缺省 nil）。
+func (c *Config) PreferProviders() []string {
+	if c == nil || c.Routing == nil {
+		return nil
+	}
+	out := make([]string, 0, len(c.Routing.Prefer))
+	for _, n := range c.Routing.Prefer {
+		if n = strings.TrimSpace(n); n != "" {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
 // 快过期选号的默认参数（缺省值与 WorkBuddy 池一致）。
 const (
 	defaultCreditExpiringSoon    = 168 * time.Hour
@@ -629,6 +660,13 @@ func (c *Config) validate() error {
 			if !seen[name] {
 				return fmt.Errorf("api_keys[%s]: 未知 provider %q", keyLabel(k), name)
 			}
+		}
+	}
+	// 路由优先级同样必须指向真实存在的 provider：写错名字只会让这一项静默失效，
+	// 与「密钥白名单」同理，加载/保存时就拒绝。
+	for _, name := range c.PreferProviders() {
+		if !seen[name] {
+			return fmt.Errorf("routing.prefer: 未知 provider %q", name)
 		}
 	}
 	// 快过期选号的时长字段：写了但解析不了，静默回落默认值会让人以为配置生效了，

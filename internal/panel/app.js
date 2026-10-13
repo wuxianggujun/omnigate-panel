@@ -4274,6 +4274,11 @@ async function loadOmniConfig() {
     $('cfgDefaultModel').value = omniCfg.default_model || '';
     $('cfgMode').value = omniCfg.mode || 'text';
     $('cfgReasoning').checked = !!omniCfg.reasoning;
+    // 路由优先级（routing.prefer）：裸模型名的供应商偏好顺序，一行一个。
+    if ($('cfgRoutingPrefer')) {
+      const rt = (omniCfg.routing && typeof omniCfg.routing === 'object') ? omniCfg.routing : {};
+      $('cfgRoutingPrefer').value = Array.isArray(rt.prefer) ? rt.prefer.join('\n') : '';
+    }
     // 积分快过期优先（credit_routing）：缺省启用（enabled 缺失/false 之外的都算启用）。
     const cr = (omniCfg.credit_routing && typeof omniCfg.credit_routing === 'object') ? omniCfg.credit_routing : {};
     if ($('crEnabled')) $('crEnabled').checked = cr.enabled !== false;
@@ -5086,11 +5091,24 @@ function collectReliability() {
   omniCfg.rate_limit = rl;
 }
 
+// collectRouting 从表单读回「裸模型名路由优先级」（写进 omniCfg.routing.prefer）。
+// 留空 = 删除该字段（回落后端默认值 = 一律 default_provider）。
+function collectRouting() {
+  if (!omniCfg) return;
+  const el = $('cfgRoutingPrefer');
+  if (!el) return;
+  const list = el.value.split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
+  const rt = (omniCfg.routing && typeof omniCfg.routing === 'object') ? omniCfg.routing : {};
+  if (list.length) rt.prefer = list; else delete rt.prefer;
+  if (Object.keys(rt).length) omniCfg.routing = rt; else delete omniCfg.routing;
+}
+
 async function saveOmniConfig(msgId) {
   const mid = msgId || 'cfgMsg';
   if (!omniCfg) { ogMsg(mid, '配置尚未加载', 'err'); return; }
   collectCreditRouting();
   collectReliability();
+  collectRouting();
   const body = normalizeOmniForSave(omniCfg);
   body.default_provider = $('cfgDefaultProvider').value;
   body.default_model = $('cfgDefaultModel').value.trim();

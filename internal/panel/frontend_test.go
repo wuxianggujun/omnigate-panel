@@ -1395,3 +1395,132 @@ process.stdout.write(JSON.stringify({
 		t.Fatalf("provider table=%s\nwant %s", out, want)
 	}
 }
+
+// TestAppJSOmniConfigSaveSurvivesSplitViews 钉住「供应商页卡片按归属拆到别的页」之后，
+// 保存配置不再崩、也不再顺手清空别人的字段。
+//
+// 为什么需要：网关密钥搬到了「配置」页、模型名映射搬到了「模型与档位」页，而那些字段
+// 全都由同一个 saveOmniConfig() 汇总提交。曾经这里有三类真实故障：
+//   ① 从别的页点「保存并生效」时 $('cfgDefaultProvider') 返回 null，读 .value 直接抛错；
+//   ② omniCfg 只在供应商页加载，从配置页触发保存时是 null —— 旧代码直接 return，
+//      用户点了保存什么也不发生；
+//   ③ collectXxx 若不判空，会把「元素不在当前视图」误判成「用户要清空」，
+//      于是保存一次就把快过期策略 / 第三方兜底 / 按 IP 限流 / routing.prefer 全删掉。
+func TestAppJSOmniConfigSaveSurvivesSplitViews(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; omni config save test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+// 取 normalizeOmniForSave → saveOmniConfig 结束这一段。起点必须早于 normalizeOmniForSave
+// 的定义，否则 saveOmniConfig 在闭包里取不到它。
+const start = src.indexOf('function normalizeOmniForSave');
+const end = src.indexOf('/* ── OmniGate 账号授权');
+if (start < 0 || end < 0 || end < start) throw new Error('omni save region not found');
+
+// $() 必须能表达「元素不存在」= null（卡片被拆到别的页就是这个状态），
+// 所以用一个只返回已登记 id 的注册表；未登记的 id 一律 null。
+const els = {};
+const registered = new Set();
+const mk = (id) => {
+  if (!registered.has(id)) return null;
+  return (els[id] = els[id] || {
+    innerHTML: '', textContent: '', value: '', checked: false, hidden: false,
+    classList: { _s: new Set(), add(c) { this._s.add(c); }, remove(c) { this._s.delete(c); }, contains(c) { return this._s.has(c); } },
+    querySelector: () => null,
+  });
+};
+let sentBody = null;
+const ctx = {
+  JSON, Math, Array, Object, String, Number, isNaN, console, Set,
+  esc: s => String(s == null ? '' : s),
+  $: id => mk(id),
+  toast: () => {}, ogMsg: () => {}, setTimeout: () => 0, confirm: () => true,
+  loadOmniConfig: async () => { ctx.omniCfg = ctx.omniCfg || { providers: [] }; },
+  loadOverview: async () => {}, loadOutbound: () => {},
+  view: 'config',
+  api: async (path, opts) => { sentBody = opts && opts.body ? JSON.parse(opts.body) : null; return {}; },
+};
+vm.createContext(ctx);
+vm.runInContext(src.slice(start, end) +
+  '\nthis.saveOmniConfig=saveOmniConfig; this.collectCreditRouting=collectCreditRouting;' +
+  ' this.collectReliability=collectReliability; this.collectRouting=collectRouting;', ctx);
+
+(async () => {
+  const r = {};
+  // 场景 1：omniCfg 为 null（= 从「配置」页的网关密钥卡触发保存、还没进过供应商页）。
+  //   旧代码直接 return "配置尚未加载"，用户点了保存什么也不发生；新代码先补齐再存。
+  ctx.omniCfg = null;
+  await ctx.saveOmniConfig('keyMsg');
+  r.omniCfgReloaded = !!ctx.omniCfg && Array.isArray(ctx.omniCfg.providers);
+
+  // 场景 2：omniCfg 有值但全部控件缺失（卡片已按归属拆到别的页）。
+  //   collectXxx 必须「元素缺失 = 保持原值」，否则保存一次就把快过期策略 / 兜底 / 限流 / 路由全清空。
+  ctx.omniCfg = {
+    default_provider: 'raccoon', default_model: 'm1', mode: 'native', reasoning: true,
+    routing: { prefer: ['atria', 'runable'] },
+    credit_routing: { enabled: true, expiring_soon: '168h', min_expiring: 5, refresh_interval: '10m' },
+    fallback: { enabled: true, models: ['raccoon/x'] },
+    rate_limit: { enabled: true, trust_proxy: true, window: 60, max: 10 },
+    providers: [{ name: 'raccoon', type: 'raccoon', models: ['a', 'b'], accounts: [{ label: 'x' }] }],
+  };
+  sentBody = null;
+  await ctx.saveOmniConfig('keyMsg');
+  const b = sentBody || {};
+  r.creditRoutingKept = JSON.stringify(b.credit_routing) === '{"enabled":true,"expiring_soon":"168h","min_expiring":5,"refresh_interval":"10m"}';
+  r.fallbackKept = !!b.fallback && b.fallback.enabled === true && b.fallback.models[0] === 'raccoon/x';
+  r.rateLimitKept = !!b.rate_limit && b.rate_limit.enabled === true &&
+    b.rate_limit.trust_proxy === true && b.rate_limit.max === 10;
+  r.routingKept = JSON.stringify(b.routing) === '{"prefer":["atria","runable"]}';
+  r.globalsKept = b.default_provider === 'raccoon' && b.default_model === 'm1' &&
+    b.mode === 'native' && b.reasoning === true;
+  r.providersKept = b.providers.length === 1 && b.providers[0].models.join(',') === 'a,b';
+
+  // 场景 3：控件存在时仍要正常收集（回归保护：不能因为「可能为 null」就一律不读）。
+  ctx.omniCfg = { default_provider: 'raccoon', providers: [] };
+  ['cfgDefaultProvider', 'cfgDefaultModel', 'cfgMode', 'cfgReasoning', 'cfgRoutingPrefer',
+   'crEnabled', 'crWindow', 'crMin', 'crRefresh'].forEach(registered.add, registered);
+  Object.assign(els, {
+    cfgDefaultProvider: { innerHTML: '', value: 'atria', classList: { add() {}, remove() {}, contains: () => false } },
+    cfgDefaultModel: { value: '  md  ' },
+    cfgMode: { value: 'text' },
+    cfgReasoning: { checked: true },
+    cfgRoutingPrefer: { value: 'atria\nrunable\n' },
+    crEnabled: { checked: false }, crWindow: { value: '' }, crMin: { value: '' }, crRefresh: { value: '' },
+  });
+  sentBody = null;
+  await ctx.saveOmniConfig();
+  const b3 = sentBody || {};
+  r.formValuesCollected = b3.default_provider === 'atria' && b3.default_model === 'md' &&
+    b3.mode === 'text' && b3.reasoning === true && JSON.stringify(b3.routing) === '{"prefer":["atria","runable"]}';
+  // 控件存在且留空 = 真的想回落默认：enabled 恒写，其余字段删除。
+  r.blankedDropsDefaults = !!b3.credit_routing && b3.credit_routing.enabled === false &&
+    b3.credit_routing.expiring_soon === undefined && b3.credit_routing.min_expiring === undefined &&
+    b3.credit_routing.refresh_interval === undefined;
+
+  process.stdout.write(JSON.stringify(r));
+})().catch(e => { console.log('FAIL', e.stack); process.exit(1); });`
+	// 注意后缀必须是 .cjs：仓库根的 package.json 声明了 "type": "module"，
+	// 用 .js 会让 Node 把脚本当 ESM 加载，require 直接 ReferenceError（本机 Windows
+	// 上因为 t.TempDir() 不在仓库内所以碰不到，只在服务器 CI 上炸）。
+	f, err := os.CreateTemp(t.TempDir(), "omnisave-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("omni config save node test failed: %v\n%s", err, out)
+	}
+	const want = `{"omniCfgReloaded":true,"creditRoutingKept":true,"fallbackKept":true,` +
+		`"rateLimitKept":true,"routingKept":true,"globalsKept":true,"providersKept":true,` +
+		`"formValuesCollected":true,"blankedDropsDefaults":true}`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("omni config save=%s\nwant %s", out, want)
+	}
+}

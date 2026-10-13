@@ -281,6 +281,49 @@
           </table>
         </div>
       </div>
+
+      <!-- 模型名映射（别名 → 实际模型；原在供应商页，模型层设置归模型页） -->
+      <div class="box" id="mmBox" data-admin>
+        <header>
+          <h3>模型名映射 <span class="hint">把客户端请求里的模型名改指到别的上游模型（如 gpt-4o → geminiweb/gemini-pro）</span></h3>
+          <span class="grow"></span>
+          <button class="xs" id="btnMmReload">刷新</button>
+        </header>
+        <div class="pad">
+          <div class="og-hint" style="margin-top:0">客户端仍用<strong>别名</strong>调用（别名会出现在 <code>/v1/models</code> 里），网关在路由前把它解析成<strong>目标模型</strong>再转发。目标可写全限定名（<code>provider/model</code>）或裸模型名（回落到默认 provider）。<br><strong>可写多行做「引流链」</strong>：第一行是主目标，后面每行是回退——主目标供应商无可用账号 / 额度耗尽 / 请求失败时，自动按顺序试下一行（例如把小浣熊放第一行烧快过期积分，runable 放第二行兜底）。别名不能等于目标；改完即热生效，落盘 <code>data/model-mapping.json</code>。</div>
+          <div class="state" id="mmState"></div>
+          <div class="tbl-wrap">
+            <table class="acc md" id="mmTable">
+              <thead><tr><th>别名（客户端调用）</th><th>目标模型（首个优先，可多行回退）</th><th class="c-acts"></th></tr></thead>
+              <tbody id="mmBody"></tbody>
+            </table>
+          </div>
+          <div class="og-row" style="margin-top:10px">
+            <label class="fld" style="margin:0;max-width:240px"><span class="lb">别名</span><input id="mmAlias" placeholder="如 gpt-4o"></label>
+            <label class="fld" style="margin:0;max-width:300px"><span class="lb">目标模型</span><textarea id="mmTarget" rows="2" spellcheck="false" placeholder="raccoon/sn-deepseek-v4-1-flash&#10;runable/deepseek/deepseek-v4.1-flash"></textarea></label>
+            <button class="xs primary" id="btnMmAdd">添加 / 更新</button>
+            <span class="og-msg" id="mmMsg"></span>
+          </div>
+        </div>
+      </div>
+
+      <!-- 上游模型目录 + OpenAI 兼容调用（原在供应商页，属模型层） -->
+      <div class="box">
+        <header>
+          <h3>上游模型目录 <span class="hint" id="modelCnt"></span></h3>
+          <span class="grow"></span>
+          <button class="xs" id="btnLoadModels">刷新模型</button>
+        </header>
+        <div class="pad"><div class="og-grid" id="models"></div></div>
+      </div>
+
+      <div class="box">
+        <header><h3>OpenAI 兼容调用</h3></header>
+        <div class="pad">
+          <div class="og-hint" style="margin-top:0">Base URL：<code id="baseUrl"></code>　·　在任意 OpenAI 客户端里把 API Key 填成「配置」页的 <code>API 密钥</code>（或「配置」页的网关密钥卡里任意一把）。</div>
+          <pre class="og-pre" id="callExample"></pre>
+        </div>
+      </div>
     </section>
 
     <!-- 积分构成 -->
@@ -429,6 +472,23 @@
             <label class="fld"><span class="lb">单账号明细默认展示条数</span>
               <input name="package_detail_limit" type="number" min="1" placeholder="5">
               <span class="hint">积分构成页按最早到期展示，其余未用完包聚合</span></label>
+          </div>
+        </div>
+
+        <!-- 网关密钥（客户端 /v1/* 与 /omni/v1/* 的密钥；原在供应商页，鉴权归配置页） -->
+        <div class="box">
+          <header>
+            <h3>网关密钥 <span class="hint">按供应商收窄：决定每把客户端密钥能用哪些模型</span></h3>
+            <span class="grow"></span>
+            <button type="button" class="xs" id="btnAddKey">+ 新增密钥</button>
+          </header>
+          <div class="pad">
+            <div class="og-hint" style="margin-top:0">发给客户端的 <code>/v1/*</code> 与 <code>/omni/v1/*</code> 密钥。不勾任何供应商 = <strong>全量</strong>（所有模型都能调）；勾选后该密钥只能调用这些供应商的模型，<code>/v1/models</code> 也会相应收窄，越权请求直接 <strong>403</strong>（不静默改道到别的供应商）。<br><strong>面板自己那把密钥恒为全量、不在本列表里</strong>（就是上面「服务」卡里的 <code>API 密钥</code>），所以在这里删光密钥也不会把面板锁死。改完点保存即热生效。</div>
+            <div id="keyEditor"></div>
+            <div class="og-row" style="margin-top:10px">
+              <button type="button" class="primary" id="btnSaveCfgKeys">保存并生效</button>
+              <span class="og-msg" id="keyMsg"></span>
+            </div>
           </div>
         </div>
 
@@ -766,70 +826,6 @@
         </div>
       </div>
 
-      <!-- 反检测指纹（Gemini Web 的 TLS / 请求头协议伪装，按供应商热生效） -->
-      <div class="box" id="fpBox" data-admin>
-        <header>
-          <h3>反检测指纹 <span class="hint">Gemini Web 的 TLS / 请求头伪装，按供应商设置，改完即时热生效</span></h3>
-          <span class="grow"></span>
-          <span class="note" id="fpNote"></span>
-          <button class="xs" id="btnFpReload">刷新</button>
-        </header>
-        <div class="pad">
-          <div class="og-hint" style="margin-top:0">Gemini Web 直连上游时，网关会伪装成真实 Chrome 浏览器：TLS ClientHello 指纹（<code>impersonate</code>）、请求头顺序与取值、请求间隔抖动、Cookie 域名隔离。<strong>目标版本越高越像最新浏览器</strong>，但本构建的 TLS 指纹库最高支持到 <code>chrome120</code>——更高的目标会自动降级到最接近的可支持版本。<strong>经 HTTP/SOCKS 代理时 TLS 指纹不生效</strong>（回落到系统 TLS），其余伪装照常。<br>「同步 Chrome 版本」会访问 Google 的版本接口，若发现更新的稳定版会自动抬升伪装版本。仅对 <code>geminiweb</code> 类型供应商有效。</div>
-          <div class="grid2" style="margin-top:12px">
-            <label class="fld"><span class="lb">供应商</span><select id="fpProvider"></select></label>
-            <label class="fld"><span class="lb">TLS 伪装目标</span><select id="fpTarget"></select></label>
-          </div>
-          <div class="og-row" style="margin-top:2px">
-            <button id="btnFpApply">切换目标</button>
-            <button id="btnFpSync">同步 Chrome 版本</button>
-            <span class="og-msg" id="fpMsg"></span>
-          </div>
-          <div id="fpStatus" style="margin-top:12px"></div>
-        </div>
-      </div>
-
-      <!-- 全局模型名映射（别名 → 实际模型，热生效） -->
-      <div class="box" id="mmBox" data-admin>
-        <header>
-          <h3>模型名映射 <span class="hint">把客户端请求里的模型名改指到别的上游模型（如 gpt-4o → geminiweb/gemini-pro）</span></h3>
-          <span class="grow"></span>
-          <button class="xs" id="btnMmReload">刷新</button>
-        </header>
-        <div class="pad">
-          <div class="og-hint" style="margin-top:0">客户端仍用<strong>别名</strong>调用（别名会出现在 <code>/v1/models</code> 里），网关在路由前把它解析成<strong>目标模型</strong>再转发。目标可写全限定名（<code>provider/model</code>）或裸模型名（回落到默认 provider）。<br><strong>可写多行做「引流链」</strong>：第一行是主目标，后面每行是回退——主目标供应商无可用账号 / 额度耗尽 / 请求失败时，自动按顺序试下一行（例如把小浣熊放第一行烧快过期积分，runable 放第二行兜底）。别名不能等于目标；改完即热生效，落盘 <code>data/model-mapping.json</code>。</div>
-          <div class="state" id="mmState"></div>
-          <div class="tbl-wrap">
-            <table class="acc md" id="mmTable">
-              <thead><tr><th>别名（客户端调用）</th><th>目标模型（首个优先，可多行回退）</th><th class="c-acts"></th></tr></thead>
-              <tbody id="mmBody"></tbody>
-            </table>
-          </div>
-          <div class="og-row" style="margin-top:10px">
-            <label class="fld" style="margin:0;max-width:240px"><span class="lb">别名</span><input id="mmAlias" placeholder="如 gpt-4o"></label>
-            <label class="fld" style="margin:0;max-width:300px"><span class="lb">目标模型</span><textarea id="mmTarget" rows="2" spellcheck="false" placeholder="raccoon/sn-deepseek-v4-1-flash&#10;runable/deepseek/deepseek-v4.1-flash"></textarea></label>
-            <button class="xs primary" id="btnMmAdd">添加 / 更新</button>
-            <span class="og-msg" id="mmMsg"></span>
-          </div>
-        </div>
-      </div>
-
-      <div class="box">
-        <header>
-          <h3>网关密钥 <span class="hint">按供应商收窄：决定每把客户端密钥能用哪些模型</span></h3>
-          <span class="grow"></span>
-          <button class="xs" id="btnAddKey">+ 新增密钥</button>
-        </header>
-        <div class="pad">
-          <div class="og-hint" style="margin-top:0">发给客户端的 <code>/v1/*</code> 与 <code>/omni/v1/*</code> 密钥。不勾任何供应商 = <strong>全量</strong>（所有模型都能调）；勾选后该密钥只能调用这些供应商的模型，<code>/v1/models</code> 也会相应收窄，越权请求直接 <strong>403</strong>（不静默改道到别的供应商）。<br><strong>面板自己那把密钥恒为全量、不在本列表里</strong>（它是「配置」页的 <code>api_key</code>），所以在这里删光密钥也不会把面板锁死。改完点保存即热生效。</div>
-          <div id="keyEditor"></div>
-          <div class="og-row" style="margin-top:10px">
-            <button class="primary" id="btnSaveCfgKeys">保存并生效</button>
-            <span class="og-msg" id="keyMsg"></span>
-          </div>
-        </div>
-      </div>
-
       <div class="box">
         <header>
           <h3>积分快过期优先 <span class="hint">raccoon / runable 的每日·每月积分会作废，优先烧快过期的</span></h3>
@@ -846,6 +842,29 @@
             <button class="primary" id="btnSaveCfgCredit">保存并生效</button>
             <span class="og-msg" id="crMsg"></span>
           </div>
+        </div>
+      </div>
+
+      <!-- 反检测指纹（Gemini Web 的 TLS / 请求头伪装；仅 geminiweb 供应商有运行态，没有就整卡隐藏） -->
+      <div class="box" id="fpBox" data-admin hidden>
+        <header>
+          <h3>反检测指纹 <span class="hint">Gemini Web 的 TLS / 请求头伪装，改完即时热生效</span></h3>
+          <span class="grow"></span>
+          <span class="note" id="fpNote"></span>
+          <button class="xs" id="btnFpReload">刷新</button>
+        </header>
+        <div class="pad">
+          <div class="og-hint" style="margin-top:0">直连上游时，网关会伪装成真实 Chrome 浏览器：TLS ClientHello 指纹（<code>impersonate</code>）、请求头顺序与取值、请求间隔抖动、Cookie 域名隔离。<strong>目标版本越高越像最新浏览器</strong>，但本构建的 TLS 指纹库最高支持到 <code>chrome120</code>——更高的目标会自动降级到最接近的可支持版本。<strong>经 HTTP/SOCKS 代理时 TLS 指纹不生效</strong>（回落到系统 TLS），其余伪装照常。</div>
+          <div class="grid2" style="margin-top:12px">
+            <label class="fld"><span class="lb">供应商</span><select id="fpProvider"></select></label>
+            <label class="fld"><span class="lb">TLS 伪装目标</span><select id="fpTarget"></select></label>
+          </div>
+          <div class="og-row" style="margin-top:2px">
+            <button id="btnFpApply">切换目标</button>
+            <button id="btnFpSync">同步 Chrome 版本</button>
+            <span class="og-msg" id="fpMsg"></span>
+          </div>
+          <div id="fpStatus" style="margin-top:12px"></div>
         </div>
       </div>
 
@@ -869,23 +888,6 @@
             <button class="primary" id="btnSaveCfgReliability">保存并生效</button>
             <span class="og-msg" id="rlfMsg"></span>
           </div>
-        </div>
-      </div>
-
-      <div class="box">
-        <header>
-          <h3>上游模型目录 <span class="hint" id="modelCnt"></span></h3>
-          <span class="grow"></span>
-          <button class="xs" id="btnLoadModels">刷新模型</button>
-        </header>
-        <div class="pad"><div class="og-grid" id="models"></div></div>
-      </div>
-
-      <div class="box">
-        <header><h3>OpenAI 兼容调用</h3></header>
-        <div class="pad">
-          <div class="og-hint" style="margin-top:0">Base URL：<code id="baseUrl"></code>　·　在任意 OpenAI 客户端里把 API Key 填成上面的面板 Key。</div>
-          <pre class="og-pre" id="callExample"></pre>
         </div>
       </div>
     </section>

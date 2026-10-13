@@ -635,6 +635,10 @@ function go(v) {
     if (!$('mdBody').children.length) loadModels();
     if ($('omBody') && !$('omBody').children.length) loadOmniModels();
     loadRealmRouting();
+    // 模型名映射卡归本页：数据只在进这一页时拉（admin 才看得到卡片）。
+    if (isAdmin() && $('mmBody')) loadModelMappings();
+    // 上游模型目录也归本页；同样只在首次进入时拉，之后靠「刷新模型」手动刷新。
+    if ($('models') && !$('models').children.length) loadUpstreamModels();
   }
   if (v === 'providers') loadOmniConfig();
   if (v === 'outbound') loadOutbound();
@@ -4270,10 +4274,10 @@ async function fetchOmniCfg() {
 async function loadOmniConfig() {
   try {
     await fetchOmniCfg();
-    $('ogCfgPath').textContent = omniCfgPath;
-    $('cfgDefaultModel').value = omniCfg.default_model || '';
-    $('cfgMode').value = omniCfg.mode || 'text';
-    $('cfgReasoning').checked = !!omniCfg.reasoning;
+    if ($('ogCfgPath')) $('ogCfgPath').textContent = omniCfgPath;
+    if ($('cfgDefaultModel')) $('cfgDefaultModel').value = omniCfg.default_model || '';
+    if ($('cfgMode')) $('cfgMode').value = omniCfg.mode || 'text';
+    if ($('cfgReasoning')) $('cfgReasoning').checked = !!omniCfg.reasoning;
     // 路由优先级（routing.prefer）：裸模型名的供应商偏好顺序，一行一个。
     if ($('cfgRoutingPrefer')) {
       const rt = (omniCfg.routing && typeof omniCfg.routing === 'object') ? omniCfg.routing : {};
@@ -4313,12 +4317,14 @@ async function loadOmniConfig() {
  * 后端路由见 internal/omnigate/server/server.go 的 handleGeminiWebAdmin。 */
 
 // renderFingerprint 重建供应商下拉（保留当前选中项），随后拉取该供应商的指纹状态。
+// 没有 geminiweb 类型供应商时整卡隐藏（fpBox 默认 hidden）——那张卡对别人毫无意义。
 function renderFingerprint() {
   const sel = $('fpProvider');
   if (!sel) return;
   const provs = ((omniCfg && omniCfg.providers) || [])
     .filter(p => (p.type || '') === 'geminiweb')
     .map(p => p.name).filter(Boolean);
+  if ($('fpBox')) $('fpBox').hidden = provs.length === 0;
   const prev = sel.value;
   sel.innerHTML = provs.length
     ? provs.map(n => '<option value="' + esc(n) + '">' + esc(n) + '</option>').join('')
@@ -4943,8 +4949,11 @@ function renderProvEditor() {
   const provs = (omniCfg && omniCfg.providers) || [];
   const sel = $('cfgDefaultProvider');
   const cur = (omniCfg && omniCfg.default_provider) || '';
-  sel.innerHTML = provs.map(p => '<option value="' + esc(p.name || '') + '">' + esc(p.name || '(未命名)') + '</option>').join('');
-  if (cur) sel.value = cur;
+  // 默认 provider 下拉与供应商表同页；判空是为了让本函数在任一侧缺失时仍能安全调用。
+  if (sel) {
+    sel.innerHTML = provs.map(p => '<option value="' + esc(p.name || '') + '">' + esc(p.name || '(未命名)') + '</option>').join('');
+    if (cur) sel.value = cur;
+  }
   if ($('provCnt')) $('provCnt').textContent = provs.length ? (provs.length + ' 个') : '';
   if (!provs.length) { body.innerHTML = '<tr><td colspan="2"><div class="empty">还没有供应商，点「+ 添加供应商」开始</div></td></tr>'; return; }
   body.innerHTML = provs.map((p, i) => provRowHtml(p, i)).join('');
@@ -5165,15 +5174,28 @@ function collectRouting() {
 
 async function saveOmniConfig(msgId) {
   const mid = msgId || 'cfgMsg';
-  if (!omniCfg) { ogMsg(mid, '配置尚未加载', 'err'); return; }
+  if (!omniCfg) {
+    // 只有进过「上游供应商」页才会加载 omniCfg。从「配置」页的网关密钥卡触发保存时
+    // 可能还没加载过，先拉一次再存（否则会把空配置写上去，把 providers 全清掉）。
+    await loadOmniConfig();
+    if (!omniCfg) { ogMsg(mid, '配置尚未加载', 'err'); return; }
+  }
   collectCreditRouting();
   collectReliability();
   collectRouting();
   const body = normalizeOmniForSave(omniCfg);
-  body.default_provider = $('cfgDefaultProvider').value;
-  body.default_model = $('cfgDefaultModel').value.trim();
-  body.mode = $('cfgMode').value;
-  body.reasoning = $('cfgReasoning').checked;
+  // 归属拆分说明：网关密钥（配置页）、快过期优先 / 兜底限流（本页）、模型名映射
+  // （模型页）。从任一页点「保存并生效」最终都会走到这里，而这些控件散在不同视图里，
+  // $() 一律可能返回 null：必须逐个判空，否则从别的页触发保存会抛
+  // "Cannot read properties of null" 把整个保存动作打断。字段已在表单里就取表单值，
+  // 不在就沿用 omniCfg 里的现值（collectXxx 内部同样是这个语义）。
+  const dpEl = $('cfgDefaultProvider');
+  if (dpEl) body.default_provider = dpEl.value;
+  const dmEl = $('cfgDefaultModel');
+  if (dmEl) body.default_model = dmEl.value.trim();
+  const mdEl = $('cfgMode');
+  if (mdEl) body.mode = mdEl.value;
+  body.reasoning = $('cfgReasoning') ? $('cfgReasoning').checked : !!(omniCfg.reasoning);
   try {
     await api('omni/config', { method: 'POST', body: JSON.stringify(body) });
     await loadOmniConfig();

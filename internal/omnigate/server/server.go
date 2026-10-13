@@ -143,6 +143,21 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.serveLogged(w, r, s.handleGeminiGenerate)
+	case r.Method == http.MethodPost && (path == "/gemini/v1beta/deepresearch" || path == "/v1beta/deepresearch"):
+		if !s.authorizedGemini(w, r) {
+			return
+		}
+		s.handleDeepResearch(w, s.withImageBase(r))
+	case r.Method == http.MethodPost && (path == "/gemini/v1beta/deepresearch/stream" || path == "/v1beta/deepresearch/stream"):
+		if !s.authorizedGemini(w, r) {
+			return
+		}
+		s.handleDeepResearchStream(w, s.withImageBase(r))
+	case r.Method == http.MethodPost && (path == "/gemini/v1beta/deepresearch/interact" || path == "/v1beta/deepresearch/interact"):
+		if !s.authorizedGemini(w, r) {
+			return
+		}
+		s.handleDeepResearchInteract(w, s.withImageBase(r))
 	case (r.Method == http.MethodGet || r.Method == http.MethodPost || r.Method == http.MethodDelete) &&
 		(path == "/admin/model-mapping" || strings.HasPrefix(path, "/admin/model-mapping/")):
 		if !s.authorized(w, r) {

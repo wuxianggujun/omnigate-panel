@@ -896,6 +896,11 @@ func (t *Translator) processLines(final bool) {
 
 func (t *Translator) handleLine(line string) {
 	s := strings.TrimRight(line, "\r")
+	if strings.HasPrefix(s, ":") {
+		// SSE 注释 = 上游保活 ping，原样转发：别让中间代理把长静默当读超时掐断流。
+		t.rawWrite([]byte(s + "\n\n"))
+		return
+	}
 	if !strings.HasPrefix(s, "data:") {
 		return
 	}

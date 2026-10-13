@@ -102,6 +102,8 @@ func (t *Translator) processLines(final bool) {
 
 func (t *Translator) handleLine(line string) {
 	s := strings.TrimRight(line, "\r")
+	// 上游的保活 ping 是 SSE 注释（": ping"）。本翻译层输出的是 NDJSON（每行一个
+	// 合法 JSON），没有注释语法，注入进去只会破坏 JSON——因此这里显式丢弃注释行。
 	if !strings.HasPrefix(s, "data:") {
 		return
 	}

@@ -707,15 +707,12 @@ func (g *Gateway) HandleChat(ctx context.Context, req *openai.ChatRequest, w htt
 		h.Set("X-Accel-Buffering", "no")
 		h.Set("Access-Control-Allow-Origin", "*")
 		w.WriteHeader(200)
-		flusher, _ := w.(http.Flusher)
-		flush := func() {
-			if flusher != nil {
-				flusher.Flush()
-			}
-		}
 		// ew 记录首个写失败（客户端断连）：HTTP 头已发 200，写失败改不了状态码，
-		// 但请求记录要能区分「人已走」与「上游失败」。
+		// 但请求记录要能区分「人已走」与「上游失败」。它同时把写入串行化：正文帧
+		// 来自 runChat 的后台 goroutine，保活 ping 来自主 goroutine，两者必须经同一
+		// 把锁，否则会写坏帧（net/http 的 ResponseWriter 不支持并发写）。
 		ew := &errWriter{w: w}
+		flush := ew.Flush
 		// 末尾 usage chunk 按 OpenAI 规范 gate：仅当客户端显式要
 		// stream_options.include_usage 时才补发。用量本身照常记进请求记录
 		// （下方 m.Usage = res.usage），不受此开关影响。
@@ -738,7 +735,34 @@ func (g *Gateway) HandleChat(ctx context.Context, req *openai.ChatRequest, w htt
 				flush()
 			}
 		}
-		res, err := g.runChat(ctx, provName, prov, in, hasTools, onText, onReasoning)
+		// 上游长时间静默（如 geminiweb 扩展思考）时，每 sseKeepAliveInterval 发一个
+		// 注释 ping（": ping\n\n"），避免中间代理（nginx / 网关）按读超时掐断流。
+		// 移植自参考实现 app/core/stream.py 的 sse_keepalive_during：runChat 放后台，
+		// 主 goroutine 等它完成期间负责发 ping；两者经 ew 的锁串行写。
+		type chatOutcome struct {
+			res *chatResult
+			err error
+		}
+		outcome := make(chan chatOutcome, 1)
+		go func() {
+			r, e := g.runChat(ctx, provName, prov, in, hasTools, onText, onReasoning)
+			outcome <- chatOutcome{r, e}
+		}()
+		ticker := time.NewTicker(sseKeepAliveInterval)
+		var res *chatResult
+		var err error
+	wait:
+		for {
+			select {
+			case oc := <-outcome:
+				res, err = oc.res, oc.err
+				break wait
+			case <-ticker.C:
+				_, _ = ew.Write([]byte(sseKeepAliveFrame))
+				flush()
+			}
+		}
+		ticker.Stop()
 		// 失败或零正文、且还没流出任何正文 → 第三方兜底（把兜底结果转成 SSE 发出）。
 		if (err != nil || !resultHasOutput(res)) && !contentEmitted {
 			if fb := g.tryFallback(ctx, req, provName, upstreamModel, hasTools); fb != nil {
@@ -1069,14 +1093,27 @@ func sampleSuffix(sample []byte) string {
 	return " · 上游原文: " + s
 }
 
-// errWriter 记录首个写失败。SSE 逐帧写入时客户端可能中途断连，写失败本身不改变
-// HTTP 状态码（头已发），但请求记录要据此归为 interrupted。
+// sseKeepAliveInterval 是网关等待上游事件的静默上限：超过就发一个 SSE 注释 ping，
+// 防止中间代理（nginx / 负载均衡）按读超时掐断长静默的流。移植自参考实现
+// app/core/stream.py 的 SSE_KEEPALIVE_INTERVAL。包级变量便于测试缩短。
+var sseKeepAliveInterval = 10 * time.Second
+
+// sseKeepAliveFrame 是保活用的 SSE 注释帧：注释被所有 SSE 客户端忽略，但足以让
+// 中间代理看到字节流动。与参考实现 app/core/stream.py 的 SSE_KEEPALIVE_FRAME 一致。
+const sseKeepAliveFrame = ": ping\n\n"
+
+// errWriter 记录首个写失败，并把写入串行化。SSE 逐帧写入时客户端可能中途断连，
+// 写失败本身不改变 HTTP 状态码（头已发），但请求记录要据此归为 interrupted；同时
+// 正文帧与保活 ping 来自不同 goroutine，必须经同一把锁避免写坏帧。
 type errWriter struct {
+	mu  sync.Mutex
 	w   io.Writer
 	err error
 }
 
 func (e *errWriter) Write(p []byte) (int, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	if e.err != nil {
 		return 0, e.err
 	}
@@ -1085,6 +1122,16 @@ func (e *errWriter) Write(p []byte) (int, error) {
 		e.err = err
 	}
 	return n, err
+}
+
+// Flush 在与 Write 同一把锁下刷新底层 writer（若支持 http.Flusher），保证保活
+// ping 不会插进正文帧的中间。
+func (e *errWriter) Flush() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if f, ok := e.w.(http.Flusher); ok {
+		f.Flush()
+	}
 }
 
 // usageMap renders provider usage as an OpenAI-format usage object (nil → zero).

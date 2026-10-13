@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -137,5 +138,76 @@ func TestFallbackCandidateSelection(t *testing.T) {
 	g.cfg.Fallback.Models = []string{"fake/m"}
 	if got := g.fallbackCandidates(context.Background(), "fake", "m"); len(got) != 0 {
 		t.Fatalf("primary should be excluded, got %+v", got)
+	}
+}
+
+// TestFallbackRespectsKeyScope：按供应商收窄的入站密钥，其授权范围必须一路管到
+// 兜底候选。入口 allowModel 只校验主目标，而引流链的后续目标和 cfg.Fallback 的
+// 候选不走那道校验 —— 网关侧不过滤，一个只授了 raccoon 的 key 就能顺着链打到
+// runable，「按供应商收窄」形同虚设。
+func TestFallbackRespectsKeyScope(t *testing.T) {
+	run := func(keyProviders []string) (int, string) {
+		g := fallbackGateway(textProvider("alt", "fallback answer"), &config.FallbackConfig{Enabled: true})
+		meta := &ReqMeta{KeyProviders: keyProviders}
+		ctx := WithReqMeta(context.Background(), meta)
+		w := httptest.NewRecorder()
+		g.HandleChat(ctx, fbChatReq(false), w)
+		return w.Code, w.Body.String()
+	}
+
+	// 1) 全量密钥（KeyProviders 为空）：照旧兜底，不能因为加了过滤就回归。
+	if code, body := run(nil); code != http.StatusOK || !strings.Contains(body, "fallback answer") {
+		t.Fatalf("全量密钥应照旧兜底，got code=%d body=%s", code, body)
+	}
+
+	// 2) 密钥只授 fake：alt 是权限外供应商，兜底必须被拦下。
+	code, body := run([]string{"fake"})
+	if code == http.StatusOK && strings.Contains(body, "fallback answer") {
+		t.Fatalf("只授 fake 的密钥不该让 alt 兜底成功，body=%s", body)
+	}
+	if strings.Contains(body, "fallback answer") {
+		t.Fatalf("alt 的正文泄漏了: %s", body)
+	}
+
+	// 3) 密钥同时授 fake + alt：兜底恢复（范围是白名单，不是「只剩第一个」）。
+	if code, body := run([]string{"fake", "alt"}); code != http.StatusOK || !strings.Contains(body, "fallback answer") {
+		t.Fatalf("授权含 alt 时应能兜底，got code=%d body=%s", code, body)
+	}
+}
+
+// TestChainFallbackRespectsKeyScope：引流链的回退目标同样受收窄范围约束。
+// 主链路返回空流，链的第二个目标有正文 —— 只授 fake 的密钥必须打不通 alt，
+// 授权含 alt 时才通。别名不能与链里任何目标同名（dropSelf 会把它删掉，主目标
+// 就整个变成权限外供应商，那条路径该由入口 allowModel 拦，不在这儿测）。
+func TestChainFallbackRespectsKeyScope(t *testing.T) {
+	const alias = "drain-expiring"
+	build := func() *Gateway {
+		g := fallbackGateway(textProvider("alt", "fallback answer"), &config.FallbackConfig{Enabled: false})
+		g.modelMap = NewModelMappingStore(filepath.Join(t.TempDir(), "m.json"))
+		if err := g.SetModelMappingTargets(alias, []string{"fake/m", "alt/m1"}); err != nil {
+			t.Fatalf("配链: %v", err)
+		}
+		return g
+	}
+	chatReq := func() *openai.ChatRequest {
+		return &openai.ChatRequest{
+			Model:    alias,
+			Stream:   false,
+			Messages: []openai.Message{{Role: "user", Content: openai.Content{Text: "hi"}}},
+		}
+	}
+
+	g := build()
+	w := httptest.NewRecorder()
+	g.HandleChat(WithReqMeta(context.Background(), &ReqMeta{KeyProviders: []string{"fake"}}), chatReq(), w)
+	if strings.Contains(w.Body.String(), "fallback answer") {
+		t.Fatalf("只授 fake 的密钥不该让引流链回退到 alt: %s", w.Body.String())
+	}
+
+	g2 := build()
+	w2 := httptest.NewRecorder()
+	g2.HandleChat(WithReqMeta(context.Background(), &ReqMeta{KeyProviders: []string{"fake", "alt"}}), chatReq(), w2)
+	if w2.Code != http.StatusOK || !strings.Contains(w2.Body.String(), "fallback answer") {
+		t.Fatalf("授权含 alt 时引流链应能回退，got code=%d body=%s", w2.Code, w2.Body.String())
 	}
 }

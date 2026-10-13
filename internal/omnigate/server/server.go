@@ -235,6 +235,12 @@ func (s *Server) serveLogged(w http.ResponseWriter, r *http.Request, fn func(htt
 	start := time.Now()
 	id := reqlog.NewRequestID()
 	meta := &gateway.ReqMeta{}
+	// 把入站密钥的收窄范围带进网关：入口的 allowModel 只校验主目标，而引流链
+	// 的后续目标 / 全局 cfg.Fallback 的候选不走那道校验，只能靠网关侧按这个
+	// 范围过滤兜底候选（见 gateway.tryFallback）。keyScope 返回的零值 = 全量。
+	if k, _ := s.keyScope(r); len(k.Providers) > 0 {
+		meta.KeyProviders = k.Providers
+	}
 	r = r.WithContext(gateway.WithReqMeta(r.Context(), meta))
 	lw := &logWriter{ResponseWriter: w, start: start}
 	if s.reqlog != nil {
@@ -427,6 +433,11 @@ func apiKeyFrom(r *http.Request) string {
 // 面板自己那把密钥（cfg.PanelKey，= config.json 的 api_key）恒为全量：面板前端要用
 // 它调 /omni/*，不能被任何收窄规则误伤。
 func (s *Server) keyScope(r *http.Request) (config.APIKey, bool) {
+	// cfg 可能为 nil（单测/探活用最小构造的 Server）：没有密钥配置就等于全量开放，
+	// 不能因为取 keyScope 就把请求打成 panic。
+	if s.cfg == nil {
+		return config.APIKey{}, true
+	}
 	key := apiKeyFrom(r)
 	if s.cfg.PanelKey != "" && key == s.cfg.PanelKey {
 		return config.APIKey{}, true

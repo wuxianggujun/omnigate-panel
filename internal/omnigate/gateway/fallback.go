@@ -121,22 +121,29 @@ func resultHasOutput(res *chatResult) bool {
 // runable) without turning on the generic third-party fallback. The generic
 // cfg.Fallback candidates are appended afterwards and only when enabled.
 func (g *Gateway) tryFallback(ctx context.Context, req *openai.ChatRequest, primaryProvider, primaryModel string, hasTools bool, chain []fallbackCandidate) *chatResult {
+	// 入站密钥的收窄范围：主目标已在入口校验过（allowModel），但引流链的后续
+	// 目标和全局 cfg.Fallback 的候选没走过那道校验 —— 不在这里收口，一个只授了
+	// raccoon 的 key 就能顺着链打到 runable，「按供应商收窄」等于没做。
+	meta := ReqMetaFrom(ctx)
 	candidates := make([]fallbackCandidate, 0, len(chain)+4)
 	seen := make(map[string]bool, len(chain)+4)
-	for _, c := range chain {
+	add := func(c fallbackCandidate, src string) {
 		if c.Provider == "" || c.Model == "" || seen[c.qualified()] {
-			continue
+			return
+		}
+		if !meta.ProviderAllowed(c.Provider) {
+			g.log.Info("跳过%s候选 %s：api key 未授权该供应商", src, c.qualified())
+			return
 		}
 		seen[c.qualified()] = true
 		candidates = append(candidates, c)
 	}
+	for _, c := range chain {
+		add(c, "引流链")
+	}
 	if g.cfg.Fallback.On() {
 		for _, c := range g.fallbackCandidates(ctx, primaryProvider, primaryModel) {
-			if seen[c.qualified()] {
-				continue
-			}
-			seen[c.qualified()] = true
-			candidates = append(candidates, c)
+			add(c, "全局兜底")
 		}
 	}
 	if len(candidates) == 0 {
@@ -159,9 +166,7 @@ func (g *Gateway) tryFallback(ctx context.Context, req *openai.ChatRequest, prim
 			continue
 		}
 		// Attribute the request to the provider that actually served it.
-		if m := ReqMetaFrom(ctx); m != nil {
-			m.Provider = c.Provider
-		}
+		meta.Provider = c.Provider
 		g.log.Info("兜底命中 %s", c.qualified())
 		return res
 	}

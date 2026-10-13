@@ -142,10 +142,15 @@ func TestSeriesDownsample(t *testing.T) {
 }
 
 // 落盘 → 重新加载后净变化仍可算（跨重启/跨部署不失忆）。
+//
+// 基准时间必须相对 time.Now()：loadFromBytes 会用「当前时间 - 26h」裁剪历史样本，
+// 而这里曾写死 2026-10-11 —— 部署一段时间后那个时间点就落到保留窗口外，所有样本在
+// 重新加载时被裁光，"重新加载后应有净变化" 必然失败（10-13 起必现）。
+// 用 now()-2h 当基准，样本永远落在窗口内，测试也不再随时钟漂移。
 func TestPersistence(t *testing.T) {
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "data", "credits_history.json")
-	base := time.Date(2026, 10, 11, 12, 0, 0, 0, time.UTC)
+	base := time.Now().UTC().Add(-2 * time.Hour).Truncate(time.Second)
 	r := New(fp)
 	r.RecordAt("u1", 1000, 0, base)
 	r.RecordAt("u1", 900, 0, at(base, time.Hour))

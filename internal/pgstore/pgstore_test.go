@@ -11,6 +11,22 @@ import (
 	"github.com/wuxianggujun/omnigate-panel/internal/reqlog"
 )
 
+// dropTestTables 清掉 open() 建的三张表（主表 / _kv / _request_logs）。
+// 集成测试跑在用户自己的 PostgreSQL 上，漏一张就是把垃圾留在生产库里 —— 每个
+// 用 openWithTable 的测试都必须通过它收尾，不能各写各的 drop 语句。
+func dropTestTables(t *testing.T, st *Store, table string) {
+	t.Helper()
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		for _, name := range []string{table + "_request_logs", table + "_kv", table} {
+			if _, err := st.pool.Exec(ctx, "drop table if exists "+name); err != nil {
+				t.Logf("清理测试表 %s 失败: %v", name, err)
+			}
+		}
+	})
+}
+
 // 集成测试：需要一个真实 PostgreSQL。设置 PGSTORE_TEST_DSN 后运行。
 // 全程只碰一张独立的临时表，绝不写生产 panel_users。
 func TestPanelUsersRoundTrip(t *testing.T) {
@@ -27,9 +43,7 @@ func TestPanelUsersRoundTrip(t *testing.T) {
 		t.Fatalf("open: %v", err)
 	}
 	defer st.Close()
-	defer func() {
-		_, _ = st.pool.Exec(context.Background(), "drop table if exists "+table)
-	}()
+	dropTestTables(t, st, table)
 	if st.Label() == "" {
 		t.Fatal("Label 不该为空")
 	}
@@ -114,10 +128,7 @@ func TestBlobRoundTrip(t *testing.T) {
 		t.Fatalf("open: %v", err)
 	}
 	defer st.Close()
-	defer func() {
-		_, _ = st.pool.Exec(context.Background(), "drop table if exists "+table)
-		_, _ = st.pool.Exec(context.Background(), "drop table if exists "+table+"_kv")
-	}()
+	dropTestTables(t, st, table)
 
 	// 1) 未命中。
 	if _, found, err := st.Load("usage"); err != nil || found {
@@ -172,12 +183,7 @@ func TestRequestLogSink(t *testing.T) {
 		t.Fatalf("open: %v", err)
 	}
 	defer st.Close()
-	logTable := table + "_request_logs"
-	defer func() {
-		_, _ = st.pool.Exec(context.Background(), "drop table if exists "+logTable)
-		_, _ = st.pool.Exec(context.Background(), "drop table if exists "+table)
-		_, _ = st.pool.Exec(context.Background(), "drop table if exists "+table+"_kv")
-	}()
+	dropTestTables(t, st, table)
 
 	now := time.Now()
 	events := []reqlog.Event{
@@ -237,12 +243,7 @@ func TestImportRequestLogsFromDir(t *testing.T) {
 		t.Fatalf("open: %v", err)
 	}
 	defer st.Close()
-	logTable := table + "_request_logs"
-	defer func() {
-		_, _ = st.pool.Exec(context.Background(), "drop table if exists "+logTable)
-		_, _ = st.pool.Exec(context.Background(), "drop table if exists "+table)
-		_, _ = st.pool.Exec(context.Background(), "drop table if exists "+table+"_kv")
-	}()
+	dropTestTables(t, st, table)
 
 	dir := t.TempDir()
 	line := `{"time":"2026-01-01T00:00:00Z","request_id":"x","path":"/v1","outcome":"success","status":200,"ok":true}` + "\n"

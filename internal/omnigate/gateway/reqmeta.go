@@ -33,6 +33,25 @@ type ReqMeta struct {
 	// Status 覆盖请求记录里的观测状态码（流式失败时用 5xx）。0 = 用实际写出的
 	// 状态码。
 	Status int
+	// KeyProviders 是入站密钥的收窄范围（server 侧 keyScope 得到）。nil/空 =
+	// 不限制（全量密钥或网关未配密钥）。非空时表示「这个 key 只准用这些
+	// provider」——兜底选候选必须遵守它，否则收窄密钥能顺着引流链 / 全局兜底
+	// 打到权限外的供应商。
+	KeyProviders []string
+}
+
+// ProviderAllowed 报告某个 provider 是否在当前密钥的收窄范围内。范围为空时
+// 恒为 true。供兜底挑选候选时使用。
+func (m *ReqMeta) ProviderAllowed(name string) bool {
+	if m == nil || len(m.KeyProviders) == 0 {
+		return true
+	}
+	for _, p := range m.KeyProviders {
+		if p == name {
+			return true
+		}
+	}
+	return false
 }
 
 type reqMetaKey struct{}

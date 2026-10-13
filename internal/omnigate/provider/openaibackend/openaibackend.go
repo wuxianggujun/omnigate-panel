@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/openai"
@@ -27,6 +28,13 @@ type Provider struct {
 	apiKey  string
 	models  []string
 	http    *http.Client
+
+	// 上游密钥池（可选）。非空时按请求轮询：某个 key 拿到 401/403（key 不可用）
+	// 或 429（限流）就冷却并自动切下一个。空 = 只用单个 api_key（旧写法不变）。
+	mu   sync.Mutex
+	keys []string
+	next int
+	bad  map[string]time.Time
 }
 
 // New builds an OpenAI-compatible provider. baseURL should include the version
@@ -45,6 +53,117 @@ func New(name, baseURL, apiKey string, models []string) *Provider {
 			},
 		},
 	}
+}
+
+// 密钥池冷却时长：鉴权失败（key 被吊销 / 无权限）冷得久一点，限流（429）只短暂
+// 绕开——上游恢复后这把 key 还能用。
+const (
+	keyCooldownAuth = 10 * time.Minute
+	keyCooldownRate = time.Minute
+)
+
+// SetAPIKeys 启用上游密钥池（多密钥轮询）。空池 / 单项池等于没启轮询；调用会重置
+// 轮询游标与冷却状态（面板保存配置后热重载会重建 provider，这里主要供测试与
+// 运行时替换）。
+func (p *Provider) SetAPIKeys(keys []string) {
+	if p == nil {
+		return
+	}
+	clean := make([]string, 0, len(keys))
+	for _, k := range keys {
+		if k = strings.TrimSpace(k); k != "" {
+			clean = append(clean, k)
+		}
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.keys = clean
+	p.next = 0
+	p.bad = nil
+}
+
+// candidates 本 provider 可用的候选 key：密钥池优先，否则回落到单个 api_key。
+func (p *Provider) candidates() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.keys) > 0 {
+		out := make([]string, len(p.keys))
+		copy(out, p.keys)
+		return out
+	}
+	if p.apiKey != "" {
+		return []string{p.apiKey}
+	}
+	return nil
+}
+
+// pick 取下一个 key：第一轮只挑「没在冷却、本次没试过」的；全池冷却时第二轮退让
+// 到「只要本次没试过」（宁可冒险也别直接失败）。tried 为 nil 表示不排除任何 key。
+func (p *Provider) pick(tried map[string]bool) (string, bool) {
+	cands := p.candidates()
+	if len(cands) == 0 {
+		return "", false
+	}
+	if len(cands) == 1 {
+		if tried[cands[0]] {
+			return "", false
+		}
+		return cands[0], true
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	now := time.Now()
+	n := len(cands)
+	for pass := 0; pass < 2; pass++ {
+		for j := 0; j < n; j++ {
+			i := (p.next + j) % n
+			k := cands[i]
+			if tried[k] {
+				continue
+			}
+			if pass == 0 {
+				if until, bad := p.bad[k]; bad && now.Before(until) {
+					continue
+				}
+			}
+			p.next = (i + 1) % n
+			return k, true
+		}
+	}
+	return "", false
+}
+
+// markBad 把 key 放进冷却；markGood 清除它的冷却。
+func (p *Provider) markBad(key string, d time.Duration) {
+	if key == "" || d <= 0 {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.bad == nil {
+		p.bad = map[string]time.Time{}
+	}
+	p.bad[key] = time.Now().Add(d)
+}
+
+func (p *Provider) markGood(key string) {
+	if key == "" {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	delete(p.bad, key)
+}
+
+// keyCooldownFor 按上游状态码决定冷却时长；0 = 不参与轮询（直接报错）。
+func keyCooldownFor(status int) time.Duration {
+	switch status {
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return keyCooldownAuth
+	case http.StatusTooManyRequests:
+		return keyCooldownRate
+	}
+	return 0
 }
 
 // Name returns the provider name.
@@ -78,9 +197,11 @@ func (p *Provider) SetProxySelector(sel outbound.Selector) {
 // Type returns the provider type.
 func (p *Provider) Type() string { return "openai" }
 
-func (p *Provider) auth(req *http.Request) {
-	if p.apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+p.apiKey)
+// auth 给请求带上某把上游 key 的 Authorization 头（key 为空则不带，兼容无鉴权
+// 上游）。
+func (p *Provider) auth(req *http.Request, key string) {
+	if key != "" {
+		req.Header.Set("Authorization", "Bearer "+key)
 	}
 }
 
@@ -88,7 +209,8 @@ func (p *Provider) auth(req *http.Request) {
 func (p *Provider) ListModels(ctx context.Context) ([]openai.Model, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.baseURL+"/models", nil)
 	if err == nil {
-		p.auth(req)
+		key, _ := p.pick(nil)
+		p.auth(req, key)
 		if resp, err := p.http.Do(req); err == nil {
 			defer resp.Body.Close()
 			if resp.StatusCode < 400 {

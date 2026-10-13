@@ -24,6 +24,11 @@ type Config struct {
 	APIKeys         APIKeyList       `json:"api_keys"`
 	Providers       []ProviderConfig `json:"providers"`
 	Checkin         CheckinConfig    `json:"checkin"`
+	// ModelWhitelist 是「对外暴露模型」的全局白名单，移植自参考实现的
+	// MODEL_WHITELIST：非空时 /v1/models、/v1beta/models 只列出其中出现的模型 ID
+	// （与对外暴露的名字一致，如 runable/zai/glm-5.3-flash，或配置的映射别名）。
+	// 为空 = 不过滤（放行全部）。仅影响目录列举，不改变实际路由。
+	ModelWhitelist []string `json:"model_whitelist,omitempty"`
 	// CreditRouting 控制「快过期积分优先」选号（见下方类型注释）。缺省启用。
 	CreditRouting *CreditRouting `json:"credit_routing,omitempty"`
 
@@ -263,6 +268,14 @@ type ProviderConfig struct {
 	DeviceHeader string   `json:"device_header"`
 	APIKey       string   `json:"api_key"`
 	Models       []string `json:"models"`
+	// APIKeys 是「上游密钥池」：填多个上游 api_key 时按请求轮询，某个 key 拿到
+	// 401/403/429 就冷却并自动切下一个（只对 api_key 型上游 openai 生效）。
+	// 留空 = 沿用单个 api_key，旧写法完全不变（加法式字段，omitempty）。
+	APIKeys []string `json:"api_keys,omitempty"`
+	// SystemPrompt 是「供应商级系统提示词」：非空时注入发给该上游的每个请求。
+	// 消息型上游（openai/newapi/raccoon/trae）在 messages 头部插一条 system；
+	// 单条 prompt 型上游（runable/geminiweb）拼到 prompt 开头。留空 = 不注入。
+	SystemPrompt string `json:"system_prompt,omitempty"`
 	// Raccoon-specific bases; each defaults to base_url + the upstream path.
 	MainOrigin string `json:"main_origin"`
 	LLMBase    string `json:"llm_base"`
@@ -402,6 +415,20 @@ const (
 // CreditRoutingEnabled 报告是否启用「快过期积分优先」（缺省启用）。
 func (c *Config) CreditRoutingEnabled() bool {
 	return c.CreditRouting == nil || c.CreditRouting.Enabled == nil || *c.CreditRouting.Enabled
+}
+
+// ModelWhitelisted 报告某个「对外暴露的模型 ID」是否通过全局白名单过滤。白名单为空
+// 表示不过滤（放行全部）。移植自参考实现的 MODEL_WHITELIST：按对外暴露的名字精确匹配。
+func (c *Config) ModelWhitelisted(id string) bool {
+	if len(c.ModelWhitelist) == 0 {
+		return true
+	}
+	for _, m := range c.ModelWhitelist {
+		if m == id {
+			return true
+		}
+	}
+	return false
 }
 
 // CreditExpiringSoon 返回快过期窗口（缺省 168h）。
@@ -555,6 +582,21 @@ func (c *Config) applyDefaults() {
 		case "geminiweb":
 			// 无 BaseURL：客户端固定打 gemini.google.com；账号凭证是 Google Cookie。
 		}
+		// 上游密钥池：去掉空白项与重复项（前端整份回传容易带出空行），全空 = 没配。
+		if len(p.APIKeys) > 0 {
+			keys := make([]string, 0, len(p.APIKeys))
+			seenKey := map[string]bool{}
+			for _, k := range p.APIKeys {
+				k = strings.TrimSpace(k)
+				if k == "" || seenKey[k] {
+					continue
+				}
+				seenKey[k] = true
+				keys = append(keys, k)
+			}
+			p.APIKeys = keys
+		}
+		p.SystemPrompt = strings.TrimSpace(p.SystemPrompt)
 	}
 }
 
@@ -617,6 +659,18 @@ func keyLabel(k APIKey) string {
 func (c *Config) Normalize() error {
 	c.applyDefaults()
 	return c.validate()
+}
+
+// ProviderKeys 返回该供应商实际生效的上游密钥列表：密钥池非空时用它，否则回落到
+// 单个 api_key。两者都空则返回 nil（无鉴权上游，如 geminiweb 靠 cookie）。
+func (p *ProviderConfig) ProviderKeys() []string {
+	if len(p.APIKeys) > 0 {
+		return p.APIKeys
+	}
+	if p.APIKey != "" {
+		return []string{p.APIKey}
+	}
+	return nil
 }
 
 // Provider returns the provider config with the given name, or nil.

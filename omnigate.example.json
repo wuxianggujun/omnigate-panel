@@ -8,6 +8,7 @@
   "default_model": "raccoon/raccoon-8c4485",
   "mode": "text",
   "reasoning": false,
+  "model_whitelist": [],
   "api_keys": [],
   "credit_routing": {
     "enabled": true,

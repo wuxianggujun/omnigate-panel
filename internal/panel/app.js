@@ -596,6 +596,8 @@ function applyRole() {
   if ($('authTabs')) $('authTabs').hidden = !authState.allowRegistration;
   // 配置页的分组 Tab 也要按角色重算（viewer 看不到「面板账号」组）。
   refreshCfgSecTabs();
+  // 供应商页的分组 Tab 同理（非 admin 看不到「指纹」组）。
+  refreshProvSecTabs();
   // 普通用户看不到平台配置页：若当前停在这些页，退回账号池。
   if (role === 'user' && ['providers', 'outbound', 'config'].indexOf(view) >= 0) go('accounts');
 }
@@ -659,6 +661,67 @@ document.querySelectorAll('.nav a').forEach(a => a.onclick = e => {
   e.preventDefault(); go(a.dataset.view); history.replaceState(null, '', '#' + a.dataset.view);
 });
 
+/* ── 视图内二级分组 Tab（供应商页 / 配置页共用）───────────────────────
+   供应商页原本 4 张卡（供应商 / 积分快过期 / 指纹 / 可靠性与限流）纵向堆成
+   一个长页，而且一次用了三套表单写法：核心的 grid 与 fld、og 的 sub 与
+   fields（竖排小标签）、以及裸的按钮排 og-row。同一个页面上格子宽度、
+   标签上下位、按钮位置全不一样，正是"布局乱、格式不统一"的根因。
+
+   现在按归属分 4 组，字段统一收编到 grid 与 fld，一次只看一组。
+
+   三个刻意的设计（与配置页的 .cfgtabs 同源）：
+   1) 保存口径完全不变。4 组都在同一个 view 里，loadOmniConfig()/saveOmniConfig()
+      读写的还是同一批元素 —— 隐藏分组里的字段照样被读到，不会出现「切到别
+      的 tab 就丢了没保存的改动」。
+   2) 记住上次停在哪个分组，刷新/重进供应商页不重置。
+   3) 越权的分组直接隐藏 tab（非 admin 看不到「指纹」），而不是点进去看到空白。 */
+const PROV_SECS = ['prov', 'route', 'credit', 'fp'];
+let provSec = 'prov';
+const PROV_SEC_KEY = 'wb2api.provsec';
+
+function provSecAllowed(sec) {
+  if (sec !== 'fp') return true;
+  // 「指纹」组的 fpBox 带 data-admin，CSS 已按角色隐藏；这里连 tab 一起收掉，
+  // 避免非 admin 点进去看到一整片空白。
+  return isAdmin();
+}
+
+function showProvSec(sec) {
+  if (PROV_SECS.indexOf(sec) < 0 || !provSecAllowed(sec)) sec = 'prov';
+  provSec = sec;
+  try { localStorage.setItem(PROV_SEC_KEY, sec); } catch (e) { /* 隐私模式下无所谓 */ }
+  document.querySelectorAll('.cfgsec-sec').forEach(el => { el.hidden = el.dataset.sec !== sec; });
+  document.querySelectorAll('#provSecTabs button').forEach(b => {
+    b.classList.toggle('on', b.dataset.sec === sec);
+  });
+  // 分组一切换就回到页顶：否则停在长页底部时，新分组的内容在屏幕上方看不见。
+  const v = $('view-providers');
+  if (v) v.scrollIntoView({ block: 'start' });
+}
+
+/* refreshProvSecTabs 按当前角色重新评估每个分组的可见性，当前分组越权时退回
+   「供应商」。由 applyRole 调用 —— 登录 / 登出都经过它。 */
+function refreshProvSecTabs() {
+  const bar = $('provSecTabs');
+  if (!bar) return;
+  bar.querySelectorAll('button').forEach(b => { b.hidden = !provSecAllowed(b.dataset.sec); });
+  if (!provSecAllowed(provSec)) showProvSec('prov');
+}
+
+(function initProvSecTabs() {
+  const bar = $('provSecTabs');
+  if (!bar) return;
+  bar.addEventListener('click', e => {
+    const b = e.target.closest('button[data-sec]');
+    if (!b || b.hidden) return;
+    showProvSec(b.dataset.sec);
+  });
+  refreshProvSecTabs();  // 可能已是登录态，先按当前角色收一遍
+  let want = 'prov';
+  try { want = localStorage.getItem(PROV_SEC_KEY) || 'prov'; } catch (e) { /* 隐私模式 */ }
+  showProvSec(want);
+})();
+
 /* ── 配置页二级分组 Tab ────────────────────────────────────────────────
    配置页有 7 张卡（服务 / 网关密钥 / 定时任务 / 账号池治理 / 上游与高级 /
    日志 / 面板账号），纵向堆成一个 ~261 行的长表单：改一个藏在最底部的字段
@@ -685,7 +748,7 @@ function showCfgSec(sec) {
   if (CFG_SECS.indexOf(sec) < 0 || !cfgSecAllowed(sec)) sec = 'basic';
   cfgSec = sec;
   try { localStorage.setItem(CFG_SEC_KEY, sec); } catch (e) { /* 隐私模式下无所谓 */ }
-  document.querySelectorAll('.cfg-sec').forEach(s => { s.hidden = s.dataset.sec !== sec; });
+  document.querySelectorAll('.cfgsec-sec').forEach(s => { s.hidden = s.dataset.sec !== sec; });
   document.querySelectorAll('#cfgSecTabs button').forEach(b => {
     b.classList.toggle('on', b.dataset.sec === sec);
   });
@@ -6069,9 +6132,9 @@ async function saveOutbound() {
   const on = (id, fn, evt) => { const el = $(id); if (el) el.addEventListener(evt || 'click', fn); };
   // 账号池「来源」筛选
   on('accSource', () => { accSourceFilter = $('accSource').value; renderAccountRows(); }, 'change');
-  // 供应商配置（紧凑列表 + 编辑弹窗；按钮共用同一保存动作）
+  // 供应商配置（紧凑列表 + 编辑弹窗 + 分组 Tab；保存入口只留页脚那一个）
   on('btnAddProv', addProvider);
-  ['btnSaveCfg', 'btnSaveCfg2', 'btnSaveCfgBot'].forEach(id => on(id, () => saveOmniConfig()));
+  on('btnSaveCfg', () => saveOmniConfig());
   on('btnReloadCfg', loadOmniConfig);
   const pb = $('provBody');
   if (pb) pb.addEventListener('click', onProvClick);
@@ -6088,8 +6151,6 @@ async function saveOutbound() {
   // 网关密钥卡（按供应商收窄的客户端密钥）
   on('btnAddKey', addKey);
   on('btnSaveCfgKeys', () => saveOmniConfig('keyMsg'));
-  // 可靠性与限流（第三方兜底 + 按 IP 限流）
-  on('btnSaveCfgReliability', () => saveOmniConfig('rlfMsg'));
   // 反检测指纹（Gemini Web 的 TLS / 请求头伪装）
   on('btnFpReload', loadFingerprintStatus);
   on('btnFpApply', fpApplyTarget);
@@ -6134,8 +6195,6 @@ async function saveOutbound() {
   on('btnCloseHH', closeHealthHistory);
   on('btnHhReload', loadHealthHistory);
   on('btnHhCheck', hhCheckAll);
-  // 积分快过期优先（raccoon / runable 的每日·每月积分会作废）
-  on('btnSaveCfgCredit', () => saveOmniConfig('crMsg'));
   const ke = $('keyEditor');
   if (ke) { ke.addEventListener('input', onKeyInput); ke.addEventListener('change', onKeyInput); ke.addEventListener('click', onKeyClick); }
   // 账号授权（OmniGate）：raccoon 网页授权 / 粘贴 Token；runable 浏览器登录（粘贴 Cookie）

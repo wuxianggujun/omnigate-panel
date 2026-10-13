@@ -613,22 +613,30 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
      配置页原本 7 张卡纵向堆成一个 ~261 行的长表单，改一个底部的值得从头滚到尾。
      现在按归属分 6 组，一次只看一组；保存仍走同一个 <form>，tab 只切显示，
      loadConfig()/saveConfig() 的读写口径完全不变（隐藏分组里的字段照样序列化）。 */
-  .cfgtabs {
+  .cfgsec-tabs {
     display: flex; gap: 3px; padding: 3px; margin-bottom: 18px;
     background: var(--surface-2); border: 1px solid var(--line); border-radius: 10px;
     position: sticky; top: 0; z-index: 5;
   }
-  .cfgtabs button {
+  .cfgsec-tabs button {
     flex: 1; padding: 8px 4px; border: none; background: transparent; border-radius: 7px;
     color: var(--ink-3); font: 550 13px var(--sans); cursor: pointer; white-space: nowrap;
   }
-  .cfgtabs button:hover:not(:disabled) { color: var(--ink); }
-  .cfgtabs button.on { background: var(--surface); color: var(--ink); box-shadow: 0 1px 4px rgba(0,0,0,.28); }
-  .cfgtabs button .cnt { color: var(--ink-3); font-weight: 400; margin-left: 5px; font-size: 11.5px; font-variant-numeric: tabular-nums; }
-  .cfgtabs button.on .cnt { color: var(--ink-2); }
+  .cfgsec-tabs button:hover:not(:disabled) { color: var(--ink); }
+  .cfgsec-tabs button.on { background: var(--surface); color: var(--ink); box-shadow: 0 1px 4px rgba(0,0,0,.28); }
+  .cfgsec-tabs button .cnt { color: var(--ink-3); font-weight: 400; margin-left: 5px; font-size: 11.5px; font-variant-numeric: tabular-nums; }
+  .cfgsec-tabs button.on .cnt { color: var(--ink-2); }
   /* 分组隐藏时连同底部间距一起去掉，免得留下 20px 的空隙堆叠。 */
-  .cfg-sec[hidden] { display: none; }
-  .cfg-sec > .box:last-child { margin-bottom: 0; }
+  .cfgsec-sec[hidden] { display: none; }
+  .cfgsec-sec > .box:last-child { margin-bottom: 0; }
+
+  /* ── 视图内二级分组 Tab（配置页 / 供应商页共用）─────────────────────
+     与上面那套是同一件东西：配置页（6 组）与供应商页（4 组）共用 .cfgsec-tabs /
+     .cfgsec-sec。刻意不为供应商页另起一套相似但不同的类名 —— 那正是"布局不统一"
+     的常见成因：改了一处忘了另一处，两页慢慢长得不一样。
+     保存条沿用配置页的 .savebar 外观（同色 / 同圆角 / 同间距），供应商页只是
+     多 4px 上间距，因为它不在 form 里。 */
+  #view-providers .savebar { margin-top: 4px; }
 
   /* ── 请求记录表（请求日志）────────────────────────────────────────── */
   .acc.req { min-width: 1080px; }

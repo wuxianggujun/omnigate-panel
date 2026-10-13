@@ -810,70 +810,106 @@
       </div>
     </section>
 
-    <!-- 上游供应商（OmniGate：供应商配置 / 模型目录 / 调用示例） -->
+    <!-- 上游供应商（OmniGate：供应商 / 全局路由 / 积分与可靠性 / 指纹）
+         与「配置」页同一套二级分组 Tab（.cfgsec-tabs / .cfgsec-sec）：一次只看
+         一组，保存仍是同一份 omnigate.json。字段统一用 .grid*/.fld，不再混用
+         .og-sub / .og-fields 那套竖排小标签（同一页三套表单写法正是"布局乱"
+         的根因）。原来 3 个"保存并生效"按钮收敛成页脚那一个。 -->
     <section class="view" id="view-providers" hidden>
+      <div class="cfgsec-tabs" id="provSecTabs">
+        <button type="button" data-sec="prov" class="on">供应商</button>
+        <button type="button" data-sec="route">全局路由</button>
+        <button type="button" data-sec="credit">积分与可靠性</button>
+        <button type="button" data-sec="fp" data-admin>指纹</button>
+      </div>
+
+      <div class="cfgsec-sec" data-sec="prov">
       <div class="box">
         <header>
           <h3>上游供应商 <span class="hint" id="ogCfgPath"></span></h3>
           <span class="grow"></span>
-          <button class="xs primary" id="btnSaveCfg">保存并生效</button>
+          <span class="tag mute" id="provCnt"></span>
+          <button class="xs primary" id="btnAddProv">+ 添加供应商</button>
         </header>
         <div class="pad">
-          <div class="og-hint" style="margin-top:0">在这里增删改上游<strong>供应商</strong>（端点 / 密钥 / 模型），保存后<strong>进程内热生效</strong>（写入 <code>omnigate.json</code>，无需重启）。点列表任一行打开<strong>编辑弹窗</strong>。<strong>账号统一在「账号池」页添加与管理</strong>。<br><strong>凭证已脱敏</strong>：上游 <code>api_key</code> 与账号 cookie / 密码 / refresh_token 只显示「前缀 + 长度」（如 <code>sk-6d0…(len=48)</code>），原文不回显；<strong>不改动即保持原值</strong>，要替换就整段重新填。</div>
-
-          <div class="og-sub" style="margin-top:12px">
-            <div class="og-t" style="margin-bottom:8px">全局路由</div>
-            <div class="grid3">
-              <label class="fld"><span class="lb">默认 provider</span><select id="cfgDefaultProvider"></select></label>
-              <label class="fld"><span class="lb">默认模型</span><input id="cfgDefaultModel" placeholder="留空 = 上游默认"></label>
-              <label class="fld"><span class="lb">模式</span><select id="cfgMode"><option value="text">text</option><option value="native">native</option></select></label>
-            </div>
-            <label class="switch" style="padding:6px 0"><span class="lb">透传 reasoning</span><input type="checkbox" id="cfgReasoning"></label>
-            <label class="fld" style="margin-top:2px"><span class="lb">路由优先级 routing.prefer（裸模型名按此顺序选第一个「模型目录里真有该模型」的供应商，一行一个；都不命中回落默认 provider；带 <code>provider/</code> 前缀的请求不受影响）</span><textarea id="cfgRoutingPrefer" rows="2" spellcheck="false" placeholder="atria&#10;runable&#10;raccoon"></textarea></label>
-          </div>
-
-          <div class="og-row" style="justify-content:space-between;margin:18px 0 8px">
-            <div class="og-t">供应商 <span class="tag mute" id="provCnt"></span></div>
-            <div class="og-row">
-              <button id="btnAddProv">+ 添加供应商</button>
-              <button class="primary" id="btnSaveCfg2">保存并生效</button>
-            </div>
-          </div>
-          <div class="tbl-wrap">
+          <div class="og-hint" style="margin-top:0">在这里增删改上游<strong>供应商</strong>（端点 / 密钥 / 模型），点任意一行打开<strong>编辑弹窗</strong>，改完点页面底部「<strong>保存并生效</strong>」写盘（写入 <code>omnigate.json</code>，无需重启、进程内热生效）。<strong>账号统一在「账号池」页添加与管理</strong>。<br><strong>凭证已脱敏</strong>：上游 <code>api_key</code> 只显示「前缀 + 长度」（如 <code>sk-6d0…(len=48)</code>），原文不回显；<strong>不改动即保持原值</strong>，要替换就整段重新填。</div>
+          <div class="tbl-wrap" style="margin-top:12px">
             <table class="acc md" id="provTable">
               <thead><tr><th>供应商</th><th class="c-acts">操作</th></tr></thead>
               <tbody id="provBody"></tbody>
             </table>
           </div>
-          <div class="og-row" style="margin-top:10px">
-            <button class="primary" id="btnSaveCfgBot">保存并生效</button>
-            <button id="btnReloadCfg">重新加载</button>
-            <span class="og-msg" id="cfgMsg"></span>
-          </div>
         </div>
       </div>
+      </div>
 
+      <div class="cfgsec-sec" data-sec="route" hidden>
+      <div class="box">
+        <header><h3>全局路由 <span class="hint">决定一个裸模型名落在哪个供应商</span></h3></header>
+        <div class="pad">
+          <div class="og-hint" style="margin-top:0">客户端请求里的<strong>裸模型名</strong>（不带 <code>provider/</code> 前缀）先查「模型与档位」页的<strong>模型名映射</strong>（别名是硬规则，优先于这里的一切），没命中再按本页规则选供应商。</div>
+          <div class="grid2" style="margin-top:12px">
+            <label class="fld"><span class="lb">默认 provider</span><select id="cfgDefaultProvider"></select>
+              <span class="hint">prefer 没命中、也没有映射时落到这里</span></label>
+            <label class="fld"><span class="lb">默认模型</span><input id="cfgDefaultModel" placeholder="留空 = 上游默认">
+              <span class="hint">客户端不带模型名时用这个</span></label>
+            <label class="fld"><span class="lb">模式</span><select id="cfgMode"><option value="text">text</option><option value="native">native</option></select>
+              <span class="hint">native = 走上游原生协议；其余走 OpenAI 兼容</span></label>
+            <div class="switch"><span class="lb">透传 reasoning</span><input type="checkbox" id="cfgReasoning"></div>
+          </div>
+          <div class="hr"></div>
+          <label class="fld"><span class="lb">路由优先级 routing.prefer（一行一个供应商名）</span>
+            <textarea id="cfgRoutingPrefer" rows="3" spellcheck="false" placeholder="atria&#10;runable&#10;raccoon"></textarea>
+            <span class="hint">裸模型名按此顺序选第一个「模型目录里真有该模型」的供应商；都不命中回落默认 provider；带 <code>provider/</code> 前缀的请求不受影响</span></label>
+        </div>
+      </div>
+      </div>
+
+      <div class="cfgsec-sec" data-sec="credit" hidden>
       <div class="box">
         <header>
           <h3>积分快过期优先 <span class="hint">raccoon / runable 的每日·每月积分会作废，优先烧快过期的</span></h3>
         </header>
         <div class="pad">
-          <div class="og-hint" style="margin-top:0">raccoon 的「每日积分」当天清零、「每月会员积分」当月清零；runable 的日 / 月额度同理——<strong>不用就归零</strong>。开启后，网关会给窗口内仍有快过期积分的账号<strong>优先派单</strong>（先烧快过期的，再烧长期积分），并按「快照刷新间隔」后台刷新余额快照。<br>余额快照只在<strong>选号时后台刷新</strong>（不阻塞请求，缺快照时退化为原有轮询）。上游只给钱包金额、不给逐笔到期时间戳，故到期时刻按「本地零点 / 下月 1 日」推导：窗口开大 → 命中账号变多、偏好被稀释；最小积分用来避免为了几分钱换号。缺省启用。</div>
-          <div class="grid3" style="margin-top:12px">
-            <label class="switch"><span class="lb">启用</span><input type="checkbox" id="crEnabled"></label>
+          <div class="og-hint" style="margin-top:0">raccoon 的「每日积分」当天清零、「每月会员积分」当月清零；runable 的日 / 月额度同理——<strong>不用就归零</strong>。开启后，网关会给窗口内仍有快过期积分的账号<strong>优先派单</strong>（先烧快过期的，再烧长期积分），并按「快照刷新间隔」后台刷新余额快照。</div>
+          <div class="grid2" style="margin-top:12px">
+            <div class="switch"><span class="lb">启用</span><input type="checkbox" id="crEnabled"></div>
             <label class="fld"><span class="lb">快过期窗口</span><input id="crWindow" placeholder="168h（缺省）"></label>
-            <label class="fld"><span class="lb">最小快过期积分</span><input id="crMin" placeholder="5（缺省）" inputmode="numeric"></label>
+            <label class="fld"><span class="lb">最小快过期积分</span><input id="crMin" placeholder="5（缺省）" inputmode="numeric">
+              <span class="hint">避免为了几分钱换号</span></label>
             <label class="fld"><span class="lb">快照刷新间隔</span><input id="crRefresh" placeholder="10m（缺省）"></label>
           </div>
-          <div class="og-row" style="margin-top:10px">
-            <button class="primary" id="btnSaveCfgCredit">保存并生效</button>
-            <span class="og-msg" id="crMsg"></span>
-          </div>
+          <div class="hint" style="margin-top:10px">余额快照只在<strong>选号时后台刷新</strong>（不阻塞请求，缺快照时退化为原有轮询）。上游只给钱包金额、不给逐笔到期时间戳，故到期时刻按「本地零点 / 下月 1 日」推导：窗口开大 → 命中账号变多、偏好被稀释。缺省启用。</div>
         </div>
       </div>
 
-      <!-- 反检测指纹（Gemini Web 的 TLS / 请求头伪装；仅 geminiweb 供应商有运行态，没有就整卡隐藏） -->
-      <div class="box" id="fpBox" data-admin hidden>
+      <div class="box">
+        <header>
+          <h3>可靠性与限流 <span class="hint">Gemini 失败兜底 + 入站按 IP 限流（默认都关闭）</span></h3>
+        </header>
+        <div class="pad">
+          <div class="og-hint" style="margin-top:0"><strong>第三方兜底</strong>：当一次请求在 Gemini 侧<strong>失败或产出为空</strong>（无文本、无图）时，网关自动改用其它已配置的第三方模型重试同一请求，客户端始终只看到一个模型名。留空「候选模型」= 自动使用所有「看起来能聊天」的第三方模型（随机顺序）；填写则按顺序精确指定。</div>
+          <div class="grid2" style="margin-top:12px">
+            <div class="switch"><span class="lb">启用第三方兜底</span><input type="checkbox" id="cfFbEnabled"></div>
+            <label class="fld"><span class="lb">兜底候选模型（逗号分隔）</span><input id="cfFbModels" placeholder="留空 = 自动">
+              <span class="hint">如 raccoon/gpt-4o, openai/gpt-4o-mini</span></label>
+          </div>
+          <div class="hr"></div>
+          <div class="og-hint" style="margin-top:0"><strong>按 IP 限流</strong>：对聊天类端点（OpenAI chat / Claude messages / Gemini generateContent）按客户端 IP 计数，超过「每窗口请求数」返回 <code>429</code>。</div>
+          <div class="grid3" style="margin-top:10px">
+            <div class="switch"><span class="lb">启用按 IP 限流</span><input type="checkbox" id="cfRlEnabled"></div>
+            <label class="fld"><span class="lb">窗口（秒）</span><input id="cfRlWindow" placeholder="60（缺省）" inputmode="numeric"></label>
+            <label class="fld"><span class="lb">每窗口请求数</span><input id="cfRlMax" placeholder="10（缺省）" inputmode="numeric"></label>
+          </div>
+          <label class="switch" style="margin-top:4px"><span class="lb">信任代理头（X-Forwarded-For / X-Real-IP）</span><input type="checkbox" id="cfRlTrust"></label>
+          <div class="hint" style="margin-top:8px">默认直接用 TCP 对端地址；仅当部署在会覆写 <code>X-Forwarded-For</code> 的反向代理之后才勾选。</div>
+        </div>
+      </div>
+      </div>
+
+      <!-- 反检测指纹（Gemini Web 的 TLS / 请求头伪装；仅 geminiweb 供应商有运行态，没有就整组隐藏） -->
+      <div class="cfgsec-sec" data-sec="fp" hidden>
+      <div class="box" id="fpBox" data-admin>
         <header>
           <h3>反检测指纹 <span class="hint">Gemini Web 的 TLS / 请求头伪装，改完即时热生效</span></h3>
           <span class="grow"></span>
@@ -886,7 +922,7 @@
             <label class="fld"><span class="lb">供应商</span><select id="fpProvider"></select></label>
             <label class="fld"><span class="lb">TLS 伪装目标</span><select id="fpTarget"></select></label>
           </div>
-          <div class="og-row" style="margin-top:2px">
+          <div class="og-row" style="margin-top:10px">
             <button id="btnFpApply">切换目标</button>
             <button id="btnFpSync">同步 Chrome 版本</button>
             <span class="og-msg" id="fpMsg"></span>
@@ -894,28 +930,15 @@
           <div id="fpStatus" style="margin-top:12px"></div>
         </div>
       </div>
+      </div>
 
-      <div class="box">
-        <header>
-          <h3>可靠性与限流 <span class="hint">Gemini 失败兜底 + 入站按 IP 限流（默认都关闭）</span></h3>
-        </header>
-        <div class="pad">
-          <div class="og-hint" style="margin-top:0"><strong>第三方兜底</strong>：当一次请求在 Gemini 侧<strong>失败或产出为空</strong>（无文本、无图）时，网关自动改用其它已配置的第三方模型重试同一请求，客户端始终只看到一个模型名。留空「候选模型」= 自动使用所有「看起来能聊天」的第三方模型（随机顺序）；填写则按顺序精确指定。<br><strong>按 IP 限流</strong>：对聊天类端点（OpenAI chat / Claude messages / Gemini generateContent）按客户端 IP 计数，超过「每窗口请求数」返回 <code>429</code>。默认直接用 TCP 对端地址；仅当部署在会覆写 <code>X-Forwarded-For</code> 的反向代理之后才勾选「信任代理头」。</div>
-          <div class="grid3" style="margin-top:12px">
-            <label class="switch"><span class="lb">启用第三方兜底</span><input type="checkbox" id="cfFbEnabled"></label>
-            <label class="fld" style="grid-column:span 2"><span class="lb">兜底候选模型（逗号分隔，留空=自动）</span><input id="cfFbModels" placeholder="如 raccoon/gpt-4o, openai/gpt-4o-mini"></label>
-          </div>
-          <div class="grid3" style="margin-top:6px">
-            <label class="switch"><span class="lb">启用按 IP 限流</span><input type="checkbox" id="cfRlEnabled"></label>
-            <label class="fld"><span class="lb">窗口（秒）</span><input id="cfRlWindow" placeholder="60（缺省）" inputmode="numeric"></label>
-            <label class="fld"><span class="lb">每窗口请求数</span><input id="cfRlMax" placeholder="10（缺省）" inputmode="numeric"></label>
-          </div>
-          <label class="switch" style="margin-top:6px"><span class="lb">信任代理头（X-Forwarded-For / X-Real-IP）</span><input type="checkbox" id="cfRlTrust"></label>
-          <div class="og-row" style="margin-top:10px">
-            <button class="primary" id="btnSaveCfgReliability">保存并生效</button>
-            <span class="og-msg" id="rlfMsg"></span>
-          </div>
-        </div>
+      <!-- 保存条：原来 3 个"保存并生效"（顶部 / 表格上方 / 表底）都指向
+           saveOmniConfig，用户根本分不出该点哪个；收敛成一个 sticky 页脚。 -->
+      <div class="savebar">
+        <span class="og-msg" id="cfgMsg"></span>
+        <span class="grow"></span>
+        <button type="button" id="btnReloadCfg">重新加载</button>
+        <button type="button" class="primary" id="btnSaveCfg">保存并生效</button>
       </div>
     </section>
 

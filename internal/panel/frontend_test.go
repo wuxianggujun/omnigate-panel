@@ -1565,7 +1565,7 @@ const ctx = {
   isAdmin: () => role === 'admin',
   document: {
     querySelectorAll: sel => {
-      if (sel !== '.cfg-sec') return [];
+      if (sel !== '.cfgsec-sec') return [];
       return ['basic', 'keys', 'tasks', 'pool', 'advanced', 'panel'].map(s => {
         const e = mk('sec-' + s);
         e.dataset.sec = s;
@@ -1624,5 +1624,101 @@ process.stdout.write(JSON.stringify(r));`
 		`"badSecFallsBack":true,"adminSeesPanel":true,"viewerHidesPanel":true,"viewerBouncedFromPanel":true}`
 	if strings.TrimSpace(string(out)) != want {
 		t.Fatalf("config section tabs=%s\nwant %s", out, want)
+	}
+}
+
+// TestAppJSProviderSectionTabs 钉住供应商页的二级分组 Tab。
+// 背景：供应商页原本 4 张卡纵向堆成长页，且一次混用三套表单写法（grid/fld、
+// og-sub/og-fields、裸按钮排），同一页格子宽度与标签上下位全不一样——就是用户
+// 说的"布局乱、格式不统一"。现在按归属分 4 组、字段统一收编到 grid/fld。
+// 本测试锁三件事：分组名与 tab 一一对应、切 tab 只改不改内容（否则切走再切回
+// 会丢掉没保存的字段）、越权分组连 tab 一起收掉（非 admin 看不到「指纹」）。
+func TestAppJSProviderSectionTabs(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; provider section tab test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const start = src.indexOf('/* ── 视图内二级分组 Tab');
+const end = src.indexOf('/* ── 配置页二级分组 Tab');
+if (start < 0 || end < 0 || end < start) throw new Error('prov tab region not found');
+
+const els = {};
+const mk = id => (els[id] = els[id] || {
+  dataset: {}, innerHTML: '', textContent: '', value: '', checked: false, hidden: false,
+  classList: { _s: new Set(), add(c) { this._s.add(c); }, remove(c) { this._s.delete(c); }, contains(c) { return this._s.has(c); }, toggle(c, on) { on ? this._s.add(c) : this._s.delete(c); } },
+  querySelectorAll: () => [],
+  addEventListener: () => {}, scrollIntoView: () => {},
+});
+let role = 'admin';
+const ctx = {
+  JSON, Math, Array, Object, String, Number, isNaN, console, Set,
+  esc: s => String(s == null ? '' : s),
+  $: id => mk(id),
+  toast: () => {}, ogMsg: () => {}, setTimeout: () => 0,
+  isAdmin: () => role === 'admin',
+  document: {
+    querySelectorAll: sel => {
+      if (sel !== '.cfgsec-sec') return [];
+      return ['prov', 'route', 'credit', 'fp'].map(s => {
+        const e = mk('psec-' + s);
+        e.dataset.sec = s;
+        return e;
+      });
+    },
+    body: { dataset: {} },
+  },
+};
+vm.createContext(ctx);
+vm.runInContext(src.slice(start, end) +
+  '\nthis.showProvSec=showProvSec; this.refreshProvSecTabs=refreshProvSecTabs;' +
+  ' this.provSecAllowed=provSecAllowed;' +
+  ' Object.defineProperty(this, "provSec", { get: () => provSec });', ctx);
+
+const r = {};
+// ① 4 个分组名与 tab 名严格一致（HTML 侧由另一处断言兜住，这里锁前端常量）。
+r.sections = ['prov', 'route', 'credit', 'fp'].join(',');
+
+// ② 切 tab 只改 hidden、不动表单内容：隐藏分组里的字段必须保持原样，
+//    否则切走再切回，没保存的供应商配置就丢了（保存读的是同一批元素）。
+['prov', 'route', 'credit'].forEach((s, i) => els['psec-' + s].innerHTML = 'keep' + i);
+ctx.showProvSec('credit');
+r.creditShown = els['psec-credit'].hidden === false;
+r.othersHidden = ['prov', 'route', 'fp'].every(s => els['psec-' + s].hidden === true);
+r.hiddenKeepsContent = els['psec-prov'].innerHTML === 'keep0' && els['psec-route'].innerHTML === 'keep1';
+r.currentSec = ctx.provSec;
+
+// ③ 非法分组名回落「供应商」，不能把整页打成全隐藏。
+ctx.showProvSec('nope');
+r.badSecFallsBack = ctx.provSec === 'prov' && els['psec-prov'].hidden === false;
+
+// ④ 角色收敛：admin 看得到「指纹」，viewer 看不到，且停留在这组会被踢回。
+r.adminSeesFp = ctx.provSecAllowed('fp') === true;
+ctx.showProvSec('fp');          // 还在 admin 态：这一下必须打得开
+r.adminCanOpenFp = els['psec-fp'].hidden === false;
+role = 'viewer';
+ctx.refreshProvSecTabs();
+r.viewerHidesFp = ctx.provSecAllowed('fp') === false;
+r.viewerBouncedFromFp = ctx.provSec === 'prov';
+process.stdout.write(JSON.stringify(r));`
+	f, err := os.CreateTemp(t.TempDir(), "provsec-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("provider section tab node test failed: %v\n%s", err, out)
+	}
+	const want = `{"sections":"prov,route,credit,fp","creditShown":true,"othersHidden":true,` +
+		`"hiddenKeepsContent":true,"currentSec":"credit","badSecFallsBack":true,` +
+		`"adminSeesFp":true,"adminCanOpenFp":true,"viewerHidesFp":true,"viewerBouncedFromFp":true}`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("provider section tabs=%s\nwant %s", out, want)
 	}
 }

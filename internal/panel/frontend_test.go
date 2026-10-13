@@ -1524,3 +1524,105 @@ vm.runInContext(src.slice(start, end) +
 		t.Fatalf("omni config save=%s\nwant %s", out, want)
 	}
 }
+
+// TestAppJSConfigSectionTabs 钉住配置页的二级分组 Tab。
+//
+// 为什么需要：配置页原本是 7 张卡纵向堆成的 ~261 行 / 48 字段长表单，改一个藏在
+// 最底部的值得从头滚到尾。现在按归属分 6 组（基本/密钥/任务/账号池/高级/面板账号），
+// 一次只看一组。要钉住的是三件容易在后续改动里被弄坏的事：
+//   ① 6 个分组与 6 个 tab 一一对应，默认停在「基本」、其余隐藏；
+//   ② 切 tab 只改 hidden，不碰表单内容 —— 7 张卡仍在同一个 <form id="cfgForm"> 里，
+//      loadConfig/saveConfig 口径不变，隐藏分组里的字段照样提交；
+//   ③ 「面板账号」组按角色收敛：viewer 连 tab 都看不到（paccBox 本就带 data-admin，
+//      不然点进去是一整片空白）。
+func TestAppJSConfigSectionTabs(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; config section tab test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const start = src.indexOf('/* ── 配置页二级分组 Tab');
+const end = src.indexOf('/* 首次进入延到本轮脚本求值之后再 go()');
+if (start < 0 || end < 0 || end < start) throw new Error('cfg tab region not found');
+
+// 最小 DOM：只实现这段代码真正碰到的 API。dataset.scrollIntoView 要能被调用，
+// 否则切换分组会在真实浏览器里抛错。
+const els = {};
+const mk = id => (els[id] = els[id] || {
+  dataset: {}, innerHTML: '', textContent: '', value: '', checked: false, hidden: false,
+  classList: { _s: new Set(), add(c) { this._s.add(c); }, remove(c) { this._s.delete(c); }, contains(c) { return this._s.has(c); }, toggle(c, on) { on ? this._s.add(c) : this._s.delete(c); } },
+  querySelectorAll: () => [],
+  addEventListener: () => {}, scrollIntoView: () => {},
+});
+let role = 'admin';
+const ctx = {
+  JSON, Math, Array, Object, String, Number, isNaN, console, Set,
+  esc: s => String(s == null ? '' : s),
+  $: id => mk(id),
+  toast: () => {}, ogMsg: () => {}, setTimeout: () => 0,
+  isAdmin: () => role === 'admin',
+  document: {
+    querySelectorAll: sel => {
+      if (sel !== '.cfg-sec') return [];
+      return ['basic', 'keys', 'tasks', 'pool', 'advanced', 'panel'].map(s => {
+        const e = mk('sec-' + s);
+        e.dataset.sec = s;
+        return e;
+      });
+    },
+    body: { dataset: {} },
+  },
+};
+vm.createContext(ctx);
+vm.runInContext(src.slice(start, end) +
+  '\nthis.showCfgSec=showCfgSec; this.refreshCfgSecTabs=refreshCfgSecTabs;' +
+  ' this.cfgSecAllowed=cfgSecAllowed;' +
+  // cfgSec 是 let，直接 this.cfgSec=cfgSec 拷的是快照，后面 showCfgSec 改了
+  // 闭包里的值这边看不出来 —— 用 getter 才是实时读到当前分组。
+  ' Object.defineProperty(this, "cfgSec", { get: () => cfgSec });', ctx);
+
+const r = {};
+// ① 6 个分组名与 tab 名严格一致（HTML 侧由另一处断言兜住，这里锁前端常量）。
+r.sections = ['basic', 'keys', 'tasks', 'pool', 'advanced', 'panel'].join(',');
+
+// ② 切 tab 只改 hidden、不动表单内容：每个分组的 hidden 与传入的 sec 一致，
+//    且被隐藏的分组没有被清空 innerHTML（否则切走再切回，未保存的字段就丢了）。
+['basic', 'keys', 'pool'].forEach((s, i) => els['sec-' + s].innerHTML = 'keep' + i);
+ctx.showCfgSec('keys');
+r.keysShown = els['sec-keys'].hidden === false;
+r.othersHidden = ['basic', 'tasks', 'pool', 'advanced', 'panel'].every(s => els['sec-' + s].hidden === true);
+r.hiddenKeepsContent = els['sec-basic'].innerHTML === 'keep0' && els['sec-pool'].innerHTML === 'keep2';
+r.currentSec = ctx.cfgSec;
+
+// ③ 非法分组名回落「基本」，不能把整页打成全隐藏。
+ctx.showCfgSec('nope');
+r.badSecFallsBack = ctx.cfgSec === 'basic' && els['sec-basic'].hidden === false;
+
+// ④ 角色收敛：admin 看得到「面板账号」，viewer 看不到；viewer 停留在这组会被踢回基本。
+r.adminSeesPanel = ctx.cfgSecAllowed('panel') === true;
+role = 'viewer';
+ctx.refreshCfgSecTabs();
+r.viewerHidesPanel = ctx.cfgSecAllowed('panel') === false;
+r.viewerBouncedFromPanel = ctx.cfgSec === 'basic';
+process.stdout.write(JSON.stringify(r));`
+	f, err := os.CreateTemp(t.TempDir(), "cfgsec-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("config section tab node test failed: %v\n%s", err, out)
+	}
+	const want = `{"sections":"basic,keys,tasks,pool,advanced,panel","keysShown":true,` +
+		`"othersHidden":true,"hiddenKeepsContent":true,"currentSec":"keys",` +
+		`"badSecFallsBack":true,"adminSeesPanel":true,"viewerHidesPanel":true,"viewerBouncedFromPanel":true}`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("config section tabs=%s\nwant %s", out, want)
+	}
+}

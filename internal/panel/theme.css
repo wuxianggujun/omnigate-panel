@@ -602,6 +602,27 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
   .vtabs .cnt { color: var(--ink-3); font-weight: 400; margin-left: 4px; font-variant-numeric: tabular-nums; }
   .vtabs button.on .cnt { color: var(--ink-2); }
 
+  /* ── 配置页分组 Tab（基本/密钥/任务/账号池/高级/面板账号）────────────
+     配置页原本 7 张卡纵向堆成一个 ~261 行的长表单，改一个底部的值得从头滚到尾。
+     现在按归属分 6 组，一次只看一组；保存仍走同一个 <form>，tab 只切显示，
+     loadConfig()/saveConfig() 的读写口径完全不变（隐藏分组里的字段照样序列化）。 */
+  .cfgtabs {
+    display: flex; gap: 3px; padding: 3px; margin-bottom: 18px;
+    background: var(--surface-2); border: 1px solid var(--line); border-radius: 10px;
+    position: sticky; top: 0; z-index: 5;
+  }
+  .cfgtabs button {
+    flex: 1; padding: 8px 4px; border: none; background: transparent; border-radius: 7px;
+    color: var(--ink-3); font: 550 13px var(--sans); cursor: pointer; white-space: nowrap;
+  }
+  .cfgtabs button:hover:not(:disabled) { color: var(--ink); }
+  .cfgtabs button.on { background: var(--surface); color: var(--ink); box-shadow: 0 1px 4px rgba(0,0,0,.28); }
+  .cfgtabs button .cnt { color: var(--ink-3); font-weight: 400; margin-left: 5px; font-size: 11.5px; font-variant-numeric: tabular-nums; }
+  .cfgtabs button.on .cnt { color: var(--ink-2); }
+  /* 分组隐藏时连同底部间距一起去掉，免得留下 20px 的空隙堆叠。 */
+  .cfg-sec[hidden] { display: none; }
+  .cfg-sec > .box:last-child { margin-bottom: 0; }
+
   /* ── 请求记录表（请求日志）────────────────────────────────────────── */
   .acc.req { min-width: 1080px; }
   .acc.req th, .acc.req td { padding: 8px 10px; }

@@ -456,6 +456,18 @@
     <!-- 配置 -->
     <section class="view" id="view-config" hidden>
       <form id="cfgForm">
+        <!-- 二级分组 Tab：7 张卡按归属分 6 组，一次只看一组（保存仍是同一个 form）。
+             data-sec 与下方 .cfg-sec 一一对应；记忆在 cfgSec 里，刷新后不丢。 -->
+        <div class="cfgtabs" id="cfgSecTabs">
+          <button type="button" data-sec="basic" class="on">基本</button>
+          <button type="button" data-sec="keys">网关密钥</button>
+          <button type="button" data-sec="tasks">定时任务</button>
+          <button type="button" data-sec="pool">账号池治理</button>
+          <button type="button" data-sec="advanced">上游与高级</button>
+          <button type="button" data-sec="panel" data-admin>面板账号</button>
+        </div>
+
+        <div class="cfg-sec" data-sec="basic">
         <div class="box">
           <header><h3>服务</h3><span class="grow"></span><span class="note" id="cfgPath"></span></header>
           <div class="pad">
@@ -475,6 +487,9 @@
           </div>
         </div>
 
+        </div>
+
+        <div class="cfg-sec" data-sec="keys" hidden>
         <!-- 网关密钥（客户端 /v1/* 与 /omni/v1/* 的密钥；原在供应商页，鉴权归配置页） -->
         <div class="box">
           <header>
@@ -492,6 +507,9 @@
           </div>
         </div>
 
+        </div>
+
+        <div class="cfg-sec" data-sec="tasks" hidden>
         <div class="box">
           <header><h3>定时任务</h3></header>
           <div class="pad">
@@ -548,6 +566,9 @@
           </div>
         </div>
 
+        </div>
+
+        <div class="cfg-sec" data-sec="pool" hidden>
         <div class="box">
           <header><h3>账号池与流量治理</h3></header>
           <div class="pad">
@@ -608,6 +629,9 @@
           </div>
         </div>
 
+        </div>
+
+        <div class="cfg-sec" data-sec="advanced" hidden>
         <div class="box">
           <header><h3>上游与高级</h3></header>
           <div class="pad">
@@ -660,7 +684,9 @@
             <div class="hint" style="margin-top:8px">归档开关、保留天数与容量上限（<code>logging.request_archive_*</code>）需手工编辑配置文件。</div>
           </div>
         </div>
+        </div>
 
+        <div class="cfg-sec" data-sec="panel" hidden>
         <div class="box" id="paccBox" data-admin>
           <header>
             <h3>面板账号与权限</h3>
@@ -705,6 +731,7 @@
             </div>
             <div class="hint" id="paccMeta"></div>
           </div>
+        </div>
         </div>
 
         <div class="savebar">

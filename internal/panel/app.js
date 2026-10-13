@@ -594,6 +594,8 @@ function applyRole() {
     li.textContent = authState.allowRegistration ? '登录 / 注册' : '登录';
   }
   if ($('authTabs')) $('authTabs').hidden = !authState.allowRegistration;
+  // 配置页的分组 Tab 也要按角色重算（viewer 看不到「面板账号」组）。
+  refreshCfgSecTabs();
   // 普通用户看不到平台配置页：若当前停在这些页，退回账号池。
   if (role === 'user' && ['providers', 'outbound', 'config'].indexOf(view) >= 0) go('accounts');
 }
@@ -656,6 +658,65 @@ document.querySelectorAll('.nav a').forEach(a => a.onclick = e => {
   if (!a.dataset.view) return;
   e.preventDefault(); go(a.dataset.view); history.replaceState(null, '', '#' + a.dataset.view);
 });
+
+/* ── 配置页二级分组 Tab ────────────────────────────────────────────────
+   配置页有 7 张卡（服务 / 网关密钥 / 定时任务 / 账号池治理 / 上游与高级 /
+   日志 / 面板账号），纵向堆成一个 ~261 行的长表单：改一个藏在最底部的字段
+   得从头滚到尾。按归属分 6 组后一次只看一组。
+
+   三个刻意的设计：
+   1) 保存口径完全不变。6 个 .cfg-sec 都在同一个 <form id="cfgForm"> 里，
+      loadConfig()/saveConfig() 遍历的还是同一批元素 —— 隐藏分组里的字段
+      照样被序列化提交，不会出现「切到别的 tab 就丢了没保存的改动」。
+   2) 记住上次停在哪个分组，刷新/重进配置页不重置。
+   3) 越权的分组直接隐藏 tab（viewer 看不到「面板账号」），而不是点进去才报错。 */
+const CFG_SECS = ['basic', 'keys', 'tasks', 'pool', 'advanced', 'panel'];
+let cfgSec = 'basic';
+const CFG_SEC_KEY = 'wb2api.cfgsec';
+
+function cfgSecAllowed(sec) {
+  if (sec !== 'panel') return true;
+  // 「面板账号」组的管理入口（paccBox）本就带 data-admin，CSS 已按角色隐藏；
+  // 这里连 tab 一起收掉，避免点进去看到一整片空白。
+  return isAdmin();
+}
+
+function showCfgSec(sec) {
+  if (CFG_SECS.indexOf(sec) < 0 || !cfgSecAllowed(sec)) sec = 'basic';
+  cfgSec = sec;
+  try { localStorage.setItem(CFG_SEC_KEY, sec); } catch (e) { /* 隐私模式下无所谓 */ }
+  document.querySelectorAll('.cfg-sec').forEach(s => { s.hidden = s.dataset.sec !== sec; });
+  document.querySelectorAll('#cfgSecTabs button').forEach(b => {
+    b.classList.toggle('on', b.dataset.sec === sec);
+  });
+  // 分组一切换就回到页顶：否则停在长页底部时，新分组的内容在屏幕上方看不见。
+  const v = $('view-config');
+  if (v) v.scrollIntoView({ block: 'start' });
+}
+
+/* refreshCfgSecTabs 按当前角色重新评估每个分组的可见性，当前分组越权时退回
+   「基本」。由 applyRole 调用 —— 登录 / 登出 / 会话刷新都会经过它，这样
+   viewer 登入后不会看到「面板账号」这个空分组。 */
+function refreshCfgSecTabs() {
+  const bar = $('cfgSecTabs');
+  if (!bar) return;
+  bar.querySelectorAll('button').forEach(b => { b.hidden = !cfgSecAllowed(b.dataset.sec); });
+  if (!cfgSecAllowed(cfgSec)) showCfgSec('basic');
+}
+
+(function initCfgSecTabs() {
+  const bar = $('cfgSecTabs');
+  if (!bar) return;
+  bar.addEventListener('click', e => {
+    const b = e.target.closest('button[data-sec]');
+    if (!b || b.hidden) return;
+    showCfgSec(b.dataset.sec);
+  });
+  refreshCfgSecTabs();  // 可能已是登录态，先按当前角色收一遍
+  let want = 'basic';
+  try { want = localStorage.getItem(CFG_SEC_KEY) || 'basic'; } catch (e) { /* 隐私模式 */ }
+  showCfgSec(want);
+})();
 /* 首次进入延到本轮脚本求值之后再 go()。
    原因：go() 会同步触发视图的数据加载（loadUsage/loadRequestLogs/loadPackages…），而这些
    函数读到的模块级 let/const（usageRateWarmAt、PK_* 等）在文件后半段才初始化——

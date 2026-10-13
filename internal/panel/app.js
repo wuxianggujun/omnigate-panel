@@ -4300,7 +4300,7 @@ async function loadOmniConfig() {
     if (isAdmin()) loadModelMappings();
     ogMsg('cfgMsg', '已加载 ' + omniCfg.providers.length + ' 个供应商', 'ok');
   } catch (e) {
-    $('provEditor').innerHTML = '<div class="empty">供应商配置不可用：' + esc(e.message) + '</div>';
+    $('provBody').innerHTML = '<tr><td><div class="empty">供应商配置不可用：' + esc(e.message) + '</div></td></tr>';
     ogMsg('cfgMsg', '加载失败：' + e.message, 'err');
   }
 }
@@ -4810,88 +4810,156 @@ async function gemMapDelete(model, btn) {
 
 function omniModelsText(p) { return Array.isArray(p.models) ? p.models.join('\n') : (p.models || ''); }
 
-function provCard(p, i) {
+/* ── 供应商：紧凑列表 + 编辑弹窗 ──────────────────────────────────────
+ *
+ * 列表每行只显示「名称 / 类型 / 状态 + 模型数·账号数·endpoint」，点整行打开弹窗改全部
+ * 字段。弹窗里的改动先写进克隆体（draft），点「确定」才回写 omniCfg.providers——
+ * 避免边打字边重渲染把光标顶掉。写盘仍走列表下方的「保存并生效」（整份配置一起提交）。
+ */
+const PROV_TYPES = ['runable', 'raccoon', 'trae', 'newapi', 'geminiweb', 'openai'];
+let provEdit = null; // {i, isNew, draft}
+
+function provTypeHasKey(type) { return type === 'openai' || type === 'newapi'; }
+function provTypeHasAccounts(type) { return type === 'raccoon' || type === 'runable' || type === 'trae' || type === 'geminiweb'; }
+
+function provBadgeHtml(p) {
   const type = p.type || 'runable';
-  const typeOpts = ['runable', 'raccoon', 'trae', 'newapi', 'geminiweb', 'openai']
-    .map(t => '<option value="' + t + '"' + (t === type ? ' selected' : '') + '>' + t + '</option>').join('');
+  const hasKey = !!(p.api_key || '').trim() || (Array.isArray(p.api_keys) && p.api_keys.some(k => (k || '').trim()));
+  if (provTypeHasKey(type) && !hasKey) return '<span class="tag bad">缺 api_key</span>';
+  if (provTypeHasAccounts(type) && !(p.accounts || []).length) return '<span class="tag warn">无账号</span>';
+  return '<span class="tag ok">正常</span>';
+}
+
+function provByline(p) {
+  const bits = [];
+  const n = Array.isArray(p.models) ? p.models.length : 0;
+  if (n) bits.push(n + ' 模型');
+  bits.push(((p.accounts || []).length) + ' 账号');
+  if (p.base_url) bits.push(p.base_url);
+  return bits.join(' · ');
+}
+
+function provRowHtml(p, i) {
+  return '<tr data-i="' + i + '">' +
+    '<td><div class="og-t">' + esc(p.name || '(未命名)') +
+      ' <span class="tag mute">' + esc(p.type || 'runable') + '</span> ' + provBadgeHtml(p) + '</div>' +
+      '<div class="og-s">' + esc(provByline(p)) + '</div></td>' +
+    '<td class="c-acts">' +
+      '<button class="xs" data-act="editProv" data-i="' + i + '">编辑</button>' +
+      '<button class="xs ghost" data-act="goPool" data-i="' + i + '">账号池</button>' +
+    '</td></tr>';
+}
+
+function provFormHtml(d) {
+  const type = d.type || 'runable';
+  const typeOpts = PROV_TYPES.map(t => '<option value="' + t + '"' + (t === type ? ' selected' : '') + '>' + t + '</option>').join('');
   const raccoonFields = type === 'raccoon' ? '' +
-      '<label>main_origin<input data-i="' + i + '" data-f="main_origin" value="' + esc(p.main_origin || '') + '" placeholder="https://..."></label>' +
-      '<label>llm_base<input data-i="' + i + '" data-f="llm_base" value="' + esc(p.llm_base || '') + '"></label>' +
-      '<label>auth_base<input data-i="' + i + '" data-f="auth_base" value="' + esc(p.auth_base || '') + '"></label>' : '';
+      '<label>main_origin<input data-pf="main_origin" value="' + esc(d.main_origin || '') + '" placeholder="https://..."></label>' +
+      '<label>llm_base<input data-pf="llm_base" value="' + esc(d.llm_base || '') + '"></label>' +
+      '<label>auth_base<input data-pf="auth_base" value="' + esc(d.auth_base || '') + '"></label>' : '';
   const traeFields = type === 'trae' ? '' +
-      '<label>agent_host<input data-i="' + i + '" data-f="agent_host" value="' + esc(p.agent_host || '') + '" placeholder="留空 = 默认"></label>' +
-      '<label>ug_host<input data-i="' + i + '" data-f="ug_host" value="' + esc(p.ug_host || '') + '" placeholder="留空 = 默认"></label>' +
-      '<label>oauth_host<input data-i="' + i + '" data-f="oauth_host" value="' + esc(p.oauth_host || '') + '" placeholder="留空 = 默认"></label>' : '';
+      '<label>agent_host<input data-pf="agent_host" value="' + esc(d.agent_host || '') + '" placeholder="留空 = 默认"></label>' +
+      '<label>ug_host<input data-pf="ug_host" value="' + esc(d.ug_host || '') + '" placeholder="留空 = 默认"></label>' +
+      '<label>oauth_host<input data-pf="oauth_host" value="' + esc(d.oauth_host || '') + '" placeholder="留空 = 默认"></label>' : '';
   const deviceField = type === 'runable' ? '' +
-      '<label>device_header<input data-i="' + i + '" data-f="device_header" value="' + esc(p.device_header || '') + '" placeholder="留空 = 默认"></label>' : '';
+      '<label>device_header<input data-pf="device_header" value="' + esc(d.device_header || '') + '" placeholder="留空 = 默认"></label>' : '';
   const geminiField = type === 'geminiweb' ? '' +
       '<div class="og-hint og-full" style="margin-top:2px">Gemini Web 不需要 base_url / api_key：账号凭证是 <code>gemini.google.com</code> 的 Google Cookie。保存本供应商后，去「账号池 → 添加账号 → 选它 → 粘贴 Cookie」。models 留空 = 用内置的 <code>gemini-pro / gemini-flash / gemini-flash-thinking / gemini-flash-lite</code>。</div>' : '';
-  const sysField = '' +
-      '<label class="og-full">system_prompt（供应商级系统提示词，留空 = 不注入）' +
-      '<textarea data-i="' + i + '" data-f="system_prompt" rows="3" placeholder="给这个上游的每个请求前置一段系统提示词">' + esc(p.system_prompt || '') + '</textarea></label>';
-  const keysField = '' +
+  return '<div class="og-fields">' +
+      '<label>名称（唯一）<input data-pf="name" value="' + esc(d.name || '') + '" placeholder="如 my-openai"></label>' +
+      '<label>类型<select data-pf="type">' + typeOpts + '</select></label>' +
+      '<label class="og-full">base_url<input data-pf="base_url" value="' + esc(d.base_url || '') + '" placeholder="https://api.example.com/v1"></label>' +
+      '<label class="og-full">api_key<input data-pf="api_key" value="' + esc(d.api_key || '') + '" placeholder="上游密钥（openai 类用）；已脱敏，不改 = 保持原值"></label>' +
       '<label class="og-full">api_keys（上游密钥池：一行一个；多把按请求轮询，401/403/429 自动冷却换下一把）' +
-      '<textarea data-i="' + i + '" data-f="api_keys" rows="3" placeholder="留空 = 用上面的 api_key；一行一个上游密钥">' + esc((Array.isArray(p.api_keys) ? p.api_keys : []).join('\n')) + '</textarea></label>';
-  return '<div class="og-card">' +
-    '<div class="og-row" style="justify-content:space-between">' +
-      '<div class="og-t">供应商 #' + (i + 1) + ' <span class="tag mute">' + esc(type) + '</span></div>' +
-      '<button class="danger" data-act="delProv" data-i="' + i + '">删除</button>' +
-    '</div>' +
-    '<div class="og-fields">' +
-      '<label>名称（唯一）<input data-i="' + i + '" data-f="name" value="' + esc(p.name || '') + '" placeholder="如 my-openai"></label>' +
-      '<label>类型<select data-i="' + i + '" data-f="type">' + typeOpts + '</select></label>' +
-      '<label class="og-full">base_url<input data-i="' + i + '" data-f="base_url" value="' + esc(p.base_url || '') + '" placeholder="https://api.example.com/v1"></label>' +
-      '<label class="og-full">api_key<input data-i="' + i + '" data-f="api_key" value="' + esc(p.api_key || '') + '" placeholder="上游密钥（openai 类用）；已脱敏，不改 = 保持原值"></label>' +
-      keysField +
+        '<textarea data-pf="api_keys" rows="3" placeholder="留空 = 用上面的 api_key；一行一个上游密钥">' + esc((Array.isArray(d.api_keys) ? d.api_keys : []).join('\n')) + '</textarea></label>' +
       deviceField + raccoonFields + traeFields + geminiField +
-      '<label class="og-full">models（逗号或换行分隔，留空 = 自动发现）<textarea data-i="' + i + '" data-f="models" rows="2">' + esc(omniModelsText(p)) + '</textarea></label>' +
-      sysField +
+      '<label class="og-full">models（逗号或换行分隔，留空 = 自动发现）<textarea data-pf="models" rows="2">' + esc(omniModelsText(d)) + '</textarea></label>' +
+      '<label class="og-full">system_prompt（供应商级系统提示词，留空 = 不注入）' +
+        '<textarea data-pf="system_prompt" rows="3" placeholder="给这个上游的每个请求前置一段系统提示词">' + esc(d.system_prompt || '') + '</textarea></label>' +
     '</div>' +
     '<div class="og-sep"></div>' +
-    '<div class="og-row" style="justify-content:space-between">' +
-      '<span class="og-s">账号 ' + ((p.accounts || []).length) + ' 个 · 在「账号池」统一添加与管理</span>' +
-      '<button data-act="goPool" data-i="' + i + '">去账号池添加 / 管理</button>' +
-    '</div>' +
-  '</div>';
+    '<div class="og-s">账号 ' + ((d.accounts || []).length) + ' 个 · 在「账号池」统一添加与管理</div>';
+}
+
+function openProvEdit(i) {
+  const isNew = (i == null || i < 0);
+  const base = isNew ? { name: '', type: 'runable', base_url: '', models: [], accounts: [] } : (omniCfg.providers || [])[i];
+  if (!base) return;
+  provEdit = { i: isNew ? -1 : i, isNew: isNew, draft: JSON.parse(JSON.stringify(base)) };
+  $('provDlgTitle').textContent = isNew ? '添加供应商' : '编辑供应商';
+  $('provDlgHint').textContent = isNew ? '填好点「确定」加入列表，再点「保存并生效」写盘。' : '改完点「确定」，再回列表点「保存并生效」才写盘（保存时「不改动 = 保持原值」）。';
+  $('btnProvDel').hidden = isNew;
+  $('provForm').innerHTML = provFormHtml(provEdit.draft);
+  $('provVeil').classList.add('on');
+  setTimeout(() => { const n = $('provForm').querySelector('input[data-pf="name"]'); if (n) n.focus(); }, 60);
+}
+
+function closeProvEdit() {
+  provEdit = null;
+  if ($('provVeil')) $('provVeil').classList.remove('on');
+}
+
+function onProvFormInput(ev) {
+  if (!provEdit) return;
+  const el = ev.target;
+  const f = el.dataset && el.dataset.pf;
+  if (!f) return;
+  if (f === 'type') { provEdit.draft.type = el.value; $('provForm').innerHTML = provFormHtml(provEdit.draft); return; }
+  if (f === 'api_keys') {
+    // 一行一个；空行丢弃。掩码行（未改动的旧 key）原样留下，服务端按「掩码 = 未改动」还原。
+    provEdit.draft.api_keys = el.value.split('\n').map(s => s.trim()).filter(Boolean);
+    return;
+  }
+  provEdit.draft[f] = el.value;
+}
+
+function commitProvEdit() {
+  if (!provEdit) return;
+  const d = provEdit.draft;
+  if (!(d.name || '').trim()) { toast('供应商名称不能为空', 'err'); return; }
+  const dup = (omniCfg.providers || []).some((p, k) => k !== provEdit.i && (p.name || '') === d.name);
+  if (dup) { toast('供应商名称「' + d.name + '」已存在', 'err'); return; }
+  if (provEdit.isNew) omniCfg.providers.push(d);
+  else omniCfg.providers[provEdit.i] = d;
+  const nm = d.name;
+  closeProvEdit();
+  renderProvEditor();
+  ogMsg('cfgMsg', '已修改「' + nm + '」，点「保存并生效」写盘', 'ok');
+}
+
+function delProvFromDialog() {
+  if (!provEdit || provEdit.isNew) return;
+  const nm = provEdit.draft.name || ('#' + (provEdit.i + 1));
+  if (!confirm('删除供应商「' + nm + '」？')) return;
+  omniCfg.providers.splice(provEdit.i, 1);
+  closeProvEdit();
+  renderProvEditor();
+  ogMsg('cfgMsg', '已删除「' + nm + '」，点「保存并生效」写盘', 'ok');
 }
 
 function renderProvEditor() {
-  const box = $('provEditor');
-  if (!box) return;
+  const body = $('provBody');
+  if (!body) return;
   const provs = (omniCfg && omniCfg.providers) || [];
   const sel = $('cfgDefaultProvider');
   const cur = (omniCfg && omniCfg.default_provider) || '';
   sel.innerHTML = provs.map(p => '<option value="' + esc(p.name || '') + '">' + esc(p.name || '(未命名)') + '</option>').join('');
   if (cur) sel.value = cur;
-  if (!provs.length) { box.innerHTML = '<div class="empty">还没有供应商，点「+ 添加供应商」开始</div>'; return; }
-  box.innerHTML = provs.map((p, i) => provCard(p, i)).join('');
-}
-
-function onProvInput(ev) {
-  const el = ev.target;
-  if (!el.dataset || el.dataset.f == null || el.dataset.i == null) return;
-  const p = omniCfg.providers[+el.dataset.i];
-  if (!p) return;
-  if (el.dataset.f === 'type') { p.type = el.value; renderProvEditor(); return; }
-  if (el.dataset.f === 'api_keys') {
-    // 一行一个；空行丢弃。掩码行（未改动的旧 key）原样留下，服务端保存时按
-    // 「掩码 = 未改动」还原成真 key。
-    p.api_keys = el.value.split('\n').map(s => s.trim()).filter(Boolean);
-    return;
-  }
-  p[el.dataset.f] = el.value;
+  if ($('provCnt')) $('provCnt').textContent = provs.length ? (provs.length + ' 个') : '';
+  if (!provs.length) { body.innerHTML = '<tr><td colspan="2"><div class="empty">还没有供应商，点「+ 添加供应商」开始</div></td></tr>'; return; }
+  body.innerHTML = provs.map((p, i) => provRowHtml(p, i)).join('');
 }
 
 function onProvClick(ev) {
   const btn = ev.target.closest('button[data-act]');
-  if (!btn) return;
-  const act = btn.dataset.act, i = +btn.dataset.i;
-  if (act === 'delProv') {
-    if (!confirm('删除供应商「' + (omniCfg.providers[i].name || i) + '」？')) return;
-    omniCfg.providers.splice(i, 1);
-  } else if (act === 'goPool') {
+  const row = ev.target.closest('tr[data-i]');
+  const act = btn ? btn.dataset.act : (row ? 'editProv' : null);
+  if (!act) return;
+  const i = +(btn ? btn.dataset.i : row.dataset.i);
+  if (act === 'editProv') { openProvEdit(i); return; }
+  if (act === 'goPool') {
     // 跳「账号池」并打开「添加账号」，来源预选为该供应商。
-    const name = omniCfg.providers[i].name;
+    const name = omniCfg.providers[i] && omniCfg.providers[i].name;
     go('accounts');
     history.replaceState(null, '', '#accounts');
     openAdd().then(() => {
@@ -4901,18 +4969,10 @@ function onProvClick(ev) {
       }
     });
     return;
-  } else {
-    return;
   }
-  renderProvEditor();
 }
 
-function addProvider() {
-  omniCfg = omniCfg || {};
-  omniCfg.providers = omniCfg.providers || [];
-  omniCfg.providers.push({ name: '', type: 'runable', base_url: '', models: [], accounts: [] });
-  renderProvEditor();
-}
+function addProvider() { openProvEdit(-1); }
 
 function normalizeOmniForSave(cfg) {
   const out = JSON.parse(JSON.stringify(cfg || {}));
@@ -5896,12 +5956,22 @@ async function saveOutbound() {
   const on = (id, fn, evt) => { const el = $(id); if (el) el.addEventListener(evt || 'click', fn); };
   // 账号池「来源」筛选
   on('accSource', () => { accSourceFilter = $('accSource').value; renderAccountRows(); }, 'change');
-  // 供应商配置
+  // 供应商配置（紧凑列表 + 编辑弹窗；按钮共用同一保存动作）
   on('btnAddProv', addProvider);
-  on('btnSaveCfg', () => saveOmniConfig());
+  ['btnSaveCfg', 'btnSaveCfg2', 'btnSaveCfgBot'].forEach(id => on(id, () => saveOmniConfig()));
   on('btnReloadCfg', loadOmniConfig);
-  const pe = $('provEditor');
-  if (pe) { pe.addEventListener('input', onProvInput); pe.addEventListener('change', onProvInput); pe.addEventListener('click', onProvClick); }
+  const pb = $('provBody');
+  if (pb) pb.addEventListener('click', onProvClick);
+  // 供应商编辑弹窗
+  on('btnProvOk', commitProvEdit);
+  on('btnProvCancel', closeProvEdit);
+  on('btnProvX', closeProvEdit);
+  on('btnProvDel', delProvFromDialog);
+  const pv = $('provVeil');
+  if (pv) pv.addEventListener('click', e => { if (e.target === pv) closeProvEdit(); });
+  const pf = $('provForm');
+  if (pf) { pf.addEventListener('input', onProvFormInput); pf.addEventListener('change', onProvFormInput); }
+  document.addEventListener('keydown', e => { if (e.key === 'Escape' && $('provVeil') && $('provVeil').classList.contains('on')) closeProvEdit(); });
   // 网关密钥卡（按供应商收窄的客户端密钥）
   on('btnAddKey', addKey);
   on('btnSaveCfgKeys', () => saveOmniConfig('keyMsg'));

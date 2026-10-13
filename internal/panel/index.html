@@ -728,21 +728,38 @@
       <div class="box">
         <header>
           <h3>上游供应商 <span class="hint" id="ogCfgPath"></span></h3>
+          <span class="grow"></span>
+          <button class="xs primary" id="btnSaveCfg">保存并生效</button>
         </header>
         <div class="pad">
-          <div class="og-hint" style="margin-top:0">在这里增删改上游<strong>供应商</strong>（端点 / 密钥 / 模型），保存后<strong>进程内热生效</strong>（写入 <code>omnigate.json</code>，无需重启）。类型 <code>runable</code>=办公助手、<code>raccoon</code>=办公小浣熊、<code>openai</code>=任意 OpenAI 兼容上游。<strong>账号统一在「账号池」页添加与管理</strong>。<br><strong>凭证已脱敏</strong>：上游 <code>api_key</code> 与账号 cookie / 密码 / refresh_token 只显示「前缀 + 长度」（如 <code>sk-6d0…(len=48)</code>），原文不回显；<strong>不改动即保持原值</strong>，要替换就整段重新填。</div>
-          <div class="grid3" style="margin-top:12px">
-            <label class="fld"><span class="lb">默认 provider</span><select id="cfgDefaultProvider"></select></label>
-            <label class="fld"><span class="lb">默认模型</span><input id="cfgDefaultModel" placeholder="留空 = 上游默认"></label>
-            <label class="fld"><span class="lb">模式</span><select id="cfgMode"><option value="text">text</option><option value="native">native</option></select></label>
+          <div class="og-hint" style="margin-top:0">在这里增删改上游<strong>供应商</strong>（端点 / 密钥 / 模型），保存后<strong>进程内热生效</strong>（写入 <code>omnigate.json</code>，无需重启）。点列表任一行打开<strong>编辑弹窗</strong>。<strong>账号统一在「账号池」页添加与管理</strong>。<br><strong>凭证已脱敏</strong>：上游 <code>api_key</code> 与账号 cookie / 密码 / refresh_token 只显示「前缀 + 长度」（如 <code>sk-6d0…(len=48)</code>），原文不回显；<strong>不改动即保持原值</strong>，要替换就整段重新填。</div>
+
+          <div class="og-sub" style="margin-top:12px">
+            <div class="og-t" style="margin-bottom:8px">全局路由</div>
+            <div class="grid3">
+              <label class="fld"><span class="lb">默认 provider</span><select id="cfgDefaultProvider"></select></label>
+              <label class="fld"><span class="lb">默认模型</span><input id="cfgDefaultModel" placeholder="留空 = 上游默认"></label>
+              <label class="fld"><span class="lb">模式</span><select id="cfgMode"><option value="text">text</option><option value="native">native</option></select></label>
+            </div>
+            <label class="switch" style="padding:6px 0"><span class="lb">透传 reasoning</span><input type="checkbox" id="cfgReasoning"></label>
+            <label class="fld" style="margin-top:2px"><span class="lb">路由优先级 routing.prefer（裸模型名按此顺序选第一个「模型目录里真有该模型」的供应商，一行一个；都不命中回落默认 provider；带 <code>provider/</code> 前缀的请求不受影响）</span><textarea id="cfgRoutingPrefer" rows="2" spellcheck="false" placeholder="atria&#10;runable&#10;raccoon"></textarea></label>
           </div>
-          <label class="switch"><span class="lb">透传 reasoning</span><input type="checkbox" id="cfgReasoning"></label>
-          <label class="fld" style="margin-top:8px"><span class="lb">路由优先级 routing.prefer（裸模型名按此顺序选第一个「模型目录里真有该模型」的供应商，一行一个；都不命中回落默认 provider；带 <code>provider/</code> 前缀的请求不受影响）</span><textarea id="cfgRoutingPrefer" rows="2" spellcheck="false" placeholder="atria&#10;runable&#10;raccoon"></textarea></label>
-          <div class="hr"></div>
-          <div id="provEditor"></div>
+
+          <div class="og-row" style="justify-content:space-between;margin:18px 0 8px">
+            <div class="og-t">供应商 <span class="tag mute" id="provCnt"></span></div>
+            <div class="og-row">
+              <button id="btnAddProv">+ 添加供应商</button>
+              <button class="primary" id="btnSaveCfg2">保存并生效</button>
+            </div>
+          </div>
+          <div class="tbl-wrap">
+            <table class="acc md" id="provTable">
+              <thead><tr><th>供应商</th><th class="c-acts">操作</th></tr></thead>
+              <tbody id="provBody"></tbody>
+            </table>
+          </div>
           <div class="og-row" style="margin-top:10px">
-            <button id="btnAddProv">+ 添加供应商</button>
-            <button class="primary" id="btnSaveCfg">保存并生效</button>
+            <button class="primary" id="btnSaveCfgBot">保存并生效</button>
             <button id="btnReloadCfg">重新加载</button>
             <span class="og-msg" id="cfgMsg"></span>
           </div>
@@ -1081,6 +1098,24 @@
       <span class="grow"></span>
       <button class="xs" id="btnVcRefresh">刷新</button>
       <button class="xs primary" id="btnVcClose">关闭</button>
+    </footer>
+  </div>
+</div>
+
+<!-- 供应商编辑弹窗（供应商页点行打开；不写回 omniCfg，只有确定才提交） -->
+<div class="veil" id="provVeil">
+  <div class="dlg" style="width:720px">
+    <header>
+      <h3 id="provDlgTitle">编辑供应商</h3>
+      <div class="hint" id="provDlgHint">改完点「确定」，再回列表点「保存并生效」才写盘。</div>
+      <button class="dlg-x" id="btnProvX" title="关闭（也可以点空白处或按 Esc）" aria-label="关闭">✕</button>
+    </header>
+    <div class="body"><div id="provForm"></div></div>
+    <footer>
+      <span class="grow"></span>
+      <button class="danger" id="btnProvDel">删除供应商</button>
+      <button id="btnProvCancel">取消</button>
+      <button class="primary" id="btnProvOk">确定</button>
     </footer>
   </div>
 </div>

@@ -1296,3 +1296,102 @@ process.stdout.write(JSON.stringify({
 		t.Fatalf("credit routing form=%s\nwant %s", out, want)
 	}
 }
+
+// TestAppJSProviderTable 钉住供应商「紧凑列表 + 编辑弹窗」。
+//
+// 曾经的形态是每行一张 og-card、所有字段常驻展开，七八个供应商就把页面拉成一条
+// 长龙。现在改成列表（名称/类型/状态 + 模型数·账号数·endpoint）点行开弹窗。要钉住的：
+//   ① 列表行数 = 供应商数，默认 provider 下拉同步；
+//   ② 弹窗改字段先落 draft、点「确定」才回写 omniCfg（否则边打字边重渲染会顶掉光标）；
+//   ③ 名称重复必须拦下且弹窗不关（否则保存时两个同名供应商会被后端拒掉）；
+//   ④ 健康角标按类型分类：openai/newapi 缺 key vs 需账号的类型缺账号。
+func TestAppJSProviderTable(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; provider table test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const start = src.indexOf('function omniModelsText');
+const end = src.indexOf('/* ── 网关密钥（按供应商收窄');
+if (start < 0 || end < 0 || end < start) throw new Error('provider table region not found');
+const els = {};
+const mk = id => (els[id] = els[id] || {
+  innerHTML: '', textContent: '', value: '', checked: false, hidden: false,
+  classList: { _s: new Set(), add(c) { this._s.add(c); }, remove(c) { this._s.delete(c); }, contains(c) { return this._s.has(c); } },
+  querySelector: () => null,
+});
+const ctx = {
+  JSON, Math, Array, Object, String, Number, isNaN, console, Set,
+  esc: s => String(s == null ? '' : s),
+  $: id => mk(id),
+  toast: () => {},
+  ogMsg: () => {},
+  setTimeout: () => 0,
+  confirm: () => true,
+};
+vm.createContext(ctx);
+vm.runInContext(src.slice(start, end) +
+  '\nthis.renderProvEditor=renderProvEditor; this.openProvEdit=openProvEdit;' +
+  ' this.onProvFormInput=onProvFormInput; this.commitProvEdit=commitProvEdit;' +
+  ' this.addProvider=addProvider; this.provBadgeHtml=provBadgeHtml;', ctx);
+ctx.omniCfg = { default_provider: 'raccoon', providers: [
+  { name: 'atria', type: 'openai', base_url: 'https://api.atria-asi.ai/v1', api_key: 'atr_PKxxx', models: ['Atria-Dawn-Preview'], accounts: [] },
+  { name: 'raccoon', type: 'raccoon', models: ['a', 'b', 'c'], accounts: [{ label: 'x' }, { label: 'y' }] },
+  { name: 'runable', type: 'runable', models: ['p'], accounts: [] },
+] };
+ctx.renderProvEditor();
+const body = els.provBody.innerHTML;
+const dp = els.cfgDefaultProvider.innerHTML;
+const cnt = els.provCnt.textContent;
+ctx.openProvEdit(0);
+const form = els.provForm.innerHTML;
+const veilOn = els.provVeil.classList.contains('on');
+ctx.onProvFormInput({ target: { dataset: { pf: 'name' }, value: 'atria2' } });
+ctx.commitProvEdit();
+const renamed = ctx.omniCfg.providers[0].name;
+const veilOff = !els.provVeil.classList.contains('on');
+ctx.openProvEdit(1);
+ctx.onProvFormInput({ target: { dataset: { pf: 'name' }, value: 'atria2' } });
+ctx.commitProvEdit();
+const dupKept = ctx.omniCfg.providers[1].name;
+const dupVeilStillOn = els.provVeil.classList.contains('on');
+ctx.addProvider();
+const newIsNew = els.provDlgTitle.textContent === '添加供应商';
+process.stdout.write(JSON.stringify({
+  rowCount: (body.match(/data-act="editProv"/g) || []).length,
+  hasNames: body.includes('atria') && body.includes('raccoon') && body.includes('runable'),
+  hasTypeTag: body.includes('<span class="tag mute">openai</span>'),
+  byline: body.includes('1 模型') && body.includes('2 账号'),
+  badgeOk: ctx.provBadgeHtml({ type: 'openai', api_key: 'k' }).includes('正常'),
+  badgeNoKey: ctx.provBadgeHtml({ type: 'openai' }).includes('缺 api_key'),
+  badgeNoAcct: ctx.provBadgeHtml({ type: 'raccoon', accounts: [] }).includes('无账号'),
+  dpOptions: (dp.match(/<option/g) || []).length,
+  cnt,
+  formHasKey: form.includes('atr_PKxxx'),
+  formHasModels: form.includes('Atria-Dawn-Preview'),
+  formHasSys: form.includes('system_prompt'),
+  formHasPool: form.includes('api_keys'),
+  veilOn, renamed, veilOff, dupKept, dupVeilStillOn, newIsNew,
+}));`
+	f, err := os.CreateTemp(t.TempDir(), "provtable-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("provider table node test failed: %v\n%s", err, out)
+	}
+	const want = `{"rowCount":3,"hasNames":true,"hasTypeTag":true,"byline":true,` +
+		`"badgeOk":true,"badgeNoKey":true,"badgeNoAcct":true,"dpOptions":3,"cnt":"3 个",` +
+		`"formHasKey":true,"formHasModels":true,"formHasSys":true,"formHasPool":true,` +
+		`"veilOn":true,"renamed":"atria2","veilOff":true,"dupKept":"raccoon","dupVeilStillOn":true,"newIsNew":true}`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("provider table=%s\nwant %s", out, want)
+	}
+}

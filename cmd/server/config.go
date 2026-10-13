@@ -65,6 +65,19 @@ func (p PanelAuthConfig) LockDuration() time.Duration {
 	return time.Duration(m) * time.Minute
 }
 
+// StorageConfig 面板状态存储后端。
+type StorageConfig struct {
+	// Driver "file"（缺省，本地 JSON 文件）或 "postgres"。
+	Driver string `json:"driver"`
+	// DSN PostgreSQL 连接串，只在 driver=postgres 时使用，形如
+	// postgres://user:pass@host:5432/db?sslmode=disable。
+	// 面板接口回显时该字段会被脱敏（internal/panel/secret.go）。
+	DSN string `json:"dsn"`
+}
+
+// UsePostgres 是否启用 PostgreSQL 后端。
+func (s StorageConfig) UsePostgres() bool { return s.Driver == "postgres" }
+
 // Config 顶层配置。
 type Config struct {
 	Listen    string `json:"listen"`     // ":7863"
@@ -77,6 +90,12 @@ type Config struct {
 	// OpenAI 兼容 API 与浣熊管理接口挂载到本服务的 /omni/ 前缀下；文件不存在
 	// 则跳过（面板其余功能不受影响）。缺省 ./omnigate.json。
 	OmnigateConfig string `json:"omnigate_config"`
+
+	// Storage 面板状态的持久化后端。driver 缺省 "file"：行为与从前完全一致
+	// （本地 JSON 文件）。driver="postgres" 时把面板状态写进用户自己的
+	// PostgreSQL：数据库是权威存储，本地文件退化为「镜像 + 断库兜底」，
+	// 数据库连不上时仍能登录面板（详见 internal/pgstore 的包注释）。
+	Storage StorageConfig `json:"storage"`
 
 	// Outbound 出站代理：命名代理（http/https/socks5）+ 「目标 → 代理」路由。
 	// 目标 "workbuddy" 作用于面板自身上游；"omnigate:<provider>" 作用于内置
@@ -320,6 +339,7 @@ func Default() *Config {
 		AuthDir:   "./auths",
 		StateFile: "./data/state.json",
 	}
+	c.Storage.Driver = "file"
 	c.Cooldown.SoftRate = "600s"
 	c.Cooldown.SoftRateMax = "2h"
 	c.Server.ReadTimeout = "300s"

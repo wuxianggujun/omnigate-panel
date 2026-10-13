@@ -24,6 +24,7 @@ import (
 	"github.com/wuxianggujun/omnigate-panel/internal/outbound"
 	"github.com/wuxianggujun/omnigate-panel/internal/panel"
 	"github.com/wuxianggujun/omnigate-panel/internal/panelauth"
+	"github.com/wuxianggujun/omnigate-panel/internal/pgstore"
 	"github.com/wuxianggujun/omnigate-panel/internal/pool"
 	"github.com/wuxianggujun/omnigate-panel/internal/redisstore"
 	"github.com/wuxianggujun/omnigate-panel/internal/reqlog"
@@ -315,11 +316,47 @@ func main() {
 		defer omni.Stop()
 	}
 
-	// 面板登录鉴权运行时（独立于网关 api_key）：账号来自 config.json 的 panel_auth
-	// 段。面板只认密码登录（api_key 不能打开面板）；未配置任何账号时 /panel/api/*
-	// 一律 401（登录端点返回 panel_auth_not_configured），不退回旧 api_key 门。
+	// ── 状态存储后端：面板账号优先落用户自己的 PostgreSQL ──────────────────────
+	// 数据库是权威存储，config.json 退化为镜像 + 断库兜底（详见 internal/pgstore）：
+	// 数据库连不上时仍用镜像里的账号启动，谁都登不进来这种情况不会发生。
+	var pg *pgstore.Store
+	if cfg.Storage.UsePostgres() {
+		st, err := pgstore.Open(context.Background(), cfg.Storage.DSN)
+		if err != nil {
+			log.Printf("WARN: [storage] PostgreSQL 不可用，面板账号回落 config.json 镜像: %v", err)
+		} else {
+			pg = st
+			defer pg.Close()
+			log.Printf("[storage] 面板账号存储后端 = postgres (%s)", st.Label())
+		}
+	} else {
+		log.Printf("[storage] 面板账号存储后端 = file（config.json）")
+	}
+
+	// 面板账号：以库为准；库里还没有（首次启用）就把现状导进去。
+	panelUsers := cfg.PanelAuth.Users
+	if pg != nil {
+		users, have, err := pg.LoadPanelUsers(context.Background())
+		switch {
+		case err != nil:
+			log.Printf("WARN: [storage] 读 PostgreSQL 面板账号失败，本次启动用 config.json 镜像: %v", err)
+		case have:
+			panelUsers = users
+			log.Printf("[storage] 已从 PostgreSQL 载入 %d 个面板账号", len(users))
+		default:
+			if err := pg.SavePanelUsers(context.Background(), cfg.PanelAuth.Users); err != nil {
+				log.Printf("WARN: [storage] 首次导入面板账号失败（本次仍用 config.json）: %v", err)
+			} else {
+				log.Printf("[storage] 首次启用：已把 %d 个面板账号导入 PostgreSQL", len(cfg.PanelAuth.Users))
+			}
+		}
+	}
+
+	// 面板登录鉴权运行时（独立于网关 api_key）：账号来自上述存储。面板只认密码
+	// 登录（api_key 不能打开面板）；未配置任何账号时 /panel/api/* 一律 401
+	// （登录端点返回 panel_auth_not_configured），不退回旧 api_key 门。
 	// 账号管理页保存后 Reconfigure 热重建（会话保留，按当前账号集合即时校验）。
-	authStore := panelauth.New(cfg.PanelAuth.Users, cfg.PanelAuth.SessionTTL(),
+	authStore := panelauth.New(panelUsers, cfg.PanelAuth.SessionTTL(),
 		cfg.PanelAuth.MaxFail(), cfg.PanelAuth.LockDuration())
 	// 会话落盘：部署/重启容器后已登录用户不掉线（与 state 文件同目录，
 	// 缺省 data/panel_sessions.json）。失败只记日志——纯内存会话仍可正常工作。
@@ -407,25 +444,44 @@ func main() {
 			}
 			return nil, nil
 		},
-		// 面板鉴权配置（config.json 的 panel_auth 段）读写：账号管理页用。
-		// LoadPanelAuth 返回含密码哈希的原始段（面板内部用于保留未改密码账号的哈希，
-		// 对前端只暴露用户名/角色）；SavePanelAuth 完成「校验 → 落盘 → 热重建
-		// 同一 *panelauth.Store」，全部热生效，需重启列表恒空。
+		// 面板鉴权配置读写：账号管理页用。开关（会话时长 / 锁定 / 允许注册）仍在
+		// config.json；账号集合在 driver=postgres 时以数据库为准，config.json 只作
+		// 镜像兜底。LoadPanelAuth 返回含密码哈希的原始段（面板内部用于保留未改密码
+		// 账号的哈希，对前端只暴露用户名/角色）；SavePanelAuth 完成「校验 → 落库
+		// （+镜像）→ 热重建同一 *panelauth.Store」，全部热生效，需重启列表恒空。
 		PanelAuth: authStore,
 		LoadPanelAuth: func() (panel.PanelAuthSection, error) {
 			c, err := Load(*cfgPath)
 			if err != nil {
 				return panel.PanelAuthSection{}, err
 			}
+			users := c.PanelAuth.Users // 镜像兜底（数据库不可用时用这份）
+			if pg != nil {
+				got, have, err := pg.LoadPanelUsers(context.Background())
+				switch {
+				case err != nil:
+					log.Printf("WARN: [storage] 读 PostgreSQL 面板账号失败，本次用 config.json 镜像: %v", err)
+				case have:
+					users = got
+				}
+			}
 			return panel.PanelAuthSection{
 				SessionHours:      c.PanelAuth.SessionHours,
 				MaxFailures:       c.PanelAuth.MaxFailures,
 				LockMinutes:       c.PanelAuth.LockMinutes,
 				AllowRegistration: c.PanelAuth.AllowRegistration,
-				Users:             c.PanelAuth.Users,
+				Users:             users,
 			}, nil
 		},
 		SavePanelAuth: func(section panel.PanelAuthSection) ([]string, error) {
+			// 1) 权威存储：PostgreSQL。写库失败直接上报，且不写镜像——避免库与镜像
+			// 分叉（镜像始终是「库的最近一次已知良好状态」）。
+			if pg != nil {
+				if err := pg.SavePanelUsers(context.Background(), section.Users); err != nil {
+					return nil, fmt.Errorf("保存面板账号到 PostgreSQL 失败（本次未落任何存储）: %w", err)
+				}
+			}
+			// 2) 镜像：config.json（数据库故障时的登录兜底 + 兼容既有读配置路径）。
 			wrapped, err := json.Marshal(map[string]any{"panel_auth": section})
 			if err != nil {
 				return nil, err

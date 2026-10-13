@@ -30,7 +30,8 @@ func secretKey(k string) bool {
 	switch strings.ToLower(strings.TrimSpace(k)) {
 	case "cookie", "password", "passwd", "refresh_token", "access_token",
 		"token", "api_key", "apikey", "secret", "client_secret",
-		"session_token", "device_token", "authorization", "credential", "credentials":
+		"session_token", "device_token", "authorization", "credential", "credentials",
+		"dsn":
 		return true
 	}
 	return false

@@ -723,7 +723,12 @@ func (g *Gateway) HandleChat(ctx context.Context, req *openai.ChatRequest, w htt
 		_ = openai.EmitRole(ew, id, displayModel, created)
 		flush()
 
+		// contentEmitted 记录是否已经流出过正文：只有「零正文」的失败/空流才允许
+		// 改用第三方兜底（与参考实现仅在 streamed_any 为假时兜底同口径——role 首帧
+		// 不算正文）。
+		contentEmitted := false
 		onText := func(s string) {
+			contentEmitted = true
 			_ = openai.EmitContent(ew, id, displayModel, created, s)
 			flush()
 		}
@@ -734,6 +739,32 @@ func (g *Gateway) HandleChat(ctx context.Context, req *openai.ChatRequest, w htt
 			}
 		}
 		res, err := g.runChat(ctx, provName, prov, in, hasTools, onText, onReasoning)
+		// 失败或零正文、且还没流出任何正文 → 第三方兜底（把兜底结果转成 SSE 发出）。
+		if (err != nil || !resultHasOutput(res)) && !contentEmitted {
+			if fb := g.tryFallback(ctx, req, provName, upstreamModel, hasTools); fb != nil {
+				if fb.text != "" {
+					_ = openai.EmitContent(ew, id, displayModel, created, fb.text)
+				}
+				if len(fb.toolCalls) > 0 {
+					_ = openai.EmitToolCalls(ew, id, displayModel, created, fb.toolCalls)
+				}
+				if m := ReqMetaFrom(ctx); m != nil {
+					m.Usage = fb.usage
+					m.Reasoning = fb.reasoning != ""
+				}
+				_ = openai.EmitFinish(ew, id, displayModel, created, fb.finish)
+				if includeUsage && fb.usage != nil {
+					_ = openai.EmitUsage(ew, id, displayModel, created, usageMap(fb.usage))
+				}
+				_ = openai.Done(ew)
+				flush()
+				if ew.err != nil || ctx.Err() != nil {
+					markStreamFailure(ctx, reqlog.OutcomeInterrupted, 0)
+				}
+				g.log.Info("✓ 完成 %s · 流式兜底 · %s", displayModel, fb.finish)
+				return
+			}
+		}
 		if err != nil {
 			// 分两类：ctx 取消 / 写失败 = 客户端断连（人已走，归 interrupted，不改
 			// 观测状态码）；其余 = 上游 error 帧 / 读失败（用 503 观测，与 WorkBuddy
@@ -791,6 +822,12 @@ func (g *Gateway) HandleChat(ctx context.Context, req *openai.ChatRequest, w htt
 	}
 
 	res, err := g.runChat(ctx, provName, prov, in, hasTools, nil, nil)
+	// 失败或空回复 → 第三方兜底（与参考实现 is_empty_result / 异常路径同口径）。
+	if err != nil || !resultHasOutput(res) {
+		if fb := g.tryFallback(ctx, req, provName, upstreamModel, hasTools); fb != nil {
+			res, err = fb, nil
+		}
+	}
 	if err != nil {
 		g.log.Error("对话失败 %s: %v", displayModel, err)
 		writeJSON(w, 502, openai.ErrorJSON("upstream_error", err.Error()))

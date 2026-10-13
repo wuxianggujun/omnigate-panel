@@ -3,9 +3,16 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/config"
+	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/logx"
+	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/openai"
+	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/provider"
 )
 
 func TestModelMappingStoreRoundTrip(t *testing.T) {
@@ -146,6 +153,54 @@ func TestModelChainFallbacks(t *testing.T) {
 	}
 	if fb := g.modelChainFallbacks("nope"); fb != nil {
 		t.Fatalf("unmapped should have no chain fallback: %+v", fb)
+	}
+}
+
+// namedProvider is a scriptProvider with a settable name, so a test can build a
+// gateway with two distinct providers (primary + chain fallback).
+type namedProvider struct {
+	scriptProvider
+	name string
+}
+
+func (p *namedProvider) Name() string { return p.name }
+
+// TestModelChainFallbackTriesNextTarget 端到端验证引流链：主目标供应商失败（如额度
+// 耗尽 / 无可用账号）时，HandleChat 自动改试链上下一个供应商，并把请求记到真正服务
+// 它的供应商名下。
+func TestModelChainFallbackTriesNextTarget(t *testing.T) {
+	bad := &namedProvider{name: "prim", scriptProvider: scriptProvider{events: []provider.Event{
+		{Type: provider.EventError, Text: "no credits"},
+	}}}
+	good := &namedProvider{name: "alt", scriptProvider: scriptProvider{events: []provider.Event{
+		{Type: provider.EventText, Text: "ok"},
+		{Type: provider.EventFinish, Finish: "stop"},
+	}}}
+	g := &Gateway{
+		cfg:        &config.Config{DefaultProvider: "prim", DefaultModel: "m"},
+		log:        logx.New(10),
+		providers:  map[string]provider.Provider{"prim": bad, "alt": good},
+		order:      []string{"prim", "alt"},
+		accounts:   map[string][]*provider.Account{},
+		modelCache: map[string]modelEntry{},
+		convs:      map[string]*conv{},
+		pending:    map[string]raccoonPending{},
+	}
+	g.modelMap = NewModelMappingStore(filepath.Join(t.TempDir(), "m.json"))
+	if err := g.modelMap.SetTargets("x", []string{"prim/bad", "alt/good"}); err != nil {
+		t.Fatal(err)
+	}
+	meta := &ReqMeta{}
+	w := httptest.NewRecorder()
+	g.HandleChat(WithReqMeta(context.Background(), meta), &openai.ChatRequest{
+		Model:    "x",
+		Messages: []openai.Message{{Role: "user", Content: openai.Content{Text: "hi"}}},
+	}, w)
+	if !strings.Contains(w.Body.String(), "ok") {
+		t.Fatalf("expected fallback text, got: %s", w.Body.String())
+	}
+	if meta.Provider != "alt" {
+		t.Fatalf("served by %q, want alt", meta.Provider)
 	}
 }
 

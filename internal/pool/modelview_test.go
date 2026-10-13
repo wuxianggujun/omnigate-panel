@@ -71,6 +71,32 @@ func TestModelLockViewPartial(t *testing.T) {
 	}
 }
 
+// TestModelLockViewCoolingSeparatesAccountLevel 账号级冷却（与模型无关的 until 域）单独计入
+// Cooling，不与 Locked 混同：上游 429 有两种 body——6004（带「将在 … 重置」墙钟）落
+// modelCooldowns（Locked），14003「too many requests」（无墙钟）落账号级 until（Cooling）。
+// 线上案例：deepseek-v4.1-flash/global 显示 locked=2 而实为 12 个号在账号级限流。
+func TestModelLockViewCoolingSeparatesAccountLevel(t *testing.T) {
+	p := lockViewPool(t)
+	p.Add(&auth.Auth{UID: "u3"})
+	// u1：6004 模型级锁（计入 Locked）
+	setModelCooldown(p, "u1", "glm-5.3", time.Now().Add(time.Hour), "6004 model rate limit", false)
+	// u2：账号级 429 软冷却（计入 Cooling，不碰 Locked）
+	p.Cooldown("u2", CoolSoft, time.Hour, "429 rate limit")
+
+	rows := p.ModelLockView()
+	if len(rows) != 1 {
+		t.Fatalf("want 1 row, got %+v", rows)
+	}
+	r := rows[0]
+	if r.Total != 3 || r.Locked != 1 || r.Cooling != 1 || r.Servable != 1 {
+		t.Errorf("total/locked/cooling/servable = %d/%d/%d/%d want 3/1/1/1",
+			r.Total, r.Locked, r.Cooling, r.Servable)
+	}
+	if r.State != "partial" {
+		t.Errorf("state = %q want partial", r.State)
+	}
+}
+
 // TestModelLockViewLocked 全部参与选号的号都被该模型挡住 → locked（与 ModelBlocked 同义），
 // 最早解锁取最小 Until、全池解锁取最大 Until，原因取最早解锁账号的。
 func TestModelLockViewLocked(t *testing.T) {

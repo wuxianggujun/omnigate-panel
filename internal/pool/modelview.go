@@ -25,6 +25,13 @@ type ModelLockRow struct {
 	Servable int `json:"servable"`
 	// Locked 因该模型自身冷却被挡的账号数。
 	Locked int `json:"locked"`
+	// Cooling 因**账号级**冷却（429 频率限流/熔断/连败降权的 until 域，与模型无关）被
+	// 挡的账号数。与 Locked 互补、互斥：上游 429 有两种 body，网关分记两处——
+	// 带重置墙钟的 6004 落 modelCooldowns（计入 Locked），无墙钟的 14003 落账号级
+	// until（计入 Cooling）。此前只暴露 Locked，运维会把「15 个号只剩 1 个能服务」
+	// 误读成「只锁了 2 个号」（线上案例：locked=2 而 12 个号在账号级限流）。三者关系：
+	// Servable + Locked + Cooling ≤ Total（差值是账号在途占满，不是任何冷却）。
+	Cooling int `json:"cooling,omitempty"`
 	// State 聚合状态：
 	//   - locked  ：全部参与选号的账号都被该模型冷却挡住（换模型或等解锁才有用，
 	//               与 ModelBlocked 的 Blocked 同口径）；
@@ -116,7 +123,21 @@ func (p *Pool) ModelLockView() []ModelLockRow {
 			if e.a.Realm() != realm {
 				continue
 			}
-			if e.healthyForModel(now, model) && !p.inFlightFull(e) {
+			if e.disabled || e.paused {
+				continue // 不参与选号：与 Total/Locked 同口径
+			}
+			// 三桶互斥（与 healthyForModel 的判定链同序，保证 Servable 语义不变）：
+			//   模型级冷却 → 已计入上方 Locked；
+			//   账号级冷却 → Cooling（与模型无关，等一下会好）；
+			//   否则健康 → 再看在途是否占满，未满才计入 Servable。
+			if e.modelCooled(now, model) {
+				continue
+			}
+			if !e.healthy(now) {
+				row.Cooling++
+				continue
+			}
+			if !p.inFlightFull(e) {
 				row.Servable++
 			}
 		}

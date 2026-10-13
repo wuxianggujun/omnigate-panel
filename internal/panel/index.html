@@ -126,7 +126,9 @@
         <table class="acc">
           <thead><tr>
             <th>模型</th><th>域</th><th>状态</th><th>可选 / 总数</th>
-            <th>锁定账号</th><th>最早解锁</th><th>全池解锁</th><th>原因</th>
+            <th title="上游 6004 模型级冷却（body 带「将在 … 重置」墙钟）挡住的号数">模型锁定</th>
+            <th title="账号级冷却（429 频率限流 / 熔断 / 连败降权，与该模型无关）挡住的号数——上游 14003「too many requests」走这一路">账号冷却</th>
+            <th>最早解锁</th><th>全池解锁</th><th>原因</th>
           </tr></thead>
           <tbody id="mlBody"></tbody>
         </table>

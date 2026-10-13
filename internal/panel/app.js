@@ -912,7 +912,7 @@ function renderModelLocks(rows) {
   if (!tb) return;
   const note = $('mlNote');
   if (!rows || !rows.length) {
-    tb.innerHTML = '<tr><td colspan="8"><div class="empty">当前没有模型级限流 —— 所有模型均可选</div></td></tr>';
+    tb.innerHTML = '<tr><td colspan="9"><div class="empty">当前没有模型级限流 —— 所有模型均可选</div></td></tr>';
     if (note) note.textContent = '';
     return;
   }
@@ -930,6 +930,7 @@ function renderModelLocks(rows) {
       '<td><span class="tag ' + st[0] + '">' + st[1] + '</span></td>' +
       '<td class="num">' + (r.servable || 0) + ' / ' + (r.total || 0) + '</td>' +
       '<td class="num">' + (r.locked || 0) + '</td>' +
+      '<td class="num">' + (r.cooling || 0) + '</td>' +
       '<td class="num">' + left(r.unlock_at || r.fully_unlock_at) + '</td>' +
       '<td class="num">' + left(r.fully_unlock_at) + '</td>' +
       '<td>' + (r.reason ? '<div class="note">' + esc(r.reason) + '</div>' : '—') + '</td>' +

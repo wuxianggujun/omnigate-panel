@@ -290,7 +290,7 @@
           <button class="xs" id="btnMmReload">刷新</button>
         </header>
         <div class="pad">
-          <div class="og-hint" style="margin-top:0">客户端仍用<strong>别名</strong>调用（别名会出现在 <code>/v1/models</code> 里），网关在路由前把它解析成<strong>目标模型</strong>再转发。目标可写全限定名（<code>provider/model</code>）或裸模型名（回落到默认 provider）。<br><strong>可写多行做「引流链」</strong>：第一行是主目标，后面每行是回退——主目标供应商无可用账号 / 额度耗尽 / 请求失败时，自动按顺序试下一行（例如把小浣熊放第一行烧快过期积分，runable 放第二行兜底）。别名不能等于目标；改完即热生效，落盘 <code>data/model-mapping.json</code>。</div>
+          <div class="og-hint" style="margin-top:0">客户端仍用<strong>别名</strong>调用（别名会出现在 <code>/v1/models</code> 里），网关在路由前把它解析成<strong>目标模型</strong>再转发。目标可写全限定名（<code>provider/model</code>）或裸模型名（回落到默认 provider）。<br><strong>可写多行做「引流链」</strong>：第一行是主目标，后面每行是回退——主目标供应商无可用账号 / 额度耗尽 / 请求失败时，自动按顺序试下一行（例如把小浣熊放第一行烧快过期积分，runable 放第二行兜底）。别名不能等于目标；改完即热生效，落盘 <code>data/model-mapping.json</code>。<br><strong>映射是硬规则：一旦配上就处处盖过「全局路由」的 prefer 顺序。</strong>不想让某条规则生效时用「<b>停用</b>」——配置留着、不再插手路由（该模型改按 prefer 顺序走），想恢复随时点「启用」；删掉则连配置一起没了。</div>
           <div class="state" id="mmState"></div>
           <div class="tbl-wrap">
             <table class="acc md" id="mmTable">

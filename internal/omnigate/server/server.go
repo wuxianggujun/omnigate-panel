@@ -898,18 +898,39 @@ func (s *Server) handleGeminiWebAdmin(w http.ResponseWriter, r *http.Request) {
 // model table (ported from gemini2api's /admin/model-mapping router). GET lists,
 // POST sets ({alias,target}), DELETE {alias} removes. Changes take effect on the
 // next request (route() consults the table live).
+//
+// POST 还接受 enabled=false 停用一条规则（别名 + 目标链都留着，只是路由时当它
+// 不存在）。引流链是硬规则——别名优先于 routing.prefer（见 gateway.route），一旦
+// 配上就处处盖过 prefers；停用开关是运维唯一的「先摘掉、别删配置」退路。
 func (s *Server) handleModelMapping(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		s.writeValue(w, 200, map[string]any{"mappings": s.gw.ModelMappings().All()})
+		s.writeValue(w, 200, map[string]any{
+			"mappings": s.gw.ModelMappings().All(),
+			"disabled": s.gw.ModelMappings().DisabledAliases(),
+		})
 	case http.MethodPost:
 		var req struct {
 			Alias   string   `json:"alias"`
 			Target  string   `json:"target"`
 			Targets []string `json:"targets"`
+			Enabled *bool    `json:"enabled"`
 		}
 		if err := decodeBody(r, &req); err != nil {
 			s.adminError(w, err)
+			return
+		}
+		// 只改开关、不动目标链：enabled 单独出现时按停用/启用处理。
+		if req.Enabled != nil && len(req.Targets) == 0 && strings.TrimSpace(req.Target) == "" {
+			if !s.gw.SetModelMappingEnabled(req.Alias, *req.Enabled) {
+				s.adminError(w, fmt.Errorf("映射「%s」不存在", strings.TrimSpace(req.Alias)))
+				return
+			}
+			s.writeValue(w, 200, map[string]any{
+				"ok": true,
+				"mappings": s.gw.ModelMappings().All(),
+				"disabled": s.gw.ModelMappings().DisabledAliases(),
+			})
 			return
 		}
 		targets := req.Targets
@@ -920,7 +941,16 @@ func (s *Server) handleModelMapping(w http.ResponseWriter, r *http.Request) {
 			s.adminError(w, err)
 			return
 		}
-		s.writeValue(w, 200, map[string]any{"ok": true, "mappings": s.gw.ModelMappings().All()})
+		// 保存目标链时若同时带了 enabled，一并应用（新建规则默认启用，带 false
+		// 进来 = 存一份先不生效的配置）。
+		if req.Enabled != nil {
+			s.gw.SetModelMappingEnabled(req.Alias, *req.Enabled)
+		}
+		s.writeValue(w, 200, map[string]any{
+			"ok": true,
+			"mappings": s.gw.ModelMappings().All(),
+			"disabled": s.gw.ModelMappings().DisabledAliases(),
+		})
 	case http.MethodDelete:
 		alias := strings.TrimPrefix(r.URL.Path, "/admin/model-mapping/")
 		if alias == r.URL.Path || alias == "" {
@@ -934,7 +964,11 @@ func (s *Server) handleModelMapping(w http.ResponseWriter, r *http.Request) {
 			s.adminError(w, fmt.Errorf("映射「%s」不存在", alias))
 			return
 		}
-		s.writeValue(w, 200, map[string]any{"ok": true, "mappings": s.gw.ModelMappings().All()})
+		s.writeValue(w, 200, map[string]any{
+			"ok": true,
+			"mappings": s.gw.ModelMappings().All(),
+			"disabled": s.gw.ModelMappings().DisabledAliases(),
+		})
 	default:
 		s.adminError(w, fmt.Errorf("不支持的请求方法 %s", r.Method))
 	}

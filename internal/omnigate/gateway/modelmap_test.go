@@ -286,3 +286,130 @@ func TestListModelsExposesAliasInScope(t *testing.T) {
 		}
 	}
 }
+
+// TestModelMappingDisable 钉住「停用开关」：引流链是硬规则（别名优先于
+// routing.prefer，见 gateway.route），一旦配上就处处盖过 prefers。被强推到某个
+// 供应商时，运维唯一的退路就是停用 —— 配置留着、路由时当它不存在、按 prefer 走，
+// 想恢复随时打开。以前只能整条删掉再重配一遍。
+func TestModelMappingDisable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "model-mapping.json")
+	s := NewModelMappingStore(path)
+	if err := s.SetTargets("deepseek-v4.1-flash", []string{"raccoon/sn-deepseek-v4-1-flash", "runable/deepseek/deepseek-v4.1-flash"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1) 默认启用：链完整可见。
+	if got := s.Chain("deepseek-v4.1-flash"); len(got) != 2 {
+		t.Fatalf("Chain = %v, want 2 targets", got)
+	}
+	if s.IsDisabled("deepseek-v4.1-flash") {
+		t.Fatal("新规则不该默认停用")
+	}
+
+	// 2) 停用后 Resolve/Chain 都当它不存在（按 caller 的 prefer 走裸名）。
+	if !s.SetEnabled("deepseek-v4.1-flash", false) {
+		t.Fatal("SetEnabled(false) = false")
+	}
+	if got := s.Resolve("deepseek-v4.1-flash"); got != "deepseek-v4.1-flash" {
+		t.Fatalf("停用后 Resolve = %q, want identity", got)
+	}
+	if got := s.Chain("deepseek-v4.1-flash"); got != nil {
+		t.Fatalf("停用后 Chain = %v, want nil", got)
+	}
+	if !s.IsDisabled("deepseek-v4.1-flash") {
+		t.Fatal("IsDisabled 应为 true")
+	}
+	// 3) 配置还在（这是与「删除」的本质区别），All() 仍返回它。
+	if got := s.All()["deepseek-v4.1-flash"]; len(got) != 2 {
+		t.Fatalf("停用后 All() = %v, want 配置保留", got)
+	}
+	// 4) 重启后仍是停用状态（持久化不能丢）。
+	s2 := NewModelMappingStore(path)
+	if !s2.IsDisabled("deepseek-v4.1-flash") {
+		t.Fatal("重新加载后停用状态丢失")
+	}
+	// 5) 恢复启用：链立刻重新生效。
+	s2.SetEnabled("deepseek-v4.1-flash", true)
+	if got := s2.Resolve("deepseek-v4.1-flash"); got != "raccoon/sn-deepseek-v4-1-flash" {
+		t.Fatalf("恢复后 Resolve = %q", got)
+	}
+	// 6) 对不存在的别名 SetEnabled 返回 false，不凭空造空规则。
+	if s2.SetEnabled("nope", false) {
+		t.Fatal("SetEnabled 不存在的别名应返回 false")
+	}
+	if _, ok := s2.All()["nope"]; ok {
+		t.Fatal("SetEnabled 不该凭空创建规则")
+	}
+	// 7) 删除时停用标记一并清除（否则将来同名别名会被莫名停用）。
+	s2.SetEnabled("deepseek-v4.1-flash", false)
+	s2.Delete("deepseek-v4.1-flash")
+	s2.Set("deepseek-v4.1-flash", "raccoon/x")
+	if s2.IsDisabled("deepseek-v4.1-flash") {
+		t.Fatal("重配同名别名后仍被停用")
+	}
+}
+
+// TestModelMappingLegacyShapeCompat 保证存量数据（裸 map，没有 targets/disabled
+// 包装）照样能读，升级不需要人手改文件或跑迁移。
+func TestModelMappingLegacyShapeCompat(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "model-mapping.json")
+	// 线上就是这个形状（升级前落盘的）。
+	legacy := `{"glm-5.2":"atria/Atria-Dawn-Preview","deepseek-v4.1-flash":["raccoon/sn-deepseek-v4-1-flash","runable/deepseek/deepseek-v4.1-flash"]}`
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := NewModelMappingStore(path)
+	if got := s.Resolve("glm-5.2"); got != "atria/Atria-Dawn-Preview" {
+		t.Fatalf("单目标 Resolve = %q", got)
+	}
+	if got := s.Chain("deepseek-v4.1-flash"); len(got) != 2 {
+		t.Fatalf("引流链 Resolve = %v", got)
+	}
+	if len(s.DisabledAliases()) != 0 {
+		t.Fatalf("旧数据不该有任何停用项，得到 %v", s.DisabledAliases())
+	}
+	// 再存一次就升级成新形状，内容不变。
+	if !s.SetEnabled("glm-5.2", false) {
+		t.Fatal("SetEnabled = false")
+	}
+	s3 := NewModelMappingStore(path)
+	if !s3.IsDisabled("glm-5.2") {
+		t.Fatal("升级后的停用状态没存住")
+	}
+}
+
+// TestRouteDisabledMappingFallsBackToPrefer 从路由侧确认：停用一条映射后，
+// 模型名回到按 routing.prefer 解析（这正是用户要的「取消强制」之后的行为）。
+func TestRouteDisabledMappingFallsBackToPrefer(t *testing.T) {
+	g := testGateway(&scriptProvider{})
+	g.providers["alt"] = &scriptProvider{}
+	g.order = append(g.order, "alt")
+	g.cfg.Providers = []config.ProviderConfig{
+		{Name: "fake", Type: "openai"},
+		{Name: "alt", Type: "openai", Models: []string{"m1"}},
+	}
+	// prefer 明确指向 alt：停用映射后裸名必须落到这里，而不是回落 default。
+	g.cfg.Routing = &config.RoutingConfig{Prefer: []string{"alt"}}
+	g.modelCache["fake"] = modelEntry{models: []openai.Model{{ID: "m"}}}
+	g.modelCache["alt"] = modelEntry{models: []openai.Model{{ID: "m1"}, {ID: "gpt-4o"}}}
+	g.modelMap = NewModelMappingStore(filepath.Join(t.TempDir(), "m.json"))
+	if err := g.modelMap.SetTargets("gpt-4o", []string{"fake/m"}); err != nil {
+		t.Fatal(err)
+	}
+	// 启用时映射优先，压过 prefer（这正是「强制」的由来）。
+	if pn, _ := g.route("gpt-4o"); pn != "fake" {
+		t.Fatalf("启用时 route = %q, want fake（映射优先于 prefer）", pn)
+	}
+	g.modelMap.SetEnabled("gpt-4o", false)
+	// 停用后映射表不再参与：按 prefer 走。
+	if pn, m := g.route("gpt-4o"); pn != "alt" || m != "gpt-4o" {
+		t.Fatalf("停用后 route = (%q,%q), want (alt,gpt-4o)", pn, m)
+	}
+	if got := g.ProviderOf("gpt-4o"); got != "alt" {
+		t.Fatalf("ProviderOf = %q, want alt", got)
+	}
+	// 引流链也整个失效（不然主目标停了、回退目标还在打）。
+	if fb := g.modelChainFallbacks("gpt-4o"); len(fb) != 0 {
+		t.Fatalf("停用后引流链仍在: %+v", fb)
+	}
+}

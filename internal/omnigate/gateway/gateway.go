@@ -660,6 +660,11 @@ func (g *Gateway) ListModelsFor(ctx context.Context, allowed []string) []openai.
 		if seen[alias] {
 			continue
 		}
+		// 停用的规则不曝光：留着会让客户端看见一个名字、调下去却走到别处
+		// （停用后按 routing.prefer 解析），比不列出来更难排查。
+		if g.ModelMappings().IsDisabled(alias) {
+			continue
+		}
 		pn, _ := g.route(alias)
 		if allow != nil && !allow[pn] {
 			continue

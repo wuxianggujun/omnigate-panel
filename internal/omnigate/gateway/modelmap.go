@@ -111,11 +111,20 @@ func normalizeAliasTargets(alias string, raw []string) ([]string, error) {
 // automatically retries the following ones. This is what lets an operator
 // "drain" an expiring account (e.g. prefer raccoon, fall back to runable).
 //
+// 每条映射还能单独「停用」：停用只是把这条规则从路由里摘掉，配置本身留着，
+// 随时可以再打开。之所以需要它——引流链是硬规则，一旦配上就处处盖过
+// routing.prefer（别名优先于 prefer，见 gateway.route），用户发现被强推到某个
+// 供应商时，除了把整条链删掉再重新配一遍之外没有别的退路。停用就是那个退路。
+//
 // A zero/nil store is inert: Resolve returns the input unchanged.
 type ModelMappingStore struct {
 	mu   sync.RWMutex
 	path string
 	m    map[string]MappingTargets
+	// disabled 是被停用的别名集合。刻意与 m 分开存而不是塞进 m 的值里：
+	// m 的序列化形状（裸字符串 / 字符串数组）是所有既有消费者和线上数据约定的，
+	// 为加一个开关把它变成对象会让存量数据一次性全部不兼容。
+	disabled map[string]bool
 	// 可选 KV 后端（PostgreSQL）：非空且 key 非空时库为权威。见 SetBackend。
 	backend    kv.Backend
 	backendKey string
@@ -124,7 +133,7 @@ type ModelMappingStore struct {
 // NewModelMappingStore constructs the store and loads it from disk (missing file
 // = empty table). An empty path keeps it memory-only.
 func NewModelMappingStore(path string) *ModelMappingStore {
-	s := &ModelMappingStore{path: path, m: map[string]MappingTargets{}}
+	s := &ModelMappingStore{path: path, m: map[string]MappingTargets{}, disabled: map[string]bool{}}
 	s.load()
 	return s
 }
@@ -145,20 +154,22 @@ func (s *ModelMappingStore) SetBackend(b kv.Backend, key string) error {
 		return err
 	}
 	if found {
-		var onDisk map[string]MappingTargets
-		if err := json.Unmarshal(raw, &onDisk); err == nil {
-			clean := map[string]MappingTargets{}
-			for alias, targets := range onDisk {
-				chain, err := normalizeAliasTargets(alias, targets)
-				if err != nil {
-					continue
-				}
-				clean[strings.TrimSpace(alias)] = chain
+		targets, off := loadPersisted(raw)
+		clean := map[string]MappingTargets{}
+		for alias, chain := range targets {
+			c, err := normalizeAliasTargets(alias, chain)
+			if err != nil {
+				continue
 			}
-			s.mu.Lock()
-			s.m = clean
-			s.mu.Unlock()
+			clean[strings.TrimSpace(alias)] = c
 		}
+		s.mu.Lock()
+		s.m = clean
+		s.disabled = map[string]bool{}
+		for a := range off {
+			s.disabled[a] = true
+		}
+		s.mu.Unlock()
 		return nil
 	}
 	// 首次启用：把文件里的映射整体导入库。
@@ -174,17 +185,44 @@ func (s *ModelMappingStore) load() {
 	if err != nil {
 		return
 	}
-	var onDisk map[string]MappingTargets
-	if err := json.Unmarshal(raw, &onDisk); err != nil {
-		return
-	}
-	for alias, targets := range onDisk {
-		chain, err := normalizeAliasTargets(alias, targets)
+	targets, off := loadPersisted(raw)
+	for alias, chain := range targets {
+		clean, err := normalizeAliasTargets(alias, chain)
 		if err != nil {
 			continue
 		}
-		s.m[strings.TrimSpace(alias)] = chain
+		s.m[strings.TrimSpace(alias)] = clean
 	}
+	for a := range off {
+		s.disabled[a] = true
+	}
+}
+
+// persisted 是落盘/落库的形状。刻意包一层而不是直接把数组写顶层：
+// 顶层那个 map 是「别名 → 目标链」的既有约定（含裸字符串单目标的形态），
+// 所有存量数据、外部脚本都按它读；停用集合只能另开一个字段，否则加一个开关
+// 就要让全部历史数据一次性变得读不出来。
+type persisted struct {
+	Targets  map[string]MappingTargets `json:"targets"`
+	Disabled []string                  `json:"disabled,omitempty"`
+}
+
+// loadPersisted 兼读新旧两种形状：新形状是 {targets:{...},disabled:[...]}，
+// 旧形状就是裸的「别名 → 目标」map。旧数据读进来时停用集合为空（全都当启用）。
+func loadPersisted(raw []byte) (map[string]MappingTargets, map[string]bool) {
+	var p persisted
+	if err := json.Unmarshal(raw, &p); err == nil && p.Targets != nil {
+		off := map[string]bool{}
+		for _, a := range p.Disabled {
+			off[strings.TrimSpace(a)] = true
+		}
+		return p.Targets, off
+	}
+	var flat map[string]MappingTargets
+	if err := json.Unmarshal(raw, &flat); err != nil {
+		return nil, nil
+	}
+	return flat, map[string]bool{}
 }
 
 // saveLocked atomically persists the table. Caller must hold the write lock.
@@ -192,7 +230,14 @@ func (s *ModelMappingStore) saveLocked() {
 	if s == nil || (s.path == "" && (s.backend == nil || s.backendKey == "")) {
 		return
 	}
-	raw, err := json.MarshalIndent(s.m, "", "  ")
+	p := persisted{Targets: s.m}
+	for a, off := range s.disabled {
+		if off {
+			p.Disabled = append(p.Disabled, a)
+		}
+	}
+	sort.Strings(p.Disabled) // 稳定输出：否则每次保存数组顺序抖一下，diff 全是噪声
+	raw, err := json.MarshalIndent(p, "", "  ")
 	if err != nil {
 		return
 	}
@@ -212,7 +257,9 @@ func (s *ModelMappingStore) saveLocked() {
 	_ = os.Rename(tmp, s.path)
 }
 
-// All returns a copy of the alias → target-chain table.
+// All returns a copy of the alias → target-chain table, including那些被停用的
+// 规则（调用方要能看到完整配置才能展示「已停用」状态）。被停用的别名也在结果
+// 里，值不变。
 func (s *ModelMappingStore) All() map[string]MappingTargets {
 	out := map[string]MappingTargets{}
 	if s == nil {
@@ -226,14 +273,63 @@ func (s *ModelMappingStore) All() map[string]MappingTargets {
 	return out
 }
 
+// DisabledAliases 返回被停用的别名集合（调用方不可改）。
+func (s *ModelMappingStore) DisabledAliases() map[string]bool {
+	out := map[string]bool{}
+	if s == nil {
+		return out
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for k, v := range s.disabled {
+		out[k] = v
+	}
+	return out
+}
+
+// IsDisabled 报告某条规则是否被停用。停用的规则在 Resolve/Chain 里一律当不存在
+// 处理，相当于「这条规则临时没配过」——但配置留着，SetEnabled(false) 可随时恢复。
+func (s *ModelMappingStore) IsDisabled(alias string) bool {
+	if s == nil {
+		return false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.disabled[strings.TrimSpace(alias)]
+}
+
+// SetEnabled 打开或停用某条已存在的规则。返回 false 表示别名不存在（不让通过
+// 这个接口凭空造出一条空规则）。停用不删配置，也不影响别的规则。
+func (s *ModelMappingStore) SetEnabled(alias string, on bool) bool {
+	if s == nil {
+		return false
+	}
+	alias = strings.TrimSpace(alias)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.m[alias]; !ok {
+		return false
+	}
+	if on {
+		delete(s.disabled, alias)
+	} else {
+		s.disabled[alias] = true
+	}
+	s.saveLocked()
+	return true
+}
+
 // Resolve maps a model name to its primary target, or returns it unchanged when
-// there is no mapping.
+// there is no mapping (or the mapping is disabled).
 func (s *ModelMappingStore) Resolve(model string) string {
 	if s == nil {
 		return model
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	if s.disabled[model] {
+		return model
+	}
 	if t, ok := s.m[model]; ok && len(t) > 0 {
 		return t[0]
 	}
@@ -241,13 +337,17 @@ func (s *ModelMappingStore) Resolve(model string) string {
 }
 
 // Chain returns the full ordered target list for a model (primary first), or nil
-// when the model is not mapped. The caller must not mutate the result.
+// when the model is not mapped or the mapping is disabled. The caller must not
+// mutate the result.
 func (s *ModelMappingStore) Chain(model string) []string {
 	if s == nil {
 		return nil
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	if s.disabled[model] {
+		return nil
+	}
 	t, ok := s.m[model]
 	if !ok || len(t) == 0 {
 		return nil
@@ -264,6 +364,9 @@ func (s *ModelMappingStore) Set(alias, target string) error {
 // SetTargets writes (or overwrites) an alias → ordered target chain. The first
 // target is the primary; the rest are automatic fallbacks. Empty entries are
 // dropped, duplicates de-duplicated, and targets equal to the alias rejected.
+//
+// 重存一条规则时不会顺手把它停用掉（运维改目标链是常事，不该连带丢掉开关状态），
+// 想停用请显式调 SetEnabled。
 func (s *ModelMappingStore) SetTargets(alias string, targets []string) error {
 	if s == nil {
 		return nil
@@ -279,7 +382,7 @@ func (s *ModelMappingStore) SetTargets(alias string, targets []string) error {
 	return nil
 }
 
-// Delete removes a mapping. Returns whether it existed.
+// Delete removes a mapping. Returns whether it existed. 停用状态随之清除。
 func (s *ModelMappingStore) Delete(alias string) bool {
 	if s == nil {
 		return false
@@ -291,6 +394,7 @@ func (s *ModelMappingStore) Delete(alias string) bool {
 		return false
 	}
 	delete(s.m, alias)
+	delete(s.disabled, alias) // 别把停用标记留在表外，将来同名别名会被莫名停用
 	s.saveLocked()
 	return true
 }
@@ -336,4 +440,13 @@ func (g *Gateway) DeleteModelMapping(alias string) bool {
 		return false
 	}
 	return g.modelMap.Delete(alias)
+}
+
+// SetModelMappingEnabled 停用/启用一条已存在的规则。停用 = 路由时当它不存在
+// （按 routing.prefer 走），但别名和目标链都留着，随时能恢复。
+func (g *Gateway) SetModelMappingEnabled(alias string, on bool) bool {
+	if g.modelMap == nil {
+		return false
+	}
+	return g.modelMap.SetEnabled(alias, on)
 }

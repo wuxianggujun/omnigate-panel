@@ -4528,19 +4528,30 @@ async function loadModelMappings() {
   try {
     const d = await apiAbs('/omni/model-mapping');
     const m = (d && d.mappings) || {};
+    const off = (d && d.disabled) || {};   // { 别名: true } —— 被停用的规则
     const keys = Object.keys(m).sort();
     if (st) st.hidden = true;
     if (!keys.length) {
-      tb.innerHTML = '<tr><td colspan="3"><div class="empty">还没有配置任何模型名映射</div></td></tr>';
+      tb.innerHTML = '<tr><td colspan="4"><div class="empty">还没有配置任何模型名映射</div></td></tr>';
       return;
     }
     tb.innerHTML = keys.map(k => {
       const chain = Array.isArray(m[k]) ? m[k] : [m[k]];
       const cell = chain.map((t, i) => (i === 0 ? '<strong>' + esc(t) + '</strong>' : '↳ ' + esc(t))).join('<br>');
-      return '<tr>' +
-        '<td class="id">' + esc(k) + '</td>' +
-        '<td>' + cell + '</td>' +
-        '<td class="c-acts"><button class="xs ghost danger" data-mmdel="' + esc(k) + '">删除</button></td>' +
+      // 停用中的规则整行压暗、主目标加删除线——扫一眼就知道哪条没在生效。
+      const isOff = !!off[k];
+      const rowCls = isOff ? ' class="mm-off"' : '';
+      const main = isOff
+        ? '<s>' + cell + '</s>'
+        : cell;
+      const toggle = '<button class="xs ghost" data-mmtoggle="' + esc(k) + '" data-on="' + (isOff ? '0' : '1') + '">' +
+        (isOff ? '启用' : '停用') + '</button>';
+      const badge = isOff ? ' <span class="tag mute">已停用</span>' : '';
+      return '<tr' + rowCls + '>' +
+        '<td class="id">' + esc(k) + badge + '</td>' +
+        '<td>' + main + '</td>' +
+        '<td class="c-acts">' + toggle +
+        '<button class="xs ghost danger" data-mmdel="' + esc(k) + '">删除</button></td>' +
         '</tr>';
     }).join('');
   } catch (e) {
@@ -4562,6 +4573,25 @@ async function mmAdd() {
     loadModelMappings();
   } catch (e) {
     ogMsg('mmMsg', '保存失败：' + e.message, 'err');
+  }
+}
+
+/* mmToggle 停用/启用一条映射。
+   与「删除」的关键区别：配置整个留着（别名 + 目标链），只是路由时当它不存在，
+   模型名恢复按 routing.prefer 解析。引流链是硬规则、盖过 prefer，运维被强推到
+   某个供应商时，以前唯一的出路是删掉再重配一遍 —— 这就是用户说的"还不能取消"。 */
+async function mmToggle(alias, on, btn) {
+  if (btn) btn.disabled = true;
+  try {
+    await apiAbs('/omni/model-mapping', {
+      method: 'POST',
+      body: JSON.stringify({ alias, enabled: on }),
+    });
+    toast(on ? '已启用「' + alias + '」' : '已停用「' + alias + '」，该模型改按全局路由 prefer 走', 'ok');
+    loadModelMappings();
+  } catch (e) {
+    toast('操作失败：' + e.message, 'err');
+    if (btn) btn.disabled = false;
   }
 }
 
@@ -6072,6 +6102,8 @@ async function saveOutbound() {
   if (mmb) mmb.addEventListener('click', ev => {
     const b = ev.target.closest('button[data-mmdel]');
     if (b) mmDelete(b.dataset.mmdel, b);
+    const t = ev.target.closest('button[data-mmtoggle]');
+    if (t) mmToggle(t.dataset.mmtoggle, t.dataset.on !== '1', t);
   });
   // Gemini Web 会话 / Gems 管理（账号级运维，走 /omni/admin/geminiweb/*）
   on('btnCloseGChat', closeGChats);

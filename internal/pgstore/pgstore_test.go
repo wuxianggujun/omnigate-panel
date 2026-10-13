@@ -3,10 +3,12 @@ package pgstore
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/wuxianggujun/omnigate-panel/internal/panelauth"
+	"github.com/wuxianggujun/omnigate-panel/internal/reqlog"
 )
 
 // 集成测试：需要一个真实 PostgreSQL。设置 PGSTORE_TEST_DSN 后运行。
@@ -152,6 +154,107 @@ func TestBlobRoundTrip(t *testing.T) {
 	}
 	if err := st.Delete("usage"); err != nil {
 		t.Fatalf("重复删除应幂等: %v", err)
+	}
+}
+
+// 请求记录落库：批量写 / 筛选读 / 统计 / 按保留期清理。
+func TestRequestLogSink(t *testing.T) {
+	dsn := os.Getenv("PGSTORE_TEST_DSN")
+	if dsn == "" {
+		t.Skip("未设置 PGSTORE_TEST_DSN，跳过 PostgreSQL 集成测试")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	const table = "panel_reqlog_test"
+	st, err := openWithTable(ctx, dsn, table)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer st.Close()
+	logTable := table + "_request_logs"
+	defer func() {
+		_, _ = st.pool.Exec(context.Background(), "drop table if exists "+logTable)
+		_, _ = st.pool.Exec(context.Background(), "drop table if exists "+table)
+		_, _ = st.pool.Exec(context.Background(), "drop table if exists "+table+"_kv")
+	}()
+
+	now := time.Now()
+	events := []reqlog.Event{
+		{Time: now.Add(-2 * time.Minute), RequestID: "a", Path: "/v1/chat", Account: "u1", Model: "m1", Provider: "raccoon", Outcome: "success", Status: 200, OK: true, TotalTokens: 10},
+		{Time: now.Add(-1 * time.Minute), RequestID: "b", Path: "/v1/chat", Account: "u2", Model: "m2", Provider: "runable", Outcome: "http_error", Status: 500},
+		{Time: now.AddDate(0, 0, -30), RequestID: "c", Path: "/v1/chat", Account: "u3", Model: "m3", Provider: "raccoon", Outcome: "success", Status: 200, OK: true},
+	}
+	if err := st.AppendLogs(events); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	rows, _, errMsg := st.LogStats()
+	if errMsg != "" || rows != 3 {
+		t.Fatalf("stats rows=%d err=%q", rows, errMsg)
+	}
+
+	got, err := st.ReadLogs(10, reqlog.Filter{})
+	if err != nil || len(got) != 3 {
+		t.Fatalf("read all: %v len=%d", err, len(got))
+	}
+	if !got[0].Time.After(got[1].Time) {
+		t.Fatalf("应按时间倒序，得到 %v", []time.Time{got[0].Time, got[1].Time})
+	}
+	if got, _ = st.ReadLogs(10, reqlog.Filter{Account: "U1"}); len(got) != 1 || got[0].RequestID != "a" {
+		t.Fatalf("account 子串匹配（大小写不敏感）失败: %+v", got)
+	}
+	if got, _ = st.ReadLogs(10, reqlog.Filter{Outcome: "success"}); len(got) != 2 {
+		t.Fatalf("outcome 筛选应 2 条，得到 %d", len(got))
+	}
+	if got, _ = st.ReadLogs(10, reqlog.Filter{Provider: "raccoon"}); len(got) != 2 {
+		t.Fatalf("provider 筛选应 2 条，得到 %d", len(got))
+	}
+	if got, _ = st.ReadLogs(1, reqlog.Filter{}); len(got) != 1 {
+		t.Fatalf("limit=1 应 1 条，得到 %d", len(got))
+	}
+
+	// 保留 7 天：30 天前那条应被清掉。
+	if err := st.PruneLogs(7, 0); err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+	if rows, _, _ = st.LogStats(); rows != 2 {
+		t.Fatalf("prune 后应剩 2 行，得到 %d", rows)
+	}
+}
+
+// 既有 JSONL 归档一次性导入。
+func TestImportRequestLogsFromDir(t *testing.T) {
+	dsn := os.Getenv("PGSTORE_TEST_DSN")
+	if dsn == "" {
+		t.Skip("未设置 PGSTORE_TEST_DSN，跳过 PostgreSQL 集成测试")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	const table = "panel_reqlog_import_test"
+	st, err := openWithTable(ctx, dsn, table)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer st.Close()
+	logTable := table + "_request_logs"
+	defer func() {
+		_, _ = st.pool.Exec(context.Background(), "drop table if exists "+logTable)
+		_, _ = st.pool.Exec(context.Background(), "drop table if exists "+table)
+		_, _ = st.pool.Exec(context.Background(), "drop table if exists "+table+"_kv")
+	}()
+
+	dir := t.TempDir()
+	line := `{"time":"2026-01-01T00:00:00Z","request_id":"x","path":"/v1","outcome":"success","status":200,"ok":true}` + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "requests-2026-01-01.jsonl"), []byte(line), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	n, err := st.ImportRequestLogsFromDir(dir)
+	if err != nil || n != 1 {
+		t.Fatalf("import n=%d err=%v", n, err)
+	}
+	if rows, _, _ := st.LogStats(); rows != 1 {
+		t.Fatalf("导入后应 1 行，得到 %d", rows)
 	}
 }
 

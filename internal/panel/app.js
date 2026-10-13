@@ -1513,9 +1513,9 @@ function renderRequestMetrics(m, entries) {
     ' · 平均 ' + fmtMs(m.avg_duration_ms) +
     ' · 进行中 ' + String(m.in_flight || 0);
   $('reqNote').textContent = a.enabled
-    ? 'JSONL 归档 ' + fmtBytes(a.bytes) + (a.dropped_writes ? ' · 丢弃 ' + a.dropped_writes + ' 条' : '') +
+    ? (a.backend ? '数据库归档 ' : 'JSONL 归档 ') + fmtBytes(a.bytes) + (a.dropped_writes ? ' · 丢弃 ' + a.dropped_writes + ' 条' : '') +
       (a.last_error ? ' · 错误：' + a.last_error : '')
-    : '仅内存指标，JSONL 归档已关闭';
+    : '仅内存指标，请求记录归档已关闭';
 
   reqEntries = entries || [];
   fillReqProviders();

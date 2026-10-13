@@ -327,20 +327,40 @@ func main() {
 	defer rec.Stop()
 	log.Printf("[usage] 逐请求用量记录已启用: %s (%s)", usagePath, rec.Describe())
 
-	// 请求指标始终启用；JSONL 归档只写脱敏元数据，写盘失败不影响聊天请求。
+	// 请求指标始终启用；归档默认写脱敏元数据。配置了 PostgreSQL 时改为落库
+	// （request_logs 表）：首次启用把既有 JSONL 一次性导入，之后不再写文件。
+	reqLogDir := stateSibling(cfg.StateFile, "request-logs")
+	var reqSink reqlog.Sink
+	if pg != nil {
+		reqSink = pg
+		if cfg.Logging.RequestArchiveEnabled {
+			if rows, _, _ := pg.LogStats(); rows == 0 {
+				if n, err := pg.ImportRequestLogsFromDir(reqLogDir); err != nil {
+					log.Printf("WARN: [storage] 请求记录导入 PostgreSQL 失败（先按空表运行）: %v", err)
+				} else if n > 0 {
+					log.Printf("[storage] 首次启用：已把 %d 条请求记录导入 PostgreSQL", n)
+				}
+			}
+		}
+	}
 	requestLog := reqlog.New(reqlog.Config{
-		Dir:           stateSibling(cfg.StateFile, "request-logs"),
+		Dir:           reqLogDir,
 		Enabled:       cfg.Logging.RequestArchiveEnabled,
 		RetentionDays: cfg.Logging.RequestRetentionDays,
 		MaxBytes:      int64(cfg.Logging.RequestArchiveMaxMB) << 20,
+		Sink:          reqSink,
 	})
 	defer requestLog.Close()
 	rs := requestLog.Snapshot().Archive
-	if rs.Enabled {
+	switch {
+	case !rs.Enabled:
+		log.Printf("[reqlog] 请求指标已启用；归档已关闭")
+	case rs.Backend != "":
+		log.Printf("[reqlog] 请求指标已启用；归档落 %s（保留 %d 天，上限 %d MiB）",
+			rs.Backend, cfg.Logging.RequestRetentionDays, cfg.Logging.RequestArchiveMaxMB)
+	default:
 		log.Printf("[reqlog] 请求指标已启用；JSONL 归档 %s（保留 %d 天，上限 %d MiB）",
 			rs.Dir, cfg.Logging.RequestRetentionDays, cfg.Logging.RequestArchiveMaxMB)
-	} else {
-		log.Printf("[reqlog] 请求指标已启用；JSONL 归档已关闭")
 	}
 
 	// 内置 OmniGate 引擎（Runable / 浣熊 / 任意 OpenAI 兼容上游）：先装配，

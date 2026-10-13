@@ -53,6 +53,20 @@ type Config struct {
 	MaxBytes      int64
 	FileMaxBytes  int64
 	QueueSize     int
+	// Sink 可选的持久化后端（如 PostgreSQL）。配置后归档不再写 JSONL 文件，
+	// 读写 / 清理 / 统计全部经它；nil 时行为与从前完全一致（写本地 JSONL）。
+	Sink Sink
+}
+
+// Sink 是请求记录的可选持久化后端。实现方须并发安全，且对 append/read/prune 幂等。
+// 约定：AppendLogs 批量写；ReadLogs 返回按时间倒序的最近 limit 条（limit 已由调用方
+// 收敛到 [1,1000]）；PruneLogs 按保留天数与总字节上限清理；LogStats 返回行数 / 字节
+// 数与最近一次错误（无错误为空串）。
+type Sink interface {
+	AppendLogs(events []Event) error
+	ReadLogs(limit int, filter Filter) ([]Event, error)
+	PruneLogs(retentionDays int, maxBytes int64) error
+	LogStats() (rows int64, bytes int64, errMsg string)
 }
 
 // Event 是一条脱敏请求记录。Account 只保存“昵称(uid8)”标签，不保存完整 UID。
@@ -125,6 +139,9 @@ type Filter struct {
 type ArchiveStats struct {
 	Enabled       bool   `json:"enabled"`
 	Dir           string `json:"dir,omitempty"`
+	// Backend 非空表示归档落在这个持久化后端（如 "postgres"），前端据此把「JSONL 归档」
+	// 文案换成「数据库归档」。
+	Backend       string `json:"backend,omitempty"`
 	Files         int    `json:"files"`
 	Bytes         int64  `json:"bytes"`
 	DroppedWrites uint64 `json:"dropped_writes"`
@@ -279,10 +296,16 @@ type archiveWriter struct {
 	path string
 	day  string
 	size int64
+
+	// sink 非空时全部记录经它落库（不再写文件）；batch 是攒批缓冲（ticker 每秒或
+	// 满 batchMax 条时刷出）。只在 run goroutine 里访问，无需额外锁。
+	sink     Sink
+	batch    []Event
+	batchMax int
 }
 
 func newArchiveWriter(cfg Config) *archiveWriter {
-	if !cfg.Enabled || strings.TrimSpace(cfg.Dir) == "" {
+	if !cfg.Enabled || (cfg.Sink == nil && strings.TrimSpace(cfg.Dir) == "") {
 		return &archiveWriter{cfg: cfg}
 	}
 	if cfg.RetentionDays <= 0 {
@@ -298,23 +321,33 @@ func newArchiveWriter(cfg Config) *archiveWriter {
 		cfg.QueueSize = defaultQueue
 	}
 	w := &archiveWriter{
-		cfg:  cfg,
-		ch:   make(chan Event, cfg.QueueSize),
-		stop: make(chan struct{}),
-		done: make(chan struct{}),
+		cfg:      cfg,
+		ch:       make(chan Event, cfg.QueueSize),
+		stop:     make(chan struct{}),
+		done:     make(chan struct{}),
+		sink:     cfg.Sink,
+		batchMax: 200,
 	}
-	if err := os.MkdirAll(cfg.Dir, 0o700); err != nil {
-		w.setErr(err)
-		w.cfg.Enabled = false
-		close(w.done)
-		return w
+	if cfg.Sink == nil {
+		if err := os.MkdirAll(cfg.Dir, 0o700); err != nil {
+			w.setErr(err)
+			w.cfg.Enabled = false
+			close(w.done)
+			return w
+		}
 	}
 	go w.run()
 	return w
 }
 
 func (w *archiveWriter) enabled() bool {
-	return w != nil && w.cfg.Enabled && w.cfg.Dir != "" && w.done != nil
+	if w == nil || w.done == nil {
+		return false
+	}
+	if w.sink != nil {
+		return w.cfg.Enabled
+	}
+	return w.cfg.Enabled && w.cfg.Dir != ""
 }
 
 func (w *archiveWriter) enqueue(e Event) {
@@ -338,6 +371,7 @@ func (w *archiveWriter) run() {
 			w.writeEvent(e)
 		case <-ticker.C:
 			w.flush()
+			w.flushSink()
 			w.prune()
 		case <-w.stop:
 			for {
@@ -346,6 +380,7 @@ func (w *archiveWriter) run() {
 					w.writeEvent(e)
 				default:
 					w.flush()
+					w.flushSink()
 					w.closeFile()
 					return
 				}
@@ -354,7 +389,27 @@ func (w *archiveWriter) run() {
 	}
 }
 
+// flushSink 把攒批的记录一次性写进后端；失败则计数丢弃（日志归档不允许阻塞模型请求）。
+func (w *archiveWriter) flushSink() {
+	if w.sink == nil || len(w.batch) == 0 {
+		return
+	}
+	rows := w.batch
+	w.batch = nil
+	if err := w.sink.AppendLogs(rows); err != nil {
+		w.setErr(err)
+		w.dropped.Add(uint64(len(rows)))
+	}
+}
+
 func (w *archiveWriter) writeEvent(e Event) {
+	if w.sink != nil {
+		w.batch = append(w.batch, e)
+		if len(w.batch) >= w.batchMax {
+			w.flushSink()
+		}
+		return
+	}
 	raw, err := json.Marshal(e)
 	if err != nil {
 		w.setErr(err)
@@ -494,6 +549,12 @@ func (w *archiveWriter) prune() {
 	if !w.enabled() {
 		return
 	}
+	if w.sink != nil {
+		if err := w.sink.PruneLogs(w.cfg.RetentionDays, w.cfg.MaxBytes); err != nil {
+			w.setErr(err)
+		}
+		return
+	}
 	entries, err := os.ReadDir(w.cfg.Dir)
 	if err != nil {
 		w.setErr(err)
@@ -543,6 +604,9 @@ func (w *archiveWriter) read(limit int, filter Filter) ([]Event, error) {
 	}
 	if limit > defaultReadMax {
 		limit = defaultReadMax
+	}
+	if w.sink != nil {
+		return w.sink.ReadLogs(limit, filter)
 	}
 	entries, err := os.ReadDir(w.cfg.Dir)
 	if err != nil {
@@ -628,10 +692,22 @@ func containsFold(haystack, needle string) bool {
 }
 
 func (w *archiveWriter) stats() ArchiveStats {
-	s := ArchiveStats{Enabled: w.enabled(), Dir: w.cfg.Dir, DroppedWrites: w.dropped.Load(), LastError: w.errString()}
+	s := ArchiveStats{Enabled: w.enabled(), DroppedWrites: w.dropped.Load(), LastError: w.errString()}
 	if !s.Enabled {
 		return s
 	}
+	if w.sink != nil {
+		rows, bytes, errMsg := w.sink.LogStats()
+		s.Backend = "postgres"
+		s.Dir = "postgres"
+		s.Files = int(rows)
+		s.Bytes = bytes
+		if errMsg != "" {
+			s.LastError = errMsg
+		}
+		return s
+	}
+	s.Dir = w.cfg.Dir
 	entries, err := os.ReadDir(w.cfg.Dir)
 	if err != nil {
 		s.LastError = err.Error()

@@ -36,6 +36,9 @@ create table if not exists %s (
 // defaultTable 生产表名。
 const defaultTable = "panel_users"
 
+// defaultLogTable 生产请求记录表名。
+const defaultLogTable = "request_logs"
+
 // blobSchemaTemplate 是通用「键 → 字节块」表，承载面板其余状态（会话 / 归属 /
 // 用量 / 积分历史 / 池状态 / OmniGate 状态与缓存）。各子系统把整份 JSON 快照塞进
 // 一行，键形如 "usage" / "pool_state"。表名同样用 %s 注入。
@@ -53,25 +56,33 @@ type Store struct {
 	label     string
 	table     string
 	blobTable string
+	logTable  string
 }
 
 // Open 解析 dsn、建立连接池、Ping 并建表（幂等）。任何一步失败都返回错误，
 // 由调用方决定「回落本地文件」还是「直接启动失败」。
 func Open(ctx context.Context, dsn string) (*Store, error) {
-	return openWithTable(ctx, dsn, defaultTable)
+	return open(ctx, dsn, defaultTable, defaultLogTable)
 }
 
-// openWithTable 与 Open 相同，但可指定表名（集成测试用临时表，避免写生产数据）。
+// openWithTable 与 Open 相同，但可指定面板账号表名（集成测试用临时表，避免写生产数据）。
+// 请求记录表随之派生为 <table>_request_logs，测试因此绝不碰生产 request_logs。
 func openWithTable(ctx context.Context, dsn, table string) (*Store, error) {
+	return open(ctx, dsn, table, table+"_request_logs")
+}
+
+func open(ctx context.Context, dsn, table, logTable string) (*Store, error) {
 	if dsn == "" {
 		return nil, fmt.Errorf("pgstore: dsn 为空")
 	}
 	if table == "" {
 		return nil, fmt.Errorf("pgstore: 表名为空")
 	}
-	for _, r := range table {
-		if !(r == '_' || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')) {
-			return nil, fmt.Errorf("pgstore: 非法表名 %q（只允许小写字母/数字/下划线）", table)
+	for _, name := range []string{table, logTable} {
+		for _, r := range name {
+			if !(r == '_' || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')) {
+				return nil, fmt.Errorf("pgstore: 非法表名 %q（只允许小写字母/数字/下划线）", name)
+			}
 		}
 	}
 	cfg, err := pgxpool.ParseConfig(dsn)
@@ -105,12 +116,18 @@ func openWithTable(ctx context.Context, dsn, table string) (*Store, error) {
 		return nil, fmt.Errorf("pgstore: 建 KV 表失败: %w", err)
 	}
 	cc := cfg.ConnConfig
-	return &Store{
+	st := &Store{
 		pool:      pool,
 		label:     fmt.Sprintf("%s@%s:%d/%s", cc.User, cc.Host, cc.Port, cc.Database),
 		table:     table,
 		blobTable: blobTable,
-	}, nil
+		logTable:  logTable,
+	}
+	if err := ensureRequestLogs(ctx, st); err != nil {
+		pool.Close()
+		return nil, err
+	}
+	return st, nil
 }
 
 // Close 关闭连接池（Store 为 nil 时安全）。

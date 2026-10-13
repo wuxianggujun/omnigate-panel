@@ -833,6 +833,29 @@
 
       <div class="box">
         <header>
+          <h3>可靠性与限流 <span class="hint">Gemini 失败兜底 + 入站按 IP 限流（默认都关闭）</span></h3>
+        </header>
+        <div class="pad">
+          <div class="og-hint" style="margin-top:0"><strong>第三方兜底</strong>：当一次请求在 Gemini 侧<strong>失败或产出为空</strong>（无文本、无图）时，网关自动改用其它已配置的第三方模型重试同一请求，客户端始终只看到一个模型名。留空「候选模型」= 自动使用所有「看起来能聊天」的第三方模型（随机顺序）；填写则按顺序精确指定。<br><strong>按 IP 限流</strong>：对聊天类端点（OpenAI chat / Claude messages / Gemini generateContent）按客户端 IP 计数，超过「每窗口请求数」返回 <code>429</code>。默认直接用 TCP 对端地址；仅当部署在会覆写 <code>X-Forwarded-For</code> 的反向代理之后才勾选「信任代理头」。</div>
+          <div class="grid3" style="margin-top:12px">
+            <label class="switch"><span class="lb">启用第三方兜底</span><input type="checkbox" id="cfFbEnabled"></label>
+            <label class="fld" style="grid-column:span 2"><span class="lb">兜底候选模型（逗号分隔，留空=自动）</span><input id="cfFbModels" placeholder="如 raccoon/gpt-4o, openai/gpt-4o-mini"></label>
+          </div>
+          <div class="grid3" style="margin-top:6px">
+            <label class="switch"><span class="lb">启用按 IP 限流</span><input type="checkbox" id="cfRlEnabled"></label>
+            <label class="fld"><span class="lb">窗口（秒）</span><input id="cfRlWindow" placeholder="60（缺省）" inputmode="numeric"></label>
+            <label class="fld"><span class="lb">每窗口请求数</span><input id="cfRlMax" placeholder="10（缺省）" inputmode="numeric"></label>
+          </div>
+          <label class="switch" style="margin-top:6px"><span class="lb">信任代理头（X-Forwarded-For / X-Real-IP）</span><input type="checkbox" id="cfRlTrust"></label>
+          <div class="og-row" style="margin-top:10px">
+            <button class="primary" id="btnSaveCfgReliability">保存并生效</button>
+            <span class="og-msg" id="rlfMsg"></span>
+          </div>
+        </div>
+      </div>
+
+      <div class="box">
+        <header>
           <h3>上游模型目录 <span class="hint" id="modelCnt"></span></h3>
           <span class="grow"></span>
           <button class="xs" id="btnLoadModels">刷新模型</button>

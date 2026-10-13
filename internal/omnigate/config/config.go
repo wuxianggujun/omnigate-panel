@@ -37,6 +37,13 @@ type Config struct {
 	// 刷新会话，后台循环只在账号池长期空闲时才有意义。
 	Maintenance *MaintenanceConfig `json:"maintenance,omitempty"`
 
+	// RateLimit 控制入站 API 的「按客户端 IP 限流」。缺省（nil / enabled=false）
+	// 保持不限流，与未挂限流完全一致（零回归）。
+	RateLimit *RateLimitConfig `json:"rate_limit,omitempty"`
+
+	// Fallback 控制「Gemini 失败/空回复 → 第三方兜底」。缺省关闭（零回归）。
+	Fallback *FallbackConfig `json:"fallback,omitempty"`
+
 	// PanelKey 是面板自己那把网关密钥（= config.json 的 api_key），由 cmd/server 在
 	// 构建运行时注入。它**恒为全量**且**绝不落盘**（json:"-"）：
 	//   - 面板前端要用它调 /omni/*，所以它必须永远有效；
@@ -94,6 +101,54 @@ type MaintenanceConfig struct {
 func (m *MaintenanceConfig) ChatCleanupSkipPinnedOrDefault() bool {
 	return m == nil || m.ChatCleanupSkipPinned == nil || *m.ChatCleanupSkipPinned
 }
+
+// RateLimitConfig 是入站 API 的「按客户端 IP 限流」开关。移植自 gemini2api 的
+// app/core/limiter.py（slowapi + rate_limit_enabled / rate_limit_window /
+// rate_limit_max）。默认关闭：关闭时与未挂限流完全一致（零回归）。限流只作用于
+// 聊天类端点（OpenAI chat / Claude messages / Gemini generateContent）。
+type RateLimitConfig struct {
+	Enabled bool `json:"enabled,omitempty"`
+	// Window 是限流窗口（秒）；<=0 视为 60。
+	Window int `json:"window,omitempty"`
+	// Max 是每个窗口内允许的请求数；<=0 视为 10。
+	Max int `json:"max,omitempty"`
+	// TrustProxy 信任 X-Forwarded-For / X-Real-IP 里的真实客户端 IP（对应参考实现
+	// 的 TRUST_PROXY_HEADERS）。默认 false：直接用 TCP 对端地址，因为这两个头可被
+	// 客户端伪造，开启后必须确保部署在会覆写它们的反向代理之后。
+	TrustProxy bool `json:"trust_proxy,omitempty"`
+}
+
+// FallbackConfig 是「Gemini 失败 / 空回复 → 第三方兜底」开关。移植自 gemini2api
+// 的 app/core/fallback.py：主请求失败或产出为空时，改用其它已配置的第三方模型重试
+// 同一请求，客户端始终只看到一个模型名。默认关闭（零回归）。
+type FallbackConfig struct {
+	Enabled bool `json:"enabled,omitempty"`
+	// Models 是可选的有序候选模型名；为空 = 自动使用所有「看起来能聊天」的第三方
+	// 模型（随机顺序）。对应参考实现的 FALLBACK_MODELS。
+	Models []string `json:"models,omitempty"`
+}
+
+// WindowSeconds 是限流窗口秒数（<=0 时默认 60）。
+func (r *RateLimitConfig) WindowSeconds() int {
+	if r == nil || r.Window <= 0 {
+		return 60
+	}
+	return r.Window
+}
+
+// MaxPerWindow 是每个窗口的请求上限（<=0 时默认 10）。
+func (r *RateLimitConfig) MaxPerWindow() int {
+	if r == nil || r.Max <= 0 {
+		return 10
+	}
+	return r.Max
+}
+
+// On 报告是否启用限流。
+func (r *RateLimitConfig) On() bool { return r != nil && r.Enabled }
+
+// On 报告是否启用第三方兜底。
+func (f *FallbackConfig) On() bool { return f != nil && f.Enabled }
 
 // APIKey 是一把入站网关密钥。
 //
@@ -440,6 +495,18 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Maintenance.ChatCleanupIntervalHours <= 0 {
 		c.Maintenance.ChatCleanupIntervalHours = 6
+	}
+	if c.RateLimit == nil {
+		c.RateLimit = &RateLimitConfig{}
+	}
+	if c.RateLimit.Window <= 0 {
+		c.RateLimit.Window = 60
+	}
+	if c.RateLimit.Max <= 0 {
+		c.RateLimit.Max = 10
+	}
+	if c.Fallback == nil {
+		c.Fallback = &FallbackConfig{}
 	}
 	if c.Mode == "" {
 		c.Mode = "text"

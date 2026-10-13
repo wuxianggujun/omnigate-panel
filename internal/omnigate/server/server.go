@@ -53,6 +53,9 @@ type Server struct {
 	// images 托管 AI 生成的图片（geminiweb 抽图后落盘），供 /images/{id} 路由读取。
 	// 与 gateway 构造 provider 时用的是同一个目录。
 	images *imagegen.Store
+
+	// rl 是可选入站限流器（rate_limit.enabled 时才生效）。见 ratelimit.go。
+	rl *rateLimiter
 }
 
 // New builds a Server.
@@ -63,6 +66,7 @@ func New(cfg *config.Config, gw *gateway.Gateway, log *logx.Logger) *Server {
 		log:     log,
 		started: time.Now(),
 		images:  imagegen.NewStore(filepath.Join(cfg.DataDir, "generated_images")),
+		rl:      newRateLimiter(),
 	}
 	s.http = &http.Server{
 		Addr:              net.JoinHostPort(cfg.Server.Host, strconv.Itoa(cfg.Server.Port)),
@@ -117,6 +121,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if !s.authorized(w, r) {
 			return
 		}
+		if !s.rateLimitOK(w, r) {
+			return
+		}
 		s.serveLogged(w, r, s.handleChat)
 	case r.Method == http.MethodPost && (path == "/v1/responses" || path == "/responses"):
 		if !s.authorized(w, r) {
@@ -132,6 +139,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if !s.authorizedAnthropic(w, r) {
 			return
 		}
+		if !s.rateLimitOK(w, r) {
+			return
+		}
 		s.serveLogged(w, r, s.handleMessages)
 	case r.Method == http.MethodGet && path == "/v1beta/models":
 		if !s.authorizedGemini(w, r) {
@@ -140,6 +150,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleGeminiModels(w, r)
 	case r.Method == http.MethodPost && strings.HasPrefix(path, "/v1beta/models/"):
 		if !s.authorizedGemini(w, r) {
+			return
+		}
+		if !s.rateLimitOK(w, r) {
 			return
 		}
 		s.serveLogged(w, r, s.handleGeminiGenerate)

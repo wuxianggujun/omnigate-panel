@@ -29,6 +29,16 @@
     "chat_cleanup_interval_hours": 6,
     "chat_cleanup_skip_pinned": true
   },
+  "rate_limit": {
+    "enabled": false,
+    "window": 60,
+    "max": 10,
+    "trust_proxy": false
+  },
+  "fallback": {
+    "enabled": false,
+    "models": []
+  },
   "providers": [
     {
       "name": "raccoon",

@@ -4280,6 +4280,15 @@ async function loadOmniConfig() {
     if ($('crWindow')) $('crWindow').value = cr.expiring_soon || '';
     if ($('crMin')) $('crMin').value = (cr.min_expiring != null && cr.min_expiring !== '') ? cr.min_expiring : '';
     if ($('crRefresh')) $('crRefresh').value = cr.refresh_interval || '';
+    // 第三方兜底 + 按 IP 限流（缺省都关闭）。
+    const fb = (omniCfg.fallback && typeof omniCfg.fallback === 'object') ? omniCfg.fallback : {};
+    if ($('cfFbEnabled')) $('cfFbEnabled').checked = !!fb.enabled;
+    if ($('cfFbModels')) $('cfFbModels').value = Array.isArray(fb.models) ? fb.models.join(', ') : '';
+    const rl = (omniCfg.rate_limit && typeof omniCfg.rate_limit === 'object') ? omniCfg.rate_limit : {};
+    if ($('cfRlEnabled')) $('cfRlEnabled').checked = !!rl.enabled;
+    if ($('cfRlTrust')) $('cfRlTrust').checked = !!rl.trust_proxy;
+    if ($('cfRlWindow')) $('cfRlWindow').value = (rl.window != null && rl.window !== '') ? rl.window : '';
+    if ($('cfRlMax')) $('cfRlMax').value = (rl.max != null && rl.max !== '') ? rl.max : '';
     renderProvEditor();
     renderKeyEditor();
     renderFingerprint();
@@ -5027,10 +5036,41 @@ function collectCreditRouting() {
   if (Object.keys(cr).length) omniCfg.credit_routing = cr;
 }
 
+// collectReliability 从表单读回「第三方兜底 + 按 IP 限流」设置（写进
+// omniCfg.fallback / omniCfg.rate_limit）。留空 = 删除该字段（回落后端默认值）。
+function collectReliability() {
+  if (!omniCfg) return;
+  const fb = (omniCfg.fallback && typeof omniCfg.fallback === 'object') ? omniCfg.fallback : {};
+  const fbEn = $('cfFbEnabled');
+  if (fbEn) fb.enabled = !!fbEn.checked;
+  const fbModels = $('cfFbModels');
+  if (fbModels) {
+    const list = fbModels.value.split(',').map(s => s.trim()).filter(Boolean);
+    if (list.length) fb.models = list; else delete fb.models;
+  }
+  omniCfg.fallback = fb;
+
+  const rl = (omniCfg.rate_limit && typeof omniCfg.rate_limit === 'object') ? omniCfg.rate_limit : {};
+  const rlEn = $('cfRlEnabled');
+  if (rlEn) rl.enabled = !!rlEn.checked;
+  const rlTrust = $('cfRlTrust');
+  if (rlTrust) rl.trust_proxy = !!rlTrust.checked;
+  const numField = (id, key) => {
+    const el = $(id);
+    if (!el) return;
+    const v = el.value.trim();
+    if (v) rl[key] = Number(v) || 0; else delete rl[key];
+  };
+  numField('cfRlWindow', 'window');
+  numField('cfRlMax', 'max');
+  omniCfg.rate_limit = rl;
+}
+
 async function saveOmniConfig(msgId) {
   const mid = msgId || 'cfgMsg';
   if (!omniCfg) { ogMsg(mid, '配置尚未加载', 'err'); return; }
   collectCreditRouting();
+  collectReliability();
   const body = normalizeOmniForSave(omniCfg);
   body.default_provider = $('cfgDefaultProvider').value;
   body.default_model = $('cfgDefaultModel').value.trim();
@@ -5827,6 +5867,8 @@ async function saveOutbound() {
   // 网关密钥卡（按供应商收窄的客户端密钥）
   on('btnAddKey', addKey);
   on('btnSaveCfgKeys', () => saveOmniConfig('keyMsg'));
+  // 可靠性与限流（第三方兜底 + 按 IP 限流）
+  on('btnSaveCfgReliability', () => saveOmniConfig('rlfMsg'));
   // 反检测指纹（Gemini Web 的 TLS / 请求头伪装）
   on('btnFpReload', loadFingerprintStatus);
   on('btnFpApply', fpApplyTarget);

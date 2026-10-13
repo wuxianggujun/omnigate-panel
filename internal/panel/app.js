@@ -4815,6 +4815,12 @@ function provCard(p, i) {
       '<label>device_header<input data-i="' + i + '" data-f="device_header" value="' + esc(p.device_header || '') + '" placeholder="留空 = 默认"></label>' : '';
   const geminiField = type === 'geminiweb' ? '' +
       '<div class="og-hint og-full" style="margin-top:2px">Gemini Web 不需要 base_url / api_key：账号凭证是 <code>gemini.google.com</code> 的 Google Cookie。保存本供应商后，去「账号池 → 添加账号 → 选它 → 粘贴 Cookie」。models 留空 = 用内置的 <code>gemini-pro / gemini-flash / gemini-flash-thinking / gemini-flash-lite</code>。</div>' : '';
+  const sysField = '' +
+      '<label class="og-full">system_prompt（供应商级系统提示词，留空 = 不注入）' +
+      '<textarea data-i="' + i + '" data-f="system_prompt" rows="3" placeholder="给这个上游的每个请求前置一段系统提示词">' + esc(p.system_prompt || '') + '</textarea></label>';
+  const keysField = '' +
+      '<label class="og-full">api_keys（上游密钥池：一行一个；多把按请求轮询，401/403/429 自动冷却换下一把）' +
+      '<textarea data-i="' + i + '" data-f="api_keys" rows="3" placeholder="留空 = 用上面的 api_key；一行一个上游密钥">' + esc((Array.isArray(p.api_keys) ? p.api_keys : []).join('\n')) + '</textarea></label>';
   return '<div class="og-card">' +
     '<div class="og-row" style="justify-content:space-between">' +
       '<div class="og-t">供应商 #' + (i + 1) + ' <span class="tag mute">' + esc(type) + '</span></div>' +
@@ -4825,8 +4831,10 @@ function provCard(p, i) {
       '<label>类型<select data-i="' + i + '" data-f="type">' + typeOpts + '</select></label>' +
       '<label class="og-full">base_url<input data-i="' + i + '" data-f="base_url" value="' + esc(p.base_url || '') + '" placeholder="https://api.example.com/v1"></label>' +
       '<label class="og-full">api_key<input data-i="' + i + '" data-f="api_key" value="' + esc(p.api_key || '') + '" placeholder="上游密钥（openai 类用）；已脱敏，不改 = 保持原值"></label>' +
+      keysField +
       deviceField + raccoonFields + traeFields + geminiField +
       '<label class="og-full">models（逗号或换行分隔，留空 = 自动发现）<textarea data-i="' + i + '" data-f="models" rows="2">' + esc(omniModelsText(p)) + '</textarea></label>' +
+      sysField +
     '</div>' +
     '<div class="og-sep"></div>' +
     '<div class="og-row" style="justify-content:space-between">' +
@@ -4854,6 +4862,12 @@ function onProvInput(ev) {
   const p = omniCfg.providers[+el.dataset.i];
   if (!p) return;
   if (el.dataset.f === 'type') { p.type = el.value; renderProvEditor(); return; }
+  if (el.dataset.f === 'api_keys') {
+    // 一行一个；空行丢弃。掩码行（未改动的旧 key）原样留下，服务端保存时按
+    // 「掩码 = 未改动」还原成真 key。
+    p.api_keys = el.value.split('\n').map(s => s.trim()).filter(Boolean);
+    return;
+  }
   p[el.dataset.f] = el.value;
 }
 

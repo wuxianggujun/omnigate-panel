@@ -108,6 +108,20 @@ func maskSecrets(v any, skipTop ...string) any {
 	return maskWalk(v, skip, true)
 }
 
+// maskStringList 逐个遮盖裸串列表里的凭证（供应商的上游密钥池 api_keys）。
+// 非字符串元素（理论上不会有）原样保留。
+func maskStringList(arr []any) []any {
+	out := make([]any, len(arr))
+	for i, e := range arr {
+		if s, ok := e.(string); ok && s != "" && !isMasked(s) {
+			out[i] = maskSecret(s)
+			continue
+		}
+		out[i] = e
+	}
+	return out
+}
+
 // maskGatewayKeys 额外抹掉顶层网关密钥 api_key / api_keys（返回同一份 map 的副本）。
 // 已登录的管理员要靠顶层 api_key 调 /omni/*，所以脱敏层默认跳过它；但**匿名只读**
 // 访问者绝不能拿到可用密钥，故匿名分支在读完之后再调一次本函数。
@@ -166,6 +180,15 @@ func maskWalk(v any, skipTop map[string]bool, top bool) any {
 				}
 				if urlKey(k) {
 					out[k] = maskURLUserinfo(s)
+					continue
+				}
+			}
+			// 供应商级「上游密钥池」：字段名 api_keys 的元素是裸串，secretKey
+			// 只认单数 api_key，需显式遮盖。顶层的同名键是**网关自己的**密钥
+			//（刻意不脱敏），所以只在非顶层生效。
+			if !top && strings.EqualFold(strings.TrimSpace(k), "api_keys") {
+				if arr, ok := val.([]any); ok {
+					out[k] = maskStringList(arr)
 					continue
 				}
 			}

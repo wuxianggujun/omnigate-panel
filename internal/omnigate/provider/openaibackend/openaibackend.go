@@ -240,7 +240,9 @@ func (p *Provider) ListModels(ctx context.Context) ([]openai.Model, error) {
 	return out, nil
 }
 
-// StreamChat sends a streaming chat completion and normalizes the SSE.
+// StreamChat sends a streaming chat completion and normalizes the SSE. When an
+// upstream key pool is configured it rotates on auth/rate failures, so one dead
+// or throttled key doesn't take the whole provider down.
 func (p *Provider) StreamChat(ctx context.Context, acc *provider.Account, in provider.ChatInput) (provider.Stream, error) {
 	body := map[string]any{
 		"model":    in.Model,
@@ -255,21 +257,43 @@ func (p *Provider) StreamChat(ctx context.Context, acc *provider.Account, in pro
 	}
 	provider.ApplySampling(body, in)
 	raw, _ := json.Marshal(body)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/chat/completions", bytes.NewReader(raw))
-	if err != nil {
-		return nil, err
+
+	tried := map[string]bool{}
+	var lastErr error
+	for {
+		key, ok := p.pick(tried)
+		if !ok {
+			if lastErr != nil {
+				return nil, lastErr
+			}
+			return nil, fmt.Errorf("no upstream api key available")
+		}
+		tried[key] = true
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/chat/completions", bytes.NewReader(raw))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "text/event-stream")
+		p.auth(req, key)
+		resp, err := p.http.Do(req)
+		if err != nil {
+			// 网络层错误与 key 无关：不轮换，否则一次网络抖动会把整池 key 冷却掉。
+			return nil, err
+		}
+		if resp.StatusCode >= 400 {
+			b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+			resp.Body.Close()
+			lastErr = fmt.Errorf("upstream HTTP %d: %s", resp.StatusCode, string(b))
+			// 只有「这把 key 的问题」才换 key 重试：401/403（失效/无权限）、
+			// 429（限流）。单 key 或其余错误码直接上报，行为与从前一致。
+			if d := keyCooldownFor(resp.StatusCode); d > 0 && len(p.candidates()) > 1 {
+				p.markBad(key, d)
+				continue
+			}
+			return nil, lastErr
+		}
+		p.markGood(key)
+		return provider.NewOpenAIStream(resp.Body), nil
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "text/event-stream")
-	p.auth(req)
-	resp, err := p.http.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode >= 400 {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		resp.Body.Close()
-		return nil, fmt.Errorf("upstream HTTP %d: %s", resp.StatusCode, string(b))
-	}
-	return provider.NewOpenAIStream(resp.Body), nil
 }

@@ -306,6 +306,13 @@ func New(cfg *config.Config, st *state.State, log *logx.Logger, opts ...Option) 
 		default:
 			return nil, fmt.Errorf("provider %q: unknown type %q", p.Name, p.Type)
 		}
+		// 上游密钥池（多密钥轮询）：provider.api_keys 非空时启用（只对支持
+		// SetAPIKeys 的后端生效，当前是 openai 类上游）。
+		if len(p.APIKeys) > 0 {
+			if ks, ok := prov.(interface{ SetAPIKeys([]string) }); ok {
+				ks.SetAPIKeys(p.APIKeys)
+			}
+		}
 		// Per-provider outbound proxy (panel config outbound.routes). A proxy
 		// pool takes precedence over a single proxy when both resolve.
 		if g.poolFor != nil {
@@ -1017,6 +1024,7 @@ func (g *Gateway) buildInput(prov provider.Provider, model string, req *openai.C
 			Mode:            g.cfg.Mode,
 		}
 		in.Attachments = collectAttachments(prov, req.Messages)
+		g.applySystemPrompt(&in, prov)
 		return in
 	}
 
@@ -1055,7 +1063,36 @@ func (g *Gateway) buildInput(prov provider.Provider, model string, req *openai.C
 	} else {
 		in.Messages = req.Messages
 	}
+	// 供应商级系统提示词（provider.system_prompt）：在分支之后统一注入，覆盖
+	// runable / geminiweb 的 prompt 形态与其余消息形态。
+	g.applySystemPrompt(&in, prov)
 	return in
+}
+
+// applySystemPrompt 注入供应商级系统提示词（provider.system_prompt）。
+//   - 消息型上游（openai/newapi/raccoon/trae）：在 messages 头部插一条 system 消息；
+//   - 单条 prompt 型上游（runable/geminiweb）：拼到 prompt 开头；
+//   - 留空则完全不动（保持上游原样）。
+//
+// 只加不改：客户端自带的 system 消息保留在后（上游自行决定如何合并），避免我们把
+// 用户显式写的系统提示悄悄顶掉。
+func (g *Gateway) applySystemPrompt(in *provider.ChatInput, prov provider.Provider) {
+	if in == nil || prov == nil {
+		return
+	}
+	cfg := g.cfg.Provider(prov.Name())
+	if cfg == nil {
+		return
+	}
+	sys := strings.TrimSpace(cfg.SystemPrompt)
+	if sys == "" {
+		return
+	}
+	if in.Prompt != "" {
+		in.Prompt = sys + "\n\n" + in.Prompt
+		return
+	}
+	in.Messages = append([]openai.Message{{Role: "system", Content: openai.Content{Text: sys}}}, in.Messages...)
 }
 
 // collectAttachments gathers the non-text parts of every message, for providers

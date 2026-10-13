@@ -697,6 +697,15 @@ func (g *Gateway) route(model string) (string, string) {
 	if g.modelMap != nil {
 		model = g.modelMap.Resolve(model)
 	}
+	return g.routeResolved(model)
+}
+
+// routeResolved splits an already-resolved model into (provider, upstream model)
+// WITHOUT consulting the alias table. Chain targets (modelChainFallbacks) go
+// through here on purpose: a fallback target that happens to share a name with
+// an alias must stay literal, otherwise it would resolve back to the primary and
+// the fallback would silently do nothing.
+func (g *Gateway) routeResolved(model string) (string, string) {
 	if model == "" {
 		return g.cfg.DefaultProvider, g.cfg.DefaultModel
 	}
@@ -709,11 +718,14 @@ func (g *Gateway) route(model string) (string, string) {
 }
 
 // modelChainFallbacks returns the ordered fallback candidates declared by a
-// model alias chain: every target after the primary, resolved the same way
-// route() resolves the primary. A request whose model has a chain tries the
-// primary first and, on failure / exhausted credits, walks this list (see
-// tryFallback). Returns nil when the model is unmapped, maps to a single target,
-// or the gateway has no alias store.
+// model alias chain: every target after the primary. A request whose model has a
+// chain tries the primary first and, on failure / exhausted credits, walks this
+// list (see tryFallback). Returns nil when the model is unmapped, maps to a
+// single target, or the gateway has no alias store.
+//
+// Chain targets are split with routeResolved (no alias re-resolution): they are
+// explicit "provider/model" ids and must not be bounced back through the alias
+// table.
 func (g *Gateway) modelChainFallbacks(model string) []fallbackCandidate {
 	if g.modelMap == nil {
 		return nil
@@ -726,7 +738,7 @@ func (g *Gateway) modelChainFallbacks(model string) []fallbackCandidate {
 	out := make([]fallbackCandidate, 0, len(chain)-1)
 	seen := map[string]bool{}
 	for _, target := range chain[1:] {
-		pn, m := g.route(target)
+		pn, m := g.routeResolved(target)
 		if pn == "" || m == "" || (pn == primProv && m == primModel) {
 			continue
 		}

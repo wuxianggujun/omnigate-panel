@@ -204,6 +204,24 @@ func TestModelChainFallbackTriesNextTarget(t *testing.T) {
 	}
 }
 
+// TestModelChainFallbackTargetIsNotAliasResolved 钉住：链上回退目标即使与某个别名同名，
+// 也必须按字面 "provider/model" 解析，不能被别名表二次解析（否则回退会静默失效）。
+func TestModelChainFallbackTargetIsNotAliasResolved(t *testing.T) {
+	g := testGateway(&scriptProvider{})
+	g.modelMap = NewModelMappingStore(filepath.Join(t.TempDir(), "m.json"))
+	if err := g.modelMap.SetTargets("A", []string{"fake/primary", "fake/backup"}); err != nil {
+		t.Fatal(err)
+	}
+	// 人为构造一个与回退目标同名的别名：若被二次解析，会变成 fake/elsewhere。
+	if err := g.modelMap.Set("fake/backup", "fake/elsewhere"); err != nil {
+		t.Fatal(err)
+	}
+	fb := g.modelChainFallbacks("A")
+	if len(fb) != 1 || fb[0].Provider != "fake" || fb[0].Model != "backup" {
+		t.Fatalf("chain fallback = %+v, want fake/backup (literal, not alias-resolved)", fb)
+	}
+}
+
 func TestListModelsExposesAliasInScope(t *testing.T) {
 	g := testGateway(&scriptProvider{})
 	g.modelMap = NewModelMappingStore(filepath.Join(t.TempDir(), "m.json"))

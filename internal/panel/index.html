@@ -779,17 +779,17 @@
           <button class="xs" id="btnMmReload">刷新</button>
         </header>
         <div class="pad">
-          <div class="og-hint" style="margin-top:0">客户端仍用<strong>别名</strong>调用（别名会出现在 <code>/v1/models</code> 里），网关在路由前把它解析成<strong>目标模型</strong>再转发。目标可写全限定名（<code>provider/model</code>）或裸模型名（回落到默认 provider）。别名不能等于目标；改完即热生效，落盘 <code>data/model-mapping.json</code>。</div>
+          <div class="og-hint" style="margin-top:0">客户端仍用<strong>别名</strong>调用（别名会出现在 <code>/v1/models</code> 里），网关在路由前把它解析成<strong>目标模型</strong>再转发。目标可写全限定名（<code>provider/model</code>）或裸模型名（回落到默认 provider）。<br><strong>可写多行做「引流链」</strong>：第一行是主目标，后面每行是回退——主目标供应商无可用账号 / 额度耗尽 / 请求失败时，自动按顺序试下一行（例如把小浣熊放第一行烧快过期积分，runable 放第二行兜底）。别名不能等于目标；改完即热生效，落盘 <code>data/model-mapping.json</code>。</div>
           <div class="state" id="mmState"></div>
           <div class="tbl-wrap">
             <table class="acc md" id="mmTable">
-              <thead><tr><th>别名（客户端调用）</th><th>目标模型</th><th class="c-acts"></th></tr></thead>
+              <thead><tr><th>别名（客户端调用）</th><th>目标模型（首个优先，可多行回退）</th><th class="c-acts"></th></tr></thead>
               <tbody id="mmBody"></tbody>
             </table>
           </div>
           <div class="og-row" style="margin-top:10px">
             <label class="fld" style="margin:0;max-width:240px"><span class="lb">别名</span><input id="mmAlias" placeholder="如 gpt-4o"></label>
-            <label class="fld" style="margin:0;max-width:300px"><span class="lb">目标模型</span><input id="mmTarget" placeholder="如 geminiweb/gemini-pro"></label>
+            <label class="fld" style="margin:0;max-width:300px"><span class="lb">目标模型</span><textarea id="mmTarget" rows="2" spellcheck="false" placeholder="raccoon/sn-deepseek-v4-1-flash&#10;runable/deepseek/deepseek-v4.1-flash"></textarea></label>
             <button class="xs primary" id="btnMmAdd">添加 / 更新</button>
             <span class="og-msg" id="mmMsg"></span>
           </div>

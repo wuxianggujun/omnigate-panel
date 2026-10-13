@@ -4462,11 +4462,15 @@ async function loadModelMappings() {
       tb.innerHTML = '<tr><td colspan="3"><div class="empty">还没有配置任何模型名映射</div></td></tr>';
       return;
     }
-    tb.innerHTML = keys.map(k => '<tr>' +
-      '<td class="id">' + esc(k) + '</td>' +
-      '<td>' + esc(m[k]) + '</td>' +
-      '<td class="c-acts"><button class="xs ghost danger" data-mmdel="' + esc(k) + '">删除</button></td>' +
-      '</tr>').join('');
+    tb.innerHTML = keys.map(k => {
+      const chain = Array.isArray(m[k]) ? m[k] : [m[k]];
+      const cell = chain.map((t, i) => (i === 0 ? '<strong>' + esc(t) + '</strong>' : '↳ ' + esc(t))).join('<br>');
+      return '<tr>' +
+        '<td class="id">' + esc(k) + '</td>' +
+        '<td>' + cell + '</td>' +
+        '<td class="c-acts"><button class="xs ghost danger" data-mmdel="' + esc(k) + '">删除</button></td>' +
+        '</tr>';
+    }).join('');
   } catch (e) {
     if (st) { st.className = 'state err'; st.innerHTML = esc(e.message); }
   }
@@ -4474,11 +4478,13 @@ async function loadModelMappings() {
 
 async function mmAdd() {
   const alias = (($('mmAlias') && $('mmAlias').value) || '').trim();
-  const target = (($('mmTarget') && $('mmTarget').value) || '').trim();
-  if (!alias || !target) { ogMsg('mmMsg', '别名与目标模型都要填', 'err'); return; }
+  const raw = (($('mmTarget') && $('mmTarget').value) || '');
+  // 多行 = 引流链：第一行主目标，其余为回退（也可用逗号分隔）。
+  const targets = raw.split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
+  if (!alias || !targets.length) { ogMsg('mmMsg', '别名与目标模型都要填', 'err'); return; }
   try {
-    await apiAbs('/omni/model-mapping', { method: 'POST', body: JSON.stringify({ alias, target }) });
-    ogMsg('mmMsg', '已保存「' + alias + '」→「' + target + '」', 'ok');
+    await apiAbs('/omni/model-mapping', { method: 'POST', body: JSON.stringify({ alias, targets }) });
+    ogMsg('mmMsg', '已保存「' + alias + '」→「' + targets.join(' → ') + '」', 'ok');
     if ($('mmAlias')) $('mmAlias').value = '';
     if ($('mmTarget')) $('mmTarget').value = '';
     loadModelMappings();

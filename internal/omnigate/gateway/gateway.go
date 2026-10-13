@@ -708,6 +708,38 @@ func (g *Gateway) route(model string) (string, string) {
 	return g.cfg.DefaultProvider, model
 }
 
+// modelChainFallbacks returns the ordered fallback candidates declared by a
+// model alias chain: every target after the primary, resolved the same way
+// route() resolves the primary. A request whose model has a chain tries the
+// primary first and, on failure / exhausted credits, walks this list (see
+// tryFallback). Returns nil when the model is unmapped, maps to a single target,
+// or the gateway has no alias store.
+func (g *Gateway) modelChainFallbacks(model string) []fallbackCandidate {
+	if g.modelMap == nil {
+		return nil
+	}
+	chain := g.modelMap.Chain(model)
+	if len(chain) <= 1 {
+		return nil
+	}
+	primProv, primModel := g.route(model)
+	out := make([]fallbackCandidate, 0, len(chain)-1)
+	seen := map[string]bool{}
+	for _, target := range chain[1:] {
+		pn, m := g.route(target)
+		if pn == "" || m == "" || (pn == primProv && m == primModel) {
+			continue
+		}
+		q := pn + "/" + m
+		if seen[q] {
+			continue
+		}
+		seen[q] = true
+		out = append(out, fallbackCandidate{Provider: pn, Model: m})
+	}
+	return out
+}
+
 // resolveModel maps a short name to a full upstream model id.
 func (g *Gateway) resolveModel(ctx context.Context, providerName, model string) string {
 	if model == "" {
@@ -739,6 +771,8 @@ func (g *Gateway) HandleChat(ctx context.Context, req *openai.ChatRequest, w htt
 		return
 	}
 	provName, model := g.route(req.Model)
+	// 模型别名引流链：主目标失败/额度耗尽时的有序回退候选（见 modelChainFallbacks）。
+	chainFB := g.modelChainFallbacks(req.Model)
 	prov := g.providers[provName]
 	if prov == nil {
 		writeJSON(w, 400, openai.ErrorJSON("unknown_provider", "未知 provider: "+provName))
@@ -851,7 +885,7 @@ func (g *Gateway) HandleChat(ctx context.Context, req *openai.ChatRequest, w htt
 		ticker.Stop()
 		// 失败或零正文、且还没流出任何正文 → 第三方兜底（把兜底结果转成 SSE 发出）。
 		if (err != nil || !resultHasOutput(res)) && !contentEmitted {
-			if fb := g.tryFallback(ctx, req, provName, upstreamModel, hasTools); fb != nil {
+			if fb := g.tryFallback(ctx, req, provName, upstreamModel, hasTools, chainFB); fb != nil {
 				if fb.text != "" {
 					_ = openai.EmitContent(ew, id, displayModel, created, fb.text)
 				}
@@ -934,7 +968,7 @@ func (g *Gateway) HandleChat(ctx context.Context, req *openai.ChatRequest, w htt
 	res, err := g.runChat(ctx, provName, prov, in, hasTools, nil, nil)
 	// 失败或空回复 → 第三方兜底（与参考实现 is_empty_result / 异常路径同口径）。
 	if err != nil || !resultHasOutput(res) {
-		if fb := g.tryFallback(ctx, req, provName, upstreamModel, hasTools); fb != nil {
+		if fb := g.tryFallback(ctx, req, provName, upstreamModel, hasTools, chainFB); fb != nil {
 			res, err = fb, nil
 		}
 	}

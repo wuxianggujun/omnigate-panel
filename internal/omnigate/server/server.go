@@ -893,14 +893,19 @@ func (s *Server) handleModelMapping(w http.ResponseWriter, r *http.Request) {
 		s.writeValue(w, 200, map[string]any{"mappings": s.gw.ModelMappings().All()})
 	case http.MethodPost:
 		var req struct {
-			Alias  string `json:"alias"`
-			Target string `json:"target"`
+			Alias   string   `json:"alias"`
+			Target  string   `json:"target"`
+			Targets []string `json:"targets"`
 		}
 		if err := decodeBody(r, &req); err != nil {
 			s.adminError(w, err)
 			return
 		}
-		if err := s.gw.SetModelMapping(req.Alias, req.Target); err != nil {
+		targets := req.Targets
+		if len(targets) == 0 && strings.TrimSpace(req.Target) != "" {
+			targets = []string{req.Target}
+		}
+		if err := s.gw.SetModelMappingTargets(req.Alias, targets); err != nil {
 			s.adminError(w, err)
 			return
 		}

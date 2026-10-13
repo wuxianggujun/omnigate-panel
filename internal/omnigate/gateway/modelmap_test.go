@@ -2,6 +2,8 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -60,6 +62,90 @@ func TestRouteAppliesModelMapping(t *testing.T) {
 	}
 	if pn, m := g.route("quick"); pn != "fake" || m != "m" {
 		t.Fatalf("route(quick) = (%q,%q)", pn, m)
+	}
+}
+
+// TestModelMappingChainRoundTrip 覆盖「别名 → 目标链」（引流链）：Resolve 取首个
+// 目标，Chain 返回完整链；写入时去空/去重/去自指；多目标可持久化。
+func TestModelMappingChainRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "model-mapping.json")
+	s := NewModelMappingStore(path)
+
+	if err := s.SetTargets("ds", []string{"raccoon/sn-deepseek-v4-1-flash", "runable/deepseek/deepseek-v4.1-flash"}); err != nil {
+		t.Fatalf("SetTargets: %v", err)
+	}
+	if got := s.Resolve("ds"); got != "raccoon/sn-deepseek-v4-1-flash" {
+		t.Fatalf("Resolve = %q", got)
+	}
+	chain := s.Chain("ds")
+	if len(chain) != 2 || chain[1] != "runable/deepseek/deepseek-v4.1-flash" {
+		t.Fatalf("Chain = %+v", chain)
+	}
+	// 去空 / 去重 / 去自指，保持顺序。
+	if err := s.SetTargets("x", []string{"", "a", "a", "x", "b"}); err != nil {
+		t.Fatalf("SetTargets: %v", err)
+	}
+	if got := s.Chain("x"); len(got) != 2 || got[0] != "a" || got[1] != "b" {
+		t.Fatalf("cleaned chain = %+v", got)
+	}
+	if err := s.SetTargets("x", []string{"x"}); err == nil {
+		t.Fatal("alias == target must be rejected")
+	}
+	if err := s.SetTargets("", []string{"a"}); err == nil {
+		t.Fatal("empty alias must be rejected")
+	}
+	// 多目标持久化。
+	if got := NewModelMappingStore(path).Chain("ds"); len(got) != 2 {
+		t.Fatalf("persisted chain = %+v", got)
+	}
+}
+
+// TestModelMappingJSONBackCompat 钉住落盘/接口形状：单目标是裸字符串（与旧格式
+// 字节级兼容），多目标才是数组；两种写法都要能读回。
+func TestModelMappingJSONBackCompat(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "model-mapping.json")
+	if err := os.WriteFile(path, []byte(`{"one":"fake/m","two":["fake/a","fake/b"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := NewModelMappingStore(path)
+	if got := s.Resolve("one"); got != "fake/m" {
+		t.Fatalf("string-form Resolve = %q", got)
+	}
+	if got := s.Chain("two"); len(got) != 2 || got[0] != "fake/a" {
+		t.Fatalf("array-form Chain = %+v", got)
+	}
+	raw, err := json.Marshal(s.All()["one"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != `"fake/m"` {
+		t.Fatalf("single target marshals as %s, want a bare string", raw)
+	}
+}
+
+// TestModelChainFallbacks 覆盖引流链在路由层的展开：主目标之后的目标被解析成
+// (provider, model) 回退候选；单目标 / 未映射没有回退。
+func TestModelChainFallbacks(t *testing.T) {
+	g := testGateway(&scriptProvider{})
+	g.modelMap = NewModelMappingStore(filepath.Join(t.TempDir(), "m.json"))
+	if err := g.modelMap.SetTargets("ds", []string{"fake/primary", "fake/backup"}); err != nil {
+		t.Fatal(err)
+	}
+	if pn, m := g.route("ds"); pn != "fake" || m != "primary" {
+		t.Fatalf("route(ds) = (%q,%q), want (fake,primary)", pn, m)
+	}
+	fb := g.modelChainFallbacks("ds")
+	if len(fb) != 1 || fb[0].Provider != "fake" || fb[0].Model != "backup" {
+		t.Fatalf("chain fallbacks = %+v", fb)
+	}
+	if err := g.modelMap.Set("one", "fake/only"); err != nil {
+		t.Fatal(err)
+	}
+	if fb := g.modelChainFallbacks("one"); fb != nil {
+		t.Fatalf("single-target should have no chain fallback: %+v", fb)
+	}
+	if fb := g.modelChainFallbacks("nope"); fb != nil {
+		t.Fatalf("unmapped should have no chain fallback: %+v", fb)
 	}
 }
 

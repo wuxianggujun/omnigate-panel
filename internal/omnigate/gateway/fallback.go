@@ -112,10 +112,33 @@ func resultHasOutput(res *chatResult) bool {
 }
 
 // tryFallback runs the fallback chain for a failed/empty primary request and
-// returns the winning result, or nil when fallback is off or every candidate
-// failed or produced nothing ("one fails → try another").
-func (g *Gateway) tryFallback(ctx context.Context, req *openai.ChatRequest, primaryProvider, primaryModel string, hasTools bool) *chatResult {
-	candidates := g.fallbackCandidates(ctx, primaryProvider, primaryModel)
+// returns the winning result, or nil when every candidate failed or produced
+// nothing ("one fails → try another").
+//
+// chain holds the explicit candidates declared by a model alias chain (见
+// modelmap.go / modelChainFallbacks): they are tried FIRST and in order, so an
+// operator can drain an expiring account (prefer raccoon → fall back to
+// runable) without turning on the generic third-party fallback. The generic
+// cfg.Fallback candidates are appended afterwards and only when enabled.
+func (g *Gateway) tryFallback(ctx context.Context, req *openai.ChatRequest, primaryProvider, primaryModel string, hasTools bool, chain []fallbackCandidate) *chatResult {
+	candidates := make([]fallbackCandidate, 0, len(chain)+4)
+	seen := make(map[string]bool, len(chain)+4)
+	for _, c := range chain {
+		if c.Provider == "" || c.Model == "" || seen[c.qualified()] {
+			continue
+		}
+		seen[c.qualified()] = true
+		candidates = append(candidates, c)
+	}
+	if g.cfg.Fallback.On() {
+		for _, c := range g.fallbackCandidates(ctx, primaryProvider, primaryModel) {
+			if seen[c.qualified()] {
+				continue
+			}
+			seen[c.qualified()] = true
+			candidates = append(candidates, c)
+		}
+	}
 	if len(candidates) == 0 {
 		return nil
 	}

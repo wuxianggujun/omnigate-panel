@@ -1,6 +1,6 @@
 'use strict';
 /* ── 状态 ─────────────────────────────────────────────────────────── */
-const LS_KEY = 'wb2api.key', LS_THEME = 'wb2api.theme';
+const LS_KEY = 'wb2api.key', LS_THEME = 'wb2api.theme', LS_REQ_SPLIT = 'wb2api.reqSplit';
 /* 面板登录态（GET /panel/api/session）：{authenticated, configured, mode, username, role}。
    mode：session（账号登录）/ legacy（未配置账号时的 api_key 门）/ open（都未启用）。 */
 let authState = { authenticated: false, configured: false, mode: '', username: '', role: '', allowRegistration: false };
@@ -21,6 +21,14 @@ let mdAll = [], mdProbes = {}, mdProbeOf = () => undefined;
 let omAll = [];
 let reqFilter = { q: '', outcome: '', provider: '' };
 let reqEntries = [];
+/* reqSplitView：请求记录是否把「OmniGate 转发层」单独列出来。
+ * 默认 false（合并）：同一调用在两层各记一条，转发层那条的账号在后端被写死成
+ * "api-key"（OmniGate 把 WB 当 openai 供应商，眼里没有账号池），用户看到只会
+ * 困惑「为什么不轮账号」——而真实账号就在紧邻的下一行。合并后一行一调用，
+ * 账号列是真实账号、来源列是真实客户端 IP，和网关直连时看到的一样。
+ * 勾上checkbox = 想看两层分别记了什么（排障回环失败时有用），就用原始数组。 */
+let reqSplitView = false;
+try { reqSplitView = localStorage.getItem(LS_REQ_SPLIT) === '1'; } catch (e) { /* 隐私模式 */ }
 let usDim = 'account', usCreditDim = 'account', usSort = 'total';
 let usageData = null;
 let reqRangeState = null; // 请求记录的时间范围（用量页的见 trangeState）
@@ -1765,6 +1773,125 @@ if (rrSearchEl) {
 const btnRr = $('btnRrSave');
 if (btnRr) btnRr.onclick = saveRealmRouting;
 
+/* ── 请求记录的「OmniGate 转发层」折叠 ───────────────────────────────────
+ *
+ * 背景：客户端 → OmniGate → WB 网关 → 30 号池，两层各记一条，于是同一次调用在
+ * 请求记录里出现两行：
+ *    19:34:44.951  /omni/v1/...  account=api-key     src=183.218.209.26  ← 转发层
+ *    19:34:44.952  /v1/...       account=ㅤ.(77f1a8c0) src=127.0.0.1      ← 真实账号
+ * 上面那行的 account 在后端被写死成 "api-key"（gateway.go:1541）：OmniGate 把
+ * WB 当 type=openai 供应商，眼里没有账号池，转发时也不知道 WB 挑了哪个号。
+ * 用户看到这行只会困惑「为什么不是账号轮询」——而真实账号就在紧挨着的下一行。
+ *
+ * 这里把两行合并成一行显示：
+ *   account  = WB 行的真实账号（转发层本来就是 "api-key"，没有信息量）
+ *   client_ip = OmniGate 行的真实客户端 IP（转发层记的是 127.0.0.1 回环）
+ *   credit   = WB 行的实际消耗（转发层 credit_known=false，只有模型价）
+ *   来源列   = 真实 UA / 真实 IP；转发层的 UA（Go-http-client）一并隐去
+ * 标题 tooltip 保留两行原文，想核对明细随时能看到。
+ *
+ * 配对依据必须是**回环地址**而不是时间戳：转发层与 WB 行的 client_ip 差在于是
+ * 不是 127.0.0.1，这个标记稳定；时间戳同毫秒或乱序都可能出现，拿它配对会把
+ * 不相干的两行粘到一起。
+ */
+
+// 回环地址：OmniGate 与 WB 网关同进程同容器，回环转发时 WB 侧记的正是这类来源。
+// 只认 127.0.0.0/8、::1、localhost。**不**把 172.16~31.x 算进来：那是 docker
+// bridge 网段，容器「对外」的调用（如容器内别的服务、反向代理后面的节点）也落在这
+// 段，误判成回环会把真实客户端的来源搞错（实测 172.18.0.11 正是 WB 视角的外部调用）。
+function isLoopbackIP(ip) {
+  const s = String(ip || '').trim();
+  if (!s) return false;
+  if (s === '127.0.0.1' || s === '::1' || s === 'localhost') return true;
+  if (/^127\./.test(s)) return true;
+  return false;
+}
+
+// 是 OmniGate 转发层记录吗：/omni/* 路径 + 账号被写死成 api-key 的上游。
+// 两个条件都判：只有 /omni/ 前缀会把「WB 网关自己的 /omni 路径」误判成转发层
+// （网关自己不挂 /omni 路由，但判严一点不亏）。
+function isOmniForwardRow(e) {
+  if (!e) return false;
+  const path = String(e.path || '');
+  if (path.indexOf('/omni/') !== 0) return false;
+  return String(e.account || '') === 'api-key';
+}
+
+/* mergeRequestRows 把转发层折叠进紧邻的 WB 行，返回展示用数组。
+ *
+ * 只折叠「转发层 → WB 行」这一种成对形态：
+ *   · 转发层存在但没有配对的 WB 行（上游还没回、或 WB 侧没记）：保留转发层本身，
+ *     并标上 unmatched，不能把它和不相干的行硬凑——那会让账号列显示另一个调用的号。
+ *   · WB 行没有前置转发层（客户端直连 WB，以前的老用法）：原样保留。
+ *   · 多条 WB 行连在同一转发层后（一次 OmniGate 调用内部重试/回退到多家上游）：
+ *     只把第一条与转发层合并，其余保持 WB 行原样（它们各有自己的账号与积分）。
+ *
+ * 顺序：入参按时间升序。转发层在前、WB 行紧随其后，故只需向前看一行。 */
+function mergeRequestRows(rows) {
+  const out = [];
+  for (let i = 0; i < rows.length; i++) {
+    const e = rows[i];
+    if (!e || typeof e !== 'object') continue;   // 坏行直接丢，别让渲染炸
+    if (isOmniForwardRow(e)) {
+      // 向后收集**所有**连发的转发层，再找它们共同的上游行。
+      // 早先的写法只配对第一条就 `i = j`，把后面的转发层整条丢掉了（实测数据丢失）。
+      const fwds = [e];
+      let j = i + 1;
+      while (j < rows.length && rows[j] && isOmniForwardRow(rows[j])) { fwds.push(rows[j]); j++; }
+      const peer = j < rows.length ? rows[j] : null;
+      // peer 存在且是回环来源 = 它是这批发出的转发的共同上游，配对成立。
+      if (peer && isLoopbackIP(peer.client_ip)) {
+        // 每条转发层各自与 peer 合并：它们有不同的客户端 IP / 请求 ID，
+        // 合成一行就看不出「两次不同的调用打到了同一个账号」。
+        for (const f of fwds) out.push(mergeRequestPair(f, peer));
+        i = j; // WB 行已消费，跳过
+        continue;
+      }
+      // 没有配对：原样保留，打标记（UI 提示「上游未记录」）
+      for (const f of fwds) out.push(Object.assign({}, f, { __unmatched: true }));
+      continue;
+    }
+    out.push(e);
+  }
+  return out;
+}
+
+/* mergeRequestPair 合并一对记录。以转发层为主干（保留它的时间/request_id/耗时），
+ * 把 WB 行的账号信息补进来；两行原文都挂在 __fwd / __peer 上供 tooltip 展开。 */
+function mergeRequestPair(fwd, peer) {
+  const merged = Object.assign({}, fwd);
+  // 账号与域：WB 行才知道真实账号和调度域
+  merged.account = peer.account || fwd.account;
+  if (peer.realm) merged.realm = peer.realm;
+  if (peer.provider && !fwd.provider) merged.provider = peer.provider;
+  // 耗时/token：WB 行是真正干活的，转发层只是转发。取 WB 行（缺失时回落转发层）。
+  merged.duration_ms = peer.duration_ms || fwd.duration_ms;
+  merged.ttfb_ms = peer.ttfb_ms || fwd.ttfb_ms;
+  merged.prompt_tokens = peer.prompt_tokens || fwd.prompt_tokens;
+  merged.completion_tokens = peer.completion_tokens || fwd.completion_tokens;
+  merged.total_tokens = peer.total_tokens || fwd.total_tokens;
+  merged.cache_hit_tokens = peer.cache_hit_tokens || fwd.cache_hit_tokens;
+  merged.cache_miss_tokens = peer.cache_miss_tokens || fwd.cache_miss_tokens;
+  merged.reasoning_tokens = peer.reasoning_tokens || fwd.reasoning_tokens;
+  merged.reasoning_effort = peer.reasoning_effort || fwd.reasoning_effort;
+  merged.reasoning = peer.reasoning || fwd.reasoning;
+  // 积分：只有 WB 行知道本次实际消耗（转发层 credit_known=false 是模型价不是耗）
+  if (peer.credit_known) {
+    merged.credit = peer.credit;
+    merged.credit_known = true;
+  }
+  // 来源：真实客户端在转发层那一行（WB 行记的是回环）
+  merged.client_ip = fwd.client_ip || peer.client_ip;
+  merged.user_agent = fwd.user_agent || peer.user_agent;
+  // 结果以 WB 行为准：转发层的 200 不代表上游成功（可能回环失败却记了转发成功）
+  if (peer.outcome) merged.outcome = peer.outcome;
+  merged.status = peer.status || fwd.status;
+  merged.ok = peer.ok;
+  merged.__fwd = fwd;
+  merged.__peer = peer;
+  return merged;
+}
+
 /* ── 请求日志（时间 / 结果 / 模型 / 域 / 账号 / 来源 / 耗时 / token / 积分）── */
 async function loadRequestLogs() {
   const limit = ($('reqLimit') && $('reqLimit').value) || 100;
@@ -1807,7 +1934,6 @@ function renderRequestMetrics(m, entries) {
   if (!omPriceMap) ensureOmPriceMap().then(() => renderRequestTable());
   renderRequestTable();
 }
-
 /* fillReqProviders 用当前已拉取条目里出现过的供应商重建下拉项（含「全部供应商」）。
    只在选项集合变化时重建，避免每次轮询都重设 <select>（会打断正在展开的下拉）。
    当前选中的供应商即便本批结果里没有也保留为选项：否则「重新读取 / 切时间区间」会把
@@ -1926,7 +2052,9 @@ function renderRequestTable() {
   const list = reqEntries.filter(e => reqMatch(e));
   const tb = $('reqBody');
   if (!tb) return;
-  tb.innerHTML = list.map(e => {
+  // reqSplitView（勾上 = 分开看两层）时用原始数组；默认折叠 OmniGate 转发层。
+  const rows = reqSplitView ? list : mergeRequestRows(list);
+  tb.innerHTML = rows.map(e => {
     const when = e && e.time ? new Date(e.time).toLocaleTimeString('zh-CN', { hour12: false }) : '—';
     const ip = e && e.client_ip ? e.client_ip : '';
     const ua = e && e.user_agent ? e.user_agent : '';
@@ -1949,11 +2077,14 @@ function renderRequestTable() {
       (reqEntries.length ? '没有符合当前筛选条件的请求记录' : '暂无请求记录') + '</td></tr>';
 
   const filtered = list.length !== reqEntries.length;
+  // 折叠掉的转发层条数要说出来：否则「命中 40 条却只画 27 行」像是渲染漏了。
+  const folded = list.length - rows.length;
+  const foldNote = folded > 0 ? ' · 折叠 ' + folded + ' 条转发层' : '';
   // 归档里的旧条目没有来源字段（该功能上线前写入）：这时提示开关/历史原因，
   // 而不是让人以为筛选坏了。
   const hasSource = reqEntries.some(e => e && (e.client_ip || e.user_agent));
   $('reqCount').textContent = !reqEntries.length ? ''
-    : (filtered ? '命中 ' + list.length + ' / ' + reqEntries.length + ' 条' : reqEntries.length + ' 条') +
+    : (filtered ? '命中 ' + list.length + ' / ' + reqEntries.length + ' ' + foldNote + ' 条' : reqEntries.length + ' 条') +
       (hasSource ? '' : ' · 来源未记录');
   $('reqCount').className = (filtered || !hasSource) ? 'note src-off' : 'note';
 }
@@ -1974,6 +2105,18 @@ if ($('reqProvider')) $('reqProvider').onchange = () => {
   reqFilter.provider = $('reqProvider').value;
   renderRequestTable();
 };
+/* 「分开看 OmniGate 转发层」开关：默认合并（账号列显示真实账号、来源列显示真实客户端 IP），
+   勾上则恢复两层各一行。偏好记 localStorage——排障时想老开着也不用手动每次勾。
+   这个开关是给「想看回环那一下到底失败在哪」用的，平时不需要。 */
+if ($('reqSplit')) {
+  const el = $('reqSplit');
+  el.checked = reqSplitView;
+  el.onchange = () => {
+    reqSplitView = el.checked;
+    try { localStorage.setItem(LS_REQ_SPLIT, reqSplitView ? '1' : '0'); } catch (e) { /* 隐私模式 */ }
+    renderRequestTable();
+  };
+}
 if ($('reqLimit')) $('reqLimit').onchange = loadRequestLogs;
 if ($('btnReqReload')) $('btnReqReload').onclick = loadRequestLogs;
 // 时间范围：默认「全部历史」——请求记录页的历史行为就是"取最近 N 条"，
@@ -2036,6 +2179,26 @@ if ($('rlCh')) $('rlCh').onchange = renderRunLogs;
 if ($('btnRlReload')) $('btnRlReload').onclick = loadRunLogs;
 
 function requestLogText(e) {
+  // 未配对的转发层：上游那一条没记到（WB 网关未落盘 / 请求尚未完成）。
+  // 不说清的话，这一行的 account=api-key 会让人以为「账号突然没了」。
+  if (e && e.__unmatched) {
+    return requestLogTextBase(e) + ' | ⚠ OmniGate 转发层，未找到对应的上游记录（上游未落盘或请求未完成）';
+  }
+  // 合并行：先给合并后的摘要，再附两层原文，方便核对账号/积分到底来自哪一行。
+  if (e && (e.__fwd || e.__peer)) {
+    const head = requestLogTextBase(e);
+    const fwd = e.__fwd ? requestLogTextBase(e.__fwd) : '';
+    const peer = e.__peer ? requestLogTextBase(e.__peer) : '';
+    return head + ' | ── 两层明细 ──'
+      + (fwd ? ' | 转发层(OmniGate): ' + fwd : '')
+      + (peer ? ' | 上游(WB网关): ' + peer : '');
+  }
+  return requestLogTextBase(e);
+}
+
+/* requestLogTextBase 单条记录的 tooltip 文本（不含合并展开）。
+   拆出来是为了让 requestLogText 能在合并行上叠两层原文而不重复这段拼装。 */
+function requestLogTextBase(e) {
   const when = e && e.time ? new Date(e.time).toLocaleTimeString('zh-CN', { hour12: false }) : '—';
   const outcomeLabel = { success: '成功', http_error: 'HTTP 错误', stream_error: '流错误', interrupted: '中断' };
   const token = Number(e && e.total_tokens || 0) ||

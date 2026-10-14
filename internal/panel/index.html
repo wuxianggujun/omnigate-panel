@@ -799,6 +799,9 @@
           <select id="reqProvider" aria-label="按供应商筛选">
             <option value="">全部供应商</option>
           </select>
+          <label class="fchk" title="同一调用在 OmniGate 与 WB 网关各记一条。默认合并成一行（账号列显示真实账号、来源列显示真实客户端 IP）；勾上则两层各显示一行，用来看回环那一下的明细。">
+            <input type="checkbox" id="reqSplit"><span>分开看转发层</span>
+          </label>
           <span class="trange" id="reqRange"></span>
           <select id="reqLimit" aria-label="读取条数">
             <option value="100" selected>最近 100 条</option>

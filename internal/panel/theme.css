@@ -824,19 +824,30 @@ body[data-role="public"] #btnTopLogin { border-color: var(--accent, var(--line))
 #loginVeil input { width: 100%; box-sizing: border-box; }
 #paccTable td, #paccTable th { white-space: nowrap; }
 
-/* 配置页 / 供应商页底部有 sticky .savebar（保存按钮条）。悬浮卡是 fixed，
-   展开后面板高约 280px，会和保存条相交、把「保存」按钮盖住点不着。
-   这两页恰好都是「改完要保存」的页，压住主按钮比挡住统计更糟。
+/* 配置页 / 供应商页底部有 .savebar（保存按钮条），悬浮卡是 fixed，展开态
+   面板高约 320px，会把它盖住、让「保存」点不着。
 
-   两点刻意的取舍：
-   1) 只让「展开态」让位（.statfab.open，由 app.js 在 setStatFabOpen 里增删）。
-      收起态只剩一条 33px 的 tab，天然撞不到保存条；旧方案连收起态一起抬，
-      白占几十像素。
-   2) 让位量按"savebar 停在自然位置时它有多高"给足（实测 config 80px /
-      providers 64px + 12px 呼吸），而不是按"吸底时算高度"猜 —— sticky 只在
-      容器能滚时才吸底，这两页内容一短它就停在原位，猜的量会落空。 */
-body[data-view="config"] .statfab.open { bottom: 92px; }
-body[data-view="providers"] .statfab.open { bottom: 76px; }
+   为什么不能靠"给 bottom 加个偏移"糊过去：.savebar 在桌面端是 sticky bottom:0，
+   位置由内容高度决定 —— 内容不满一屏时（比如配置页只展开「基本」分组）
+   它停在屏幕中间，不在底边。此时任何固定偏移都算不准，b1998e9 试过按它
+   "停在自然位置时的高度"给 92px，复测仍被压住（详见 git log）。
+
+   所以改成让位置本身变确定：--fab-lift 变量表示"底部被固定元素占掉多少"，
+   桌面端 0（保存条随文档流，悬浮卡贴右下角即可），手机端 76px
+   （保存条改成 fixed 通栏底栏，见手机版适配段）。让位量只跟随这个变量，
+   不再按页写死数字，也不会出现"桌面端白白抬高 76px"。
+
+   只让「展开态」让位：收起态只剩一条 33px 的 tab，撞不到任何东西。 */
+/* --fab-lift 由 app.js 的 syncFabLift() 实测写入，这里只给初值。
+   为什么让 CSS 只写公式、让 JS 算数：保存条的位置和高度都是浮动的 ——
+   桌面端它是 sticky（内容不满一屏时停在屏幕中间，滚动到底才吸底），
+   手机端它会因 .savebar 折行而变化。任何写死的偏移都会在某种状态下失效
+   （b1998e9 就是这么翻的车）。JS 每次切页/展开/滚动/轮询后实测一次相交
+   高度，写进变量，CSS 只负责把它加到 bottom 上。 */
+:root { --fab-lift: 0px; }
+/* 收起态的 tab 也一样会被盖住（折叠 tab 就在右下角），所以让位时整个卡片抬。 */
+body[data-view="config"] .statfab,
+body[data-view="providers"] .statfab { bottom: calc(16px + var(--fab-lift)); }
 
 /* ══════════════════════════════════════════════════════════════════════
    手机版适配（≤900px / ≤560px / ≤400px 三档）
@@ -862,6 +873,28 @@ body[data-view="providers"] .statfab.open { bottom: 76px; }
    （断点内先写、外面再隐藏会被 !important 压不掉）。 */
 #btnNav { display: none; }
 @media (max-width: 900px) {
+  /* ── ⓿ 保存条 → 固定通栏底栏 ─────────────────────────────────────
+      桌面端 .savebar 是 sticky bottom:0，跟着文档流走；手机上表单页的
+      「保存」是主操作，必须一直够得着，所以改成 fixed 通栏底栏。
+      副作用是它脱离了文档流，要给页面底部垫出等高空间（--savebar-h），
+      否则表单最后一行会被压在栏下看不见。
+      同时给悬浮卡让位：--fab-lift = 底栏高度 + 呼吸。 */
+  body[data-view="config"] .savebar,
+  body[data-view="providers"] .savebar {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 85;
+    margin: 0; border-radius: 0; border-left: 0; border-right: 0; border-bottom: 0;
+    padding: 10px 14px;
+    /* 让位状态下的悬浮卡会浮在底栏上方一点，阴影别叠在一起 */
+    box-shadow: 0 -8px 24px rgba(0, 0, 0, .18);
+  }
+  /* 底栏脱离流形后垫回等高空间：两页各自的 --savebar-h 由实测高度给。
+     config 保存条含"重启提示"说明文字会折行，providers 只有按钮排。 */
+  body[data-view="config"] .view, body[data-view="config"] .view form { padding-bottom: 92px; }
+  body[data-view="providers"] .view, body[data-view="providers"] .view form { padding-bottom: 84px; }
+  /* toast 也得避开底栏：否则刚保存成功的提示会被底栏压住一半 */
+  #toasts { bottom: calc(64px + var(--fab-lift, 0px)); }
+  @media (max-width: 560px) { #toasts { bottom: calc(64px + var(--fab-lift, 0px)); } }
+
   /* ── ① 侧导航 → 抽屉 ─────────────────────────────────────────────
      汉堡按钮（#btnNav）放在顶栏最左，默认收起；点开是从左侧滑出的面板，
      上方带遮罩（点遮罩关闭）。导航常驻时 body 要能滚动，抽屉打开时锁死。 */

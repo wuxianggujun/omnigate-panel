@@ -652,6 +652,7 @@ async function bootstrapAuth() {
     // 窗口拉宽到桌面尺寸时自动收起，否则抽屉状态会残留（遮罩还盖着）
     window.addEventListener('resize', () => {
       if (window.innerWidth > 900 && navDrawerOpen()) setNavDrawer(false);
+      syncFabLift();   // 窗口宽度变化会改变保存条是否吸底
     });
   }
 
@@ -691,7 +692,13 @@ function go(v) {
   // 到期提醒卡片不再「打开账号池就自动查」：逐账号实时查上游，账号一多打开面板
   // 就卡死。数据只由卡片上的「检查」按钮显式触发；卡片初始隐藏。
   if (v === 'taskscenter') reattachQueueView();
+  // 切页后重算悬浮卡让位（保存条的位置随页面内容变）
+  syncFabLift();
 }
+// 滚动会让 sticky 保存条在「吸底 / 回原位」之间切换（桌面端内容是靠滚出视口
+// 才吸底的），悬浮卡的让位量必须跟着变。passive: 声明不 preventDefault，
+// 滚动性能不受影响。
+window.addEventListener('scroll', () => syncFabLift(), { passive: true });
 document.querySelectorAll('.nav a').forEach(a => a.onclick = e => {
   // 无 data-view 的导航项（如纯外链）走默认跳转，不做视图切换。
   if (!a.dataset.view) return;
@@ -730,11 +737,49 @@ document.querySelectorAll('.nav a').forEach(a => a.onclick = e => {
       tab.title = statFabOpen ? '收起账号池概览' : '展开账号池概览（账号总数 / 可用 / 冷却 / 禁用 / 暂停 / 积分 / 粘性会话）';
     }
     try { localStorage.setItem(STATFAB_KEY, statFabOpen ? '1' : '0'); } catch (e) { /* 隐私模式 */ }
-    if (!initial) { /* 收起/展开不做多余动作 */ }
+    // 展开后面板变大，可能与保存条开始相交；收起时相交消失 —— 两种都要重算
+    syncFabLift();
   }
 
   /* syncFab 把概览数据同步到悬浮卡：露出卡片、填角标数字、按可用数改脉冲点颜色。
      loadOverview() 每次轮询都会走到这里，所以卡片数字与页内统计永远一致。 */
+  /* syncFabLift：实测悬浮卡会不会被当前页的固定/吸底元素压住，该抬多少
+     写进 CSS 变量 --fab-lift。
+
+     为什么不让 CSS 自己算：.savebar 在桌面端是 sticky bottom:0 —— 内容不满
+     一屏时它停在屏幕中间（不在底边），滚动到底才吸底；手机端它是 fixed 通栏
+     底栏，高度还随内容折行变。写死偏移必然在某种组合下失效，所以这里在每次
+     可能改变几何的事件后，用真实矩形求一次交集高度。
+
+     判据（相交才算要抬）：
+       - 只考虑 config / providers 两页（其它页没有底部固定元素）；
+       - 相交高度 > 0 时抬「相交高度 + 12px 呼吸」，否则不抬；
+       - 用 IntersectionObserver 会更"现代"，但这里只需要在几个明确时机算一次，
+         直接算比维护一个 observer 便宜，也不会漏掉"切页时 DOM 刚 hidden→显示、
+         布局还没稳定"的时刻。 */
+  const FAB_LIFT_ID = 'fabLiftStyle';
+  function syncFabLift() {
+    if (view !== 'config' && view !== 'providers') {
+      // 离开这两页要把变量清掉：否则抬起来的偏移会带到别的页面去。
+      const old = $(FAB_LIFT_ID); if (old) old.remove();
+      return;
+    }
+    const fab = $('statFab');
+    if (!fab || fab.hidden) return;
+    // 保存条：桌面端 sticky、手机端 fixed，选择器相同但定位不同
+    const sb = document.querySelector('.view:not([hidden]) .savebar');
+    if (!sb) return;
+    const fr = fab.getBoundingClientRect();
+    const sr = sb.getBoundingClientRect();
+    // 矩形相交高度（只在垂直方向相交时为正）
+    const inter = Math.min(fr.bottom, sr.bottom) - Math.max(fr.top, sr.top);
+    const lift = inter > 0 ? Math.ceil(inter + 12) : 0;
+    // 用 <style> 精确控制变量，避免在 body 上反复 setProperty 留下残留
+    let st = $(FAB_LIFT_ID);
+    if (!st) { st = document.createElement('style'); st.id = FAB_LIFT_ID; document.head.appendChild(st); }
+    st.textContent = ':root { --fab-lift: ' + lift + 'px }';
+  }
+
   function syncFab(allTotal, allAvail, coolCount) {
     const fab = $('statFab');
     if (fab) fab.hidden = false;

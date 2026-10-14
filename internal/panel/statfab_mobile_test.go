@@ -102,15 +102,23 @@ func TestStatFabCSS(t *testing.T) {
 		t.Error("#toasts 仍贴 bottom:20px：会与右下角悬浮卡重叠")
 	}
 	// ④ 有 sticky .savebar 的页面要抬高卡片，否则压住「保存」主按钮。
-	//    只让「展开态」让位（.statfab.open）：收起态只剩一条 33px 的 tab，
-	//    撞不到保存条，没必要跟着抬。
-	if !strings.Contains(C, `body[data-view="config"] .statfab.open`) ||
-		!strings.Contains(C, `body[data-view="providers"] .statfab.open`) {
-		t.Error("配置/供应商页未在展开态给 .savebar 让位：悬浮卡会盖住保存按钮")
+	//    关键是让位量必须走 CSS 变量 --fab-lift：写死偏移必错（B 方案按"停在自然
+	//    位置时的高度"给 92px，复测仍被压住 —— 内容不满一屏时 sticky 保存条停在
+	//    屏幕中间而不是底边）。变量由 app.js 的 syncFabLift() 实测写入。
+	if !strings.Contains(C, `body[data-view="config"] .statfab,`) ||
+		!strings.Contains(C, `body[data-view="providers"] .statfab {`) ||
+		!strings.Contains(C, `bottom: calc(16px + var(--fab-lift))`) {
+		t.Error("配置/供应商页未按 --fab-lift 变量让位：悬浮卡会盖住保存按钮")
 	}
-	// 旧方案是无脑 bottom:76px（收起态也抬），不能退回去。
-	if strings.Contains(C, `body[data-view="config"] .statfab,\nbody[data-view="providers"] .statfab {`) {
-		t.Error("退回了「收起态也抬」的旧让位方案")
+	if !strings.Contains(C, `:root { --fab-lift: 0px; }`) {
+		t.Error("theme.css 缺少 --fab-lift 初始值")
+	}
+	// 写死的让位量不能回来：那种 .statfab.open { bottom: 92px } 一律拒绝。
+	// 注意不能无脑匹配"任何 .statfab 带 bottom: Npx"—— ≤400px 断点里的
+	// .statfab { bottom: 8px } 是窄机收边距，合法。只查让位规则那段。
+	if regexp.MustCompile(`\.statfab[^{}]*(?:\.open[^{}]*)?\{[^}]*bottom: \d+px`).MatchString(
+		regexp.MustCompile(`(?s)配置页 / 供应商页底部.*?:root`).FindString(C)) {
+		t.Error("让位量又被写死了：必须走 var(--fab-lift)，否则某状态下会压住保存按钮")
 	}
 }
 
@@ -130,10 +138,23 @@ func TestStatFabJS(t *testing.T) {
 	if !strings.Contains(J, "wb2api.statfab") {
 		t.Error("app.js 未持久化展开状态（wb2api.statfab）")
 	}
-	// .open 是给 CSS 判断「要不要给 sticky .savebar 让位」的开关，只在展开态加上。
-	// 少了它，CSS 里 body[data-view=config] .statfab.open 永远不命中。
+	// .open 是让 CSS/调试时能看出展开态的类，保留。
 	if !strings.Contains(J, "classList.toggle('open', statFabOpen)") {
-		t.Error("setStatFabOpen 未切换 .open：配置/供应商页的保存条仍会被展开面板盖住")
+		t.Error("setStatFabOpen 未切换 .open")
+	}
+	// syncFabLift：让位量由 JS 实测写入 --fab-lift（写死必错）。
+	// 四个挂载点缺一不可：切页、展开/收起、resize、scroll。
+	if !strings.Contains(J, "function syncFabLift()") {
+		t.Fatal("app.js 缺少 syncFabLift：让位量没人算")
+	}
+	if !strings.Contains(J, `--fab-lift: `) {
+		t.Error("syncFabLift 未写入 CSS 变量 --fab-lift")
+	}
+	if !strings.Contains(J, "addEventListener('scroll', () => syncFabLift()") {
+		t.Error("未挂 scroll：滚动时 sticky 保存条吸底/回原位，让位量会失效")
+	}
+	if !strings.Contains(J, "window.innerWidth > 900 && navDrawerOpen()") {
+		t.Error("resize 挂钩丢了")
 	}
 	// loadOverview 内必须调用 syncFab —— 只在函数外定义等于没接线。
 	f := strings.Index(J, "async function loadOverview")

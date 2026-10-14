@@ -751,13 +751,21 @@ document.querySelectorAll('.nav a').forEach(a => a.onclick = e => {
      底栏，高度还随内容折行变。写死偏移必然在某种组合下失效，所以这里在每次
      可能改变几何的事件后，用真实矩形求一次该抬多少。
 
-     两个坑（都实测踩过，缺一个就不对）：
-     1) 抬的量 = 卡片底边 − 保存条顶边，不能写成「相交高度」。卡片整个落在
-        保存条区间内时（手机上折叠 tab 就常这样：tab 795..828、底栏 770..844），
-        相交高度只是卡片自身高度，照它抬永远差一截、仍然压住。
-     2) 量之前必须先把 --fab-lift 清 0。否则量到的是"已经抬过"的位置：抬完
-        不相交 → 清零 → 又相交 → 再抬，两个值来回翻。清 0 后读到的是卡片的
-        自然位置，与当前抬没抬无关，结果才稳定。 */
+     五个坑（都实测踩过，缺一个就不对）：
+     1) 要判的是"矩形相交"，不是"垂直投影重叠"。桌面端 config 页 tab 在屏幕
+        最下行、savebar 停在屏幕中部时两者垂直投影并不重叠，但水平方向 tab 正好
+        压在保存条右端按钮上 —— 这种情况也必须抬。
+     2) 抬的量用「相交高度」不够：手机上折叠 tab 整个落进底栏区间时，相交高度
+        恰等于 tab 自身高度（33px），按它抬还剩 17px 压在栏内。改成抬
+        「卡底 − 栏顶」（= 相交高 + 卡在栏下的剩余部分），这才是真正需要的量。
+     3) 但也不能一律抬「卡底 − 栏顶」：桌面端保存条停在屏幕中部而卡片在它下方
+        时（tab 底 784 - 栏顶 443 = +341），会把本该贴右下角的卡片一路抬到
+        屏幕上方。所以抬之前必须先确认垂直投影真的重叠（over > 0）。
+     4) 量之前必须先把 --fab-lift 清 0 并强制同步布局，否则读到的是"已经抬过"
+        的位置：抬完不相交 → 下一个事件清零 → 又相交，两个值来回翻。
+        （providers 页收起态就这么卡在 0，tab 被 z-index:85 的底栏压住点不着。）
+     5) 桌面端滚到底时 sticky 保存条真的会吸到视口底部，这时 tab 会被抬离右下角。
+        这是唯一让 tab 离开角落的情形，可接受：抬起来至少还能点，压住才是 bug。 */
   const FAB_LIFT_ID = 'fabLiftStyle';
   function syncFabLift() {
     if (view !== 'config' && view !== 'providers') {
@@ -772,14 +780,19 @@ document.querySelectorAll('.nav a').forEach(a => a.onclick = e => {
     if (!sb) return;
     let st = $(FAB_LIFT_ID);
     if (!st) { st = document.createElement('style'); st.id = FAB_LIFT_ID; document.head.appendChild(st); }
-    // 先清零再量（坑 2）。写完样式要强制一次同步布局，否则读到的是上一帧的矩形。
+    // 先清零再量（坑 4）。写完样式要强制一次同步布局，否则读到上一帧的矩形。
     st.textContent = ':root { --fab-lift: 0px }';
     void fab.offsetHeight;
     const fr = fab.getBoundingClientRect();
     const sr = sb.getBoundingClientRect();
-    // 坑 1：要抬的是「卡片底边探出保存条顶边多少」，加上 16px 呼吸
-    const need = fr.bottom - sr.top;
-    const lift = need > 0 ? Math.ceil(need + 16) : 0;
+    const hOver = Math.min(fr.right, sr.right) - Math.max(fr.left, sr.left);   // 水平投影重叠
+    const vOver = Math.min(fr.bottom, sr.bottom) - Math.max(fr.top, sr.top);  // 垂直投影重叠
+    // 坑 2/3：矩形真的相交才抬，抬多少 =「卡底要越过栏顶多少」+ 16px 呼吸。
+    // 只抬相交高度不够：tab 整个落进底栏区间时相交高度 = tab 自身高度，抬完还剩
+    // 一截压在栏内。而直接抬「卡底 − 栏顶」又不能少了 vOver 这个闸：桌面端保存条
+    // 停在屏幕中部、卡片在它下方时两者并不相交，照搬这个差值会把本该贴右下角的
+    // 卡片一路抬到屏幕上方（实测 358px，tab 跑到 t=392）。
+    const lift = (hOver > 0 && vOver > 0) ? Math.ceil(fr.bottom - sr.top + 16) : 0;
     st.textContent = ':root { --fab-lift: ' + lift + 'px }';
     void fab.offsetHeight;
   }

@@ -156,6 +156,20 @@ func TestStatFabJS(t *testing.T) {
 	if !strings.Contains(J, "window.innerWidth > 900 && navDrawerOpen()") {
 		t.Error("resize 挂钩丢了")
 	}
+	// 量之前必须先清零 —— 否则量到"已抬过的"位置，两个值来回翻（实测卡在 0）。
+	if !strings.Contains(J, "':root { --fab-lift: 0px }'") {
+		t.Error("syncFabLift 未先清零再量：抬起的值会自我打架")
+	}
+	// 公式闸门：矩形相交才抬。少了 vOver>0，桌面端保存条停中部、卡片在下方时会
+	// 被一路抬到屏幕上方（实测 358px，tab 从 t=750 跑到 t=392）。
+	if !strings.Contains(J, "hOver > 0 && vOver > 0") {
+		t.Error("让位判定少了矩形相交闸门：不相交时也会被抬走")
+	}
+	// 抬的量 = 卡底越过栏顶的距离，不是相交高度：tab 整个落进底栏区间时
+	// 相交高度恰等于 tab 自身高度，照它抬永远差一截。
+	if !strings.Contains(J, "Math.ceil(fr.bottom - sr.top + 16)") {
+		t.Error("让位量算错：必须抬「卡底 − 栏顶」，不能用相交高度")
+	}
 	// loadOverview 内必须调用 syncFab —— 只在函数外定义等于没接线。
 	f := strings.Index(J, "async function loadOverview")
 	if f < 0 {

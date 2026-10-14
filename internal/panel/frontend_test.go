@@ -1373,7 +1373,8 @@ vm.createContext(ctx);
 vm.runInContext(src.slice(start, end) +
   '\nthis.renderProvEditor=renderProvEditor; this.openProvEdit=openProvEdit;' +
   ' this.onProvFormInput=onProvFormInput; this.commitProvEdit=commitProvEdit;' +
-  ' this.addProvider=addProvider; this.provBadgeHtml=provBadgeHtml; this.onProvClick=onProvClick;', ctx);
+  ' this.addProvider=addProvider; this.provBadgeHtml=provBadgeHtml; this.onProvClick=onProvClick;' +
+  ' this.provIsIdle=provIsIdle; this.provsHaveIdle=provsHaveIdle; this.togProvIdle=togProvIdle;', ctx);
 ctx.omniCfg = { default_provider: 'raccoon', providers: [
   { name: 'atria', type: 'openai', base_url: 'https://api.atria-asi.ai/v1', api_key: 'atr_PKxxx', models: ['Atria-Dawn-Preview'], accounts: [] },
   { name: 'raccoon', type: 'raccoon', models: ['a', 'b', 'c'], accounts: [{ label: 'x' }, { label: 'y' }] },
@@ -1382,17 +1383,18 @@ ctx.omniCfg = { default_provider: 'raccoon', providers: [
 ctx.renderProvEditor();
 const dp = els.cfgDefaultProvider.innerHTML;
 const cnt = els.provCnt.textContent;
-// 2026-10：空壳供应商默认折叠。runable（type=runable + accounts=[]）是空壳，
-// 折叠后表格里不该出现它；但默认供应商下拉仍要列全部 3 家（折叠只动表格，不动
-// 配置载体 —— 否则配了但暂时没账号的供应商会从下拉里消失，用户以为配置丢了）。
+// 2026-10：空壳供应商默认根本不渲染。runable（type=runable + accounts:[]）是空壳，
+// 表格里不该出现它，也没有说明行——只有计数角标在有空壳时变成可点的「2 / 3」。
+// 默认供应商下拉仍要列全部 3 家（隐藏只动表格，不动配置载体——否则配了但暂时没
+// 账号的供应商会从下拉里消失，用户以为配置丢了）。
 const body = els.provBody.innerHTML;
-const idleRow = els.provIdleRow.innerHTML;
-// 展开：走真实的 onProvClick → showIdle 分支（不能直接写 ctx.provShowIdle = true：
-// provShowIdle 是脚本里 let 出来的变量，ctx 上赋值只是加了个同名属性，渲染读到的
-// 还是原来的 false。用真实点击路径同时验证「按钮不是死的」）。
-ctx.onProvClick({ target: { closest: () => ({ dataset: { act: 'showIdle', i: '0' } }) } });
-ctx.renderProvEditor();
+// 展开：走 togProvIdle —— on('provCnt') 的绑定在 vm 切片之外（init 里），测试里
+// 调不到那个匿名处理器，但 togProvIdle 是它唯一的动作，等价且更直白。
+// 注意不能写 ctx.provShowIdle = true：那是脚本里 let 出来的变量，ctx 赋值只是加
+// 同名属性，渲染读到的还是原来的 false。
+ctx.togProvIdle();
 const bodyShown = els.provBody.innerHTML;
+const cntShown = els.provCnt.textContent;
 ctx.openProvEdit(0);
 const form = els.provForm.innerHTML;
 const veilOn = els.provVeil.classList.contains('on');
@@ -1409,14 +1411,15 @@ ctx.addProvider();
 const newIsNew = els.provDlgTitle.textContent === '添加供应商';
 process.stdout.write(JSON.stringify({
   rowCount: (body.match(/data-act="editProv"/g) || []).length,
-  // 折叠态：runable 是空壳，不该出现在表格里
-  idleFolded: !body.includes('runable') && body.includes('atria') && body.includes('raccoon'),
-  idleRowNames: idleRow.includes('runable'),
-  idleRowHasBtn: idleRow.includes('showIdle'),
-  // 展开态：空壳回来
+  // 隐藏态：空壳不在表格里，计数角标显示「可见/总数」且可点
+  idleHidden: !body.includes('runable') && body.includes('atria') && body.includes('raccoon'),
+  cntIdle: cnt === '2 / 3',
+  cntLinky: els.provCnt.classList.contains('linky'),
+  // 展开态：空壳回来，角标回到「3 个」、不可点
   rowCountShown: (bodyShown.match(/data-act="editProv"/g) || []).length,
   shownHasRunable: bodyShown.includes('runable'),
-  // 默认供应商下拉必须仍是 3 家（折叠只动表格的证明）
+  cntShown: cntShown === '3 个',
+  // 默认供应商下拉必须仍是 3 家（隐藏只动表格的证明）
   hasNames: body.includes('atria') && body.includes('raccoon'),
   hasTypeTag: body.includes('<span class="tag mute">openai</span>'),
   byline: body.includes('1 模型') && body.includes('2 账号'),
@@ -1443,8 +1446,8 @@ process.stdout.write(JSON.stringify({
 	if err != nil {
 		t.Fatalf("provider table node test failed: %v\n%s", err, out)
 	}
-	const want = `{"rowCount":2,"idleFolded":true,"idleRowNames":true,"idleRowHasBtn":true,` +
-		`"rowCountShown":3,"shownHasRunable":true,"hasNames":true,"hasTypeTag":true,"byline":true,` +
+	const want = `{"rowCount":2,"idleHidden":true,"cntIdle":true,"cntLinky":true,` +
+		`"rowCountShown":3,"shownHasRunable":true,"cntShown":true,"hasNames":true,"hasTypeTag":true,"byline":true,` +
 		`"badgeOk":true,"badgeNoKey":true,"badgeNoAcct":true,"dpOptions":3,"cnt":"3 个",` +
 		`"formHasKey":true,"formHasModels":true,"formHasSys":true,"formHasPool":true,` +
 		`"veilOn":true,"renamed":"atria2","veilOff":true,"dupKept":"raccoon","dupVeilStillOn":true,"newIsNew":true}`

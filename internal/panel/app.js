@@ -5347,6 +5347,20 @@ function provIsIdle(p) {
   return false;
 }
 
+/* provsHaveIdle 当前配置里是否存在空壳供应商。计数角标靠它决定要不要给可点态：
+     有 -> 「2 / 7」且可点（点开看全部）；没有 -> 「2 个」，不可点。 */
+function provsHaveIdle() {
+  const provs = (omniCfg && omniCfg.providers) || [];
+  return provs.some(provIsIdle);
+}
+
+/* togProvIdle 切换「是否连空壳供应商一起列出」。计数角标与展开都走它。 */
+function togProvIdle() {
+  provShowIdle = !provShowIdle;
+  try { localStorage.setItem('wb2api.provShowIdle', provShowIdle ? '1' : '0'); } catch (e) { /* 隐私模式 */ }
+  renderProvEditor();
+}
+
 function provByline(p) {
   const bits = [];
   const n = Array.isArray(p.models) ? p.models.length : 0;
@@ -5503,21 +5517,24 @@ function renderProvEditor() {
     if (cur) sel.value = cur;
   }
   if ($('provCnt')) $('provCnt').textContent = provs.length ? (provs.length + ' 个') : '';
-  // 空壳供应商默认折叠（用户：「都没有添加账号的供应商为什么要显示」）。
-  // 不删配置、也不从路由下拉里消失，只是不占列表；说明行点明是哪几家、可展开。
+  // 空壳供应商默认不渲染（用户：「完全没有账号的话，可以根本不显示啊」）。
+  // 没有说明行、没有展开按钮——需要看全部时点右上角计数角标「2 / 7」即可，
+  // 它在有空壳时切换成可点态。不删配置、也不从路由下拉里消失，只是不占列表。
   const idleList = provs.filter(provIsIdle);
   const shown = provShowIdle ? provs : provs.filter(p => !provIsIdle(p));
   const idleRow = $('provIdleRow');
-  if (idleRow) {
-    if (idleList.length && !provShowIdle) {
-      idleRow.hidden = false;
-      idleRow.innerHTML = '<tr><td colspan="2"><div class="og-row" style="justify-content:space-between">' +
-        '<span class="og-s">还有 ' + idleList.length + ' 家供应商未配置账号 / 密钥（已隐藏）：' + esc(idleList.map(p => p.name || '(未命名)').join('、')) + '</span>' +
-        '<button type="button" class="xs" data-act="showIdle">展开全部 ' + provs.length + ' 家</button>' +
-        '</div></td></tr>';
-    } else {
-      idleRow.hidden = true; idleRow.innerHTML = '';
-    }
+  if (idleRow) { idleRow.hidden = true; idleRow.innerHTML = ''; }
+  const cnt = $('provCnt');
+  if (cnt) {
+    const nIdle = idleList.length;
+    // 收起态：可见数 / 总数，可点（有空壳才给可点态）
+    cnt.textContent = provShowIdle
+      ? (provs.length + ' 个')
+      : nIdle ? (shown.length + ' / ' + provs.length) : (provs.length + ' 个');
+    cnt.classList.toggle('linky', !provShowIdle && !!nIdle);
+    cnt.title = !provShowIdle && nIdle
+      ? '只看能服务的；点这里看全部 ' + provs.length + ' 家（含未配置账号 / 密钥的 ' + nIdle + ' 家）'
+      : '';
   }
   if (!shown.length) {
     body.innerHTML = provs.length
@@ -5536,13 +5553,7 @@ function onProvClick(ev) {
   if (!act) return;
   const i = +(btn ? btn.dataset.i : row.dataset.i);
   if (act === 'editProv') { openProvEdit(i); return; }
-  if (act === 'showIdle') {
-    // 展开被折叠的空壳供应商。偏好落 localStorage，下次进来仍是展开态。
-    provShowIdle = true;
-    try { localStorage.setItem('wb2api.provShowIdle', '1'); } catch (e) { /* 隐私模式 */ }
-    renderProvEditor();
-    return;
-  }
+  if (act === 'toggleIdle') { togProvIdle(); return; }
   if (act === 'goPool') {
     // 跳「账号池」并打开「添加账号」，来源预选为该供应商。
     const name = omniCfg.providers[i] && omniCfg.providers[i].name;
@@ -6833,6 +6844,9 @@ async function saveOutbound() {
   on('accSource', () => { accSourceFilter = $('accSource').value; renderAccountRows(); }, 'change');
   // 供应商配置（紧凑列表 + 编辑弹窗 + 分组 Tab；保存入口只留页脚那一个）
   on('btnAddProv', addProvider);
+  // 计数角标在「有空壳被收起」时是可点的（切展开态）。做成 title 提示 + 可点光标，
+  // 不给它单独加按钮 —— 用户明确说过「完全不显示就不需要什么设计了」。
+  on('provCnt', () => { if (provsHaveIdle()) togProvIdle(); });
   on('btnSaveCfg', () => saveOmniConfig());
   on('btnReloadCfg', loadOmniConfig);
   // 路由优先级有序列表（routing.prefer）：上移/下移/置顶/移除走事件委托，动态渲染

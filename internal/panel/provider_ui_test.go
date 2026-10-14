@@ -25,44 +25,49 @@ func TestAppJSHideIdleProviders(t *testing.T) {
 		t.Fatal(err)
 	}
 	js := string(jsBytes)
+	// 空壳供应商默认根本不渲染。用户原话：「完全没有账号的话，可以根本不显示啊，
+	// 这样子不就不需要什么设计了吗？」——所以没有说明行、没有展开按钮，只有
+	// 计数角标在有空壳时显示「2 / 7」并变成可点。
 	for _, needle := range []string{
-		"function provIsIdle(p) {",                 // 判定函数存在
-		"provTypeHasKey(type) && !hasKey",          // 与徽标同源：key 型缺 key
+		"function provIsIdle(p) {",                       // 判定函数存在
+		"provTypeHasKey(type) && !hasKey",                // 与徽标同源：key 型缺 key
 		"provTypeHasAccounts(type) && !(p.accounts || []).length", // 账号型无账号
-		"let provShowIdle = false;",                // 默认折叠
-		"localStorage.getItem('wb2api.provShowIdle')",  // 偏好被读取
-		"const idleList = provs.filter(provIsIdle);",   // 空壳清单
+		"const idleList = provs.filter(provIsIdle);",     // 空壳清单
 		"const shown = provShowIdle ? provs : provs.filter(p => !provIsIdle(p));", // 过滤
-		`data-act="showIdle"`,                     // 展开按钮
-		"localStorage.setItem('wb2api.provShowIdle'",   // 展开偏好被记住
-		"provRowHtml(p, provs.indexOf(p))",        // 索引用原始下标，不错位
+		"cnt.classList.toggle('linky'",                   // 角标可点态
+		"function provsHaveIdle() {",                     // 判空壳（决定角标是否可点）
+		"function togProvIdle() {",                       // 切展开态
+		"localStorage.setItem('wb2api.provShowIdle'",    // 偏好被记住
+		"provRowHtml(p, provs.indexOf(p))",              // 索引用原始下标，不错位
 	} {
 		if !strings.Contains(js, needle) {
-			t.Errorf("app.js 缺少空壳折叠接线: %q", needle)
+			t.Errorf("app.js 缺少空壳隐藏接线: %q", needle)
 		}
 	}
 
-	// 点「展开」的分支必须真的存在，否则按钮点了没反应
-	if !strings.Contains(js, "if (act === 'showIdle') {") {
-		t.Error("app.js onProvClick 没有 showIdle 分支（按钮会成为死按钮）")
+	// 旧方案的残留必须清干净：留着就是「设计了一半」的死代码/死 UI
+	if strings.Contains(js, `data-act="showIdle"`) {
+		t.Error("app.js 仍留着 showIdle 按钮接线（已改为点计数角标，不该再有独立按钮）")
 	}
 
 	htmlBytes, err := os.ReadFile("index.html")
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 说明行必须是独立 tbody：与数据行分开，才不会在 colspan 上打架
-	if !strings.Contains(string(htmlBytes), `id="provIdleRow"`) {
-		t.Error("index.html 供应商表缺少 provIdleRow 说明行容器")
+	// 说明行容器已删：空壳不该有自己的一行
+	if strings.Contains(string(htmlBytes), `id="provIdleRow"`) {
+		t.Error("index.html 仍留着 provIdleRow 说明行容器（应为空壳不再占任何行）")
 	}
 
-	// 空壳折叠不能影响路由配置载体：默认供应商下拉与 prefer 仍读全部 providers
-	for _, needle := range []string{
-		"sel.innerHTML = provs.map(p => '<option value=\"' + esc(p.name || ''))",
-	} {
-		if !strings.Contains(js, needle) {
-			t.Errorf("app.js 默认供应商下拉应仍列全部供应商（折叠只动表格）: %q", needle)
-		}
+	// 空壳折叠不能影响路由配置载体：默认供应商下拉必须读**全部** provs。
+	// 这是最容易踩的坑：过滤逻辑顺手写成 shown 之后，「默认供应商」下拉里就再也
+	// 选不到那 5 家——配了但暂时没账号的供应商会从配置界面消失，用户还以为配置丢了。
+	if !strings.Contains(js, "sel.innerHTML = provs.map(p => '<option value=\"' + esc(p.name || '')") {
+		t.Error("默认供应商下拉应读全部 providers（provs.map），而不是过滤后的 shown")
+	}
+	// 同时确认它用的不是过滤后的数组
+	if strings.Contains(js, "shown.map(p => '<option value=\"' + esc(p.name") {
+		t.Error("默认供应商下拉不得用过滤后的 shown——配了但暂时没账号的供应商会从下拉里消失")
 	}
 }
 

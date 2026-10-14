@@ -353,6 +353,12 @@ label.fld > .lb + .hint { margin: 0 0 5px; }
 .tag.warn { background: var(--warn-soft); color: var(--warn); }
 .tag.bad { background: var(--bad-soft); color: var(--bad); }
 .tag.mute { background: var(--surface-2); color: var(--ink-3); border: 1px solid var(--line); }
+/* .tag.linky 计数角标的「可点」态：供应商页 provCnt 在有空壳被收起时显示「2 / 7」
+   并点亮它，点一下切成看全部。只用在纯信息角标上，靠 hover 态区分——不加按钮，
+   因为空壳本来就没打算让用户看见。 */
+.tag.linky { cursor: pointer; border-color: var(--line-2, var(--line)); }
+.tag.linky:hover { color: var(--ink); background: var(--surface-3, var(--surface-2)); text-decoration: none; }
+.tag.linky:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 /* .tag.hot 快过期批次角标：琥珀底 + 琥珀描边，与「限流冷却」等一般 warn 角标区分开
    （同一行可能同时出现两个 warn 语义的角标，靠描边一眼分辨）。 */
 .tag.hot { background: var(--warn-soft); color: var(--warn); border: 1px solid var(--warn); }

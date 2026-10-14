@@ -1357,7 +1357,20 @@ if (start < 0 || end < 0 || end < start) throw new Error('provider table region 
 const els = {};
 const mk = id => (els[id] = els[id] || {
   innerHTML: '', textContent: '', value: '', checked: false, hidden: false,
-  classList: { _s: new Set(), add(c) { this._s.add(c); }, remove(c) { this._s.delete(c); }, contains(c) { return this._s.has(c); } },
+  classList: {
+    _s: new Set(),
+    add(c) { this._s.add(c); },
+    remove(c) { this._s.delete(c); },
+    contains(c) { return this._s.has(c); },
+    // 双参数 toggle 必须实现：DOM 的 classList.toggle(cls, force) 第二个参数是「强制」，
+    // 传 true 必加、传 false 必删。供应商页计数角标的可点态走的就是这条路；少了它，
+    // provCnt 一渲染就抛 TypeError，整个供应商列表都出不来。
+    toggle(c, force) {
+      const want = force === undefined ? !this._s.has(c) : !!force;
+      if (want) this._s.add(c); else this._s.delete(c);
+      return want;
+    },
+  },
   querySelector: () => null,
 });
 const ctx = {
@@ -1382,7 +1395,10 @@ ctx.omniCfg = { default_provider: 'raccoon', providers: [
 ] };
 ctx.renderProvEditor();
 const dp = els.cfgDefaultProvider.innerHTML;
+// 计数角标的文本与可点态必须在 togProvIdle() 之前取：JSON.stringify 在脚本末尾，
+// 那时已切到展开态，原样读会把两个值都写成展开后的样子。
 const cnt = els.provCnt.textContent;
+const cntLinky = els.provCnt.classList.contains('linky');
 // 2026-10：空壳供应商默认根本不渲染。runable（type=runable + accounts:[]）是空壳，
 // 表格里不该出现它，也没有说明行——只有计数角标在有空壳时变成可点的「2 / 3」。
 // 默认供应商下拉仍要列全部 3 家（隐藏只动表格，不动配置载体——否则配了但暂时没
@@ -1414,11 +1430,12 @@ process.stdout.write(JSON.stringify({
   // 隐藏态：空壳不在表格里，计数角标显示「可见/总数」且可点
   idleHidden: !body.includes('runable') && body.includes('atria') && body.includes('raccoon'),
   cntIdle: cnt === '2 / 3',
-  cntLinky: els.provCnt.classList.contains('linky'),
+  cntLinky: cntLinky,
   // 展开态：空壳回来，角标回到「3 个」、不可点
   rowCountShown: (bodyShown.match(/data-act="editProv"/g) || []).length,
   shownHasRunable: bodyShown.includes('runable'),
   cntShown: cntShown === '3 个',
+  cntNotLinky: !els.provCnt.classList.contains('linky'),
   // 默认供应商下拉必须仍是 3 家（隐藏只动表格的证明）
   hasNames: body.includes('atria') && body.includes('raccoon'),
   hasTypeTag: body.includes('<span class="tag mute">openai</span>'),
@@ -1447,8 +1464,8 @@ process.stdout.write(JSON.stringify({
 		t.Fatalf("provider table node test failed: %v\n%s", err, out)
 	}
 	const want = `{"rowCount":2,"idleHidden":true,"cntIdle":true,"cntLinky":true,` +
-		`"rowCountShown":3,"shownHasRunable":true,"cntShown":true,"hasNames":true,"hasTypeTag":true,"byline":true,` +
-		`"badgeOk":true,"badgeNoKey":true,"badgeNoAcct":true,"dpOptions":3,"cnt":"3 个",` +
+		`"rowCountShown":3,"shownHasRunable":true,"cntShown":true,"cntNotLinky":true,"hasNames":true,"hasTypeTag":true,"byline":true,` +
+		`"badgeOk":true,"badgeNoKey":true,"badgeNoAcct":true,"dpOptions":3,"cnt":"2 / 3",` +
 		`"formHasKey":true,"formHasModels":true,"formHasSys":true,"formHasPool":true,` +
 		`"veilOn":true,"renamed":"atria2","veilOff":true,"dupKept":"raccoon","dupVeilStillOn":true,"newIsNew":true}`
 	if strings.TrimSpace(string(out)) != want {

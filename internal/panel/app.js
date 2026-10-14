@@ -743,20 +743,21 @@ document.querySelectorAll('.nav a').forEach(a => a.onclick = e => {
 
   /* syncFab 把概览数据同步到悬浮卡：露出卡片、填角标数字、按可用数改脉冲点颜色。
      loadOverview() 每次轮询都会走到这里，所以卡片数字与页内统计永远一致。 */
-  /* syncFabLift：实测悬浮卡会不会被当前页的固定/吸底元素压住，该抬多少
+  /* syncFabLift：实测悬浮卡会不会被当前页的底部固定元素压住，该抬多少
      写进 CSS 变量 --fab-lift。
 
      为什么不让 CSS 自己算：.savebar 在桌面端是 sticky bottom:0 —— 内容不满
      一屏时它停在屏幕中间（不在底边），滚动到底才吸底；手机端它是 fixed 通栏
      底栏，高度还随内容折行变。写死偏移必然在某种组合下失效，所以这里在每次
-     可能改变几何的事件后，用真实矩形求一次交集高度。
+     可能改变几何的事件后，用真实矩形求一次该抬多少。
 
-     判据（相交才算要抬）：
-       - 只考虑 config / providers 两页（其它页没有底部固定元素）；
-       - 相交高度 > 0 时抬「相交高度 + 12px 呼吸」，否则不抬；
-       - 用 IntersectionObserver 会更"现代"，但这里只需要在几个明确时机算一次，
-         直接算比维护一个 observer 便宜，也不会漏掉"切页时 DOM 刚 hidden→显示、
-         布局还没稳定"的时刻。 */
+     两个坑（都实测踩过，缺一个就不对）：
+     1) 抬的量 = 卡片底边 − 保存条顶边，不能写成「相交高度」。卡片整个落在
+        保存条区间内时（手机上折叠 tab 就常这样：tab 795..828、底栏 770..844），
+        相交高度只是卡片自身高度，照它抬永远差一截、仍然压住。
+     2) 量之前必须先把 --fab-lift 清 0。否则量到的是"已经抬过"的位置：抬完
+        不相交 → 清零 → 又相交 → 再抬，两个值来回翻。清 0 后读到的是卡片的
+        自然位置，与当前抬没抬无关，结果才稳定。 */
   const FAB_LIFT_ID = 'fabLiftStyle';
   function syncFabLift() {
     if (view !== 'config' && view !== 'providers') {
@@ -769,15 +770,18 @@ document.querySelectorAll('.nav a').forEach(a => a.onclick = e => {
     // 保存条：桌面端 sticky、手机端 fixed，选择器相同但定位不同
     const sb = document.querySelector('.view:not([hidden]) .savebar');
     if (!sb) return;
-    const fr = fab.getBoundingClientRect();
-    const sr = sb.getBoundingClientRect();
-    // 矩形相交高度（只在垂直方向相交时为正）
-    const inter = Math.min(fr.bottom, sr.bottom) - Math.max(fr.top, sr.top);
-    const lift = inter > 0 ? Math.ceil(inter + 12) : 0;
-    // 用 <style> 精确控制变量，避免在 body 上反复 setProperty 留下残留
     let st = $(FAB_LIFT_ID);
     if (!st) { st = document.createElement('style'); st.id = FAB_LIFT_ID; document.head.appendChild(st); }
+    // 先清零再量（坑 2）。写完样式要强制一次同步布局，否则读到的是上一帧的矩形。
+    st.textContent = ':root { --fab-lift: 0px }';
+    void fab.offsetHeight;
+    const fr = fab.getBoundingClientRect();
+    const sr = sb.getBoundingClientRect();
+    // 坑 1：要抬的是「卡片底边探出保存条顶边多少」，加上 16px 呼吸
+    const need = fr.bottom - sr.top;
+    const lift = need > 0 ? Math.ceil(need + 16) : 0;
     st.textContent = ':root { --fab-lift: ' + lift + 'px }';
+    void fab.offsetHeight;
   }
 
   function syncFab(allTotal, allAvail, coolCount) {

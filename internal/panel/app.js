@@ -5522,8 +5522,6 @@ function renderProvEditor() {
   // 它在有空壳时切换成可点态。不删配置、也不从路由下拉里消失，只是不占列表。
   const idleList = provs.filter(provIsIdle);
   const shown = provShowIdle ? provs : provs.filter(p => !provIsIdle(p));
-  const idleRow = $('provIdleRow');
-  if (idleRow) { idleRow.hidden = true; idleRow.innerHTML = ''; }
   const cnt = $('provCnt');
   if (cnt) {
     const nIdle = idleList.length;

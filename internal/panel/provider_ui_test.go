@@ -49,6 +49,9 @@ func TestAppJSHideIdleProviders(t *testing.T) {
 	if strings.Contains(js, `data-act="showIdle"`) {
 		t.Error("app.js 仍留着 showIdle 按钮接线（已改为点计数角标，不该再有独立按钮）")
 	}
+	if strings.Contains(js, "provIdleRow") {
+		t.Error("app.js 仍引用已删除的 provIdleRow 元素（死代码：HTML 里没有这个节点，\$() 恒为 null）")
+	}
 
 	htmlBytes, err := os.ReadFile("index.html")
 	if err != nil {

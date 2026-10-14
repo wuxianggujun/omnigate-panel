@@ -53,6 +53,9 @@
 
   <div class="main">
     <div class="topbar">
+      <button class="icon ghost" id="btnNav" title="打开导航菜单" aria-label="打开导航菜单" aria-expanded="false">
+        <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2.5 4h11M2.5 8h11M2.5 12h11"/></svg>
+      </button>
       <h2 id="ttl">账号池</h2>
       <span class="sep">/</span>
       <span class="meta" id="subMeta">-</span>
@@ -70,16 +73,7 @@
 
     <!-- 账号池 -->
     <section class="view" id="view-accounts">
-      <div class="stats">
-        <div class="stat"><div class="v" id="sTotal">-</div><div class="k">账号总数</div></div>
-        <div class="stat good"><div class="v" id="sHealthy">-</div><div class="k">可用</div></div>
-        <div class="stat warn"><div class="v" id="sCooling">-</div><div class="k">冷却中</div></div>
-        <div class="stat bad"><div class="v" id="sDisabled">-</div><div class="k">已禁用</div></div>
-        <div class="stat warn"><div class="v" id="sPaused">-</div><div class="k">已暂停选号</div></div>
-        <div class="stat"><div class="v" id="sCredits">-</div><div class="k">积分剩余 / 总额</div></div>
-        <div class="stat"><div class="v" id="sSticky">-</div><div class="k">粘性会话</div></div>
-      </div>
-
+      
       <div class="box" id="expBox" hidden>
         <header>
           <h3>积分到期提醒<span class="hint">按最近到期批次估算 · 日均需耗 = 批次剩余 ÷ 距到期天数 · 上游按失效时刻先后自动优先扣减（FEFO）</span></h3>
@@ -1007,6 +1001,10 @@
   </div>
 </div>
 
+<!-- 手机端导航抽屉的遮罩：点它关闭抽屉。单独一个元素而不是 .nav::before，
+     后者会被导航子元素盖住点不到。CSS 默认 display:none，仅 ≤900px 生效。 -->
+<div class="navscrim" id="navScrim" hidden></div>
+
 <!-- 积分任务 -->
 <div class="veil" id="taskVeil">
   <div class="dlg" style="width:940px">
@@ -1398,6 +1396,33 @@
   </div>
 </div>
 <datalist id="loginUsers"></datalist>
+
+<!-- 账号池概览（原在账号池页顶部，改成右下角悬浮卡片：不再遮挡账号表，
+       且切到任何页面都能看到池子概况。点角标展开/收起，状态记在本地。）
+       内部仍是原来那 7 个 .stat 与全部 id —— setStat / markStat 按 id 找，
+       一处都不用改。 -->
+  <div class="statfab" id="statFab" hidden>
+    <button type="button" class="statfab-tab" id="statFabTab" aria-expanded="false">
+      <span class="pulse" id="fabPulse"></span>
+      <span class="t">账号池</span>
+      <b class="num" id="fabTotal">-</b>
+      <span class="k">可用</span><b class="num ok" id="fabAvail">-</b>
+      <span class="k">冷却</span><b class="num warn" id="fabCooling">-</b>
+      <span class="chev" aria-hidden="true">▴</span>
+    </button>
+    <div class="statfab-body" id="statFabBody" hidden>
+      <div class="stats">
+        <div class="stat"><div class="v" id="sTotal">-</div><div class="k">账号总数</div></div>
+        <div class="stat good"><div class="v" id="sHealthy">-</div><div class="k">可用</div></div>
+        <div class="stat warn"><div class="v" id="sCooling">-</div><div class="k">冷却中</div></div>
+        <div class="stat bad"><div class="v" id="sDisabled">-</div><div class="k">已禁用</div></div>
+        <div class="stat warn"><div class="v" id="sPaused">-</div><div class="k">已暂停选号</div></div>
+        <div class="stat"><div class="v" id="sCredits">-</div><div class="k">积分剩余 / 总额</div></div>
+        <div class="stat"><div class="v" id="sSticky">-</div><div class="k">粘性会话</div></div>
+      </div>
+    </div>
+  </div>
+
 
 <div id="toasts"></div>
 

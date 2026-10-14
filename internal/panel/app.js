@@ -614,9 +614,46 @@ async function bootstrapAuth() {
   pageBuild = (s && s.build) || '';   // 版本自检基准（见 checkBuild）
   setAuthMode('login');
   applyRole();
+  initStatFab();   // 右下角账号池概览卡：读本地记忆的展开状态
+  initNavDrawer();   // 手机端导航抽屉（桌面端无按钮，直接返回）
   closeGates();
   start();
 }
+
+/* ── 手机端导航抽屉（≤900px）────────────────────────────────────────
+     桌面端侧导航常驻 208px，手机上改成抽屉：点顶栏汉堡从左侧滑出，点遮罩 /
+     选中一项 / 按 Esc 关闭。桌面端没有汉堡按钮（CSS 默认隐藏），这套逻辑也就
+     不会被触发 —— 但代码照跑，因为它是按「按钮存不存在」判断的。 */
+  function navDrawerOpen() { return document.body.classList.contains('nav-open'); }
+
+  function setNavDrawer(on) {
+    document.body.classList.toggle('nav-open', !!on);
+    const sc = $('navScrim');
+    if (sc) sc.hidden = !on;
+    const btn = $('btnNav');
+    if (btn) btn.setAttribute('aria-expanded', on ? 'true' : 'false');
+    // 抽屉打开时锁死背景滚动，关闭时恢复。用 overflow 而不是 position:fixed
+    // —— 后者会丢掉当前滚动位置（用户回到页顶会以为是 bug）。
+    document.body.style.overflow = on ? 'hidden' : '';
+  }
+
+  function initNavDrawer() {
+    const btn = $('btnNav'), sc = $('navScrim');
+    if (!btn || !sc) return;   // 桌面端不初始化
+    btn.addEventListener('click', () => setNavDrawer(!navDrawerOpen()));
+    sc.addEventListener('click', () => setNavDrawer(false));
+    // 选中任一项后关闭抽屉（手机上不该留着面板挡内容）
+    document.querySelectorAll('.nav a').forEach(a => {
+      a.addEventListener('click', () => setNavDrawer(false));
+    });
+    document.addEventListener('keydown', e => {
+      if (e.key === 'Escape' && navDrawerOpen()) setNavDrawer(false);
+    });
+    // 窗口拉宽到桌面尺寸时自动收起，否则抽屉状态会残留（遮罩还盖着）
+    window.addEventListener('resize', () => {
+      if (window.innerWidth > 900 && navDrawerOpen()) setNavDrawer(false);
+    });
+  }
 
 /* ── 路由 ─────────────────────────────────────────────────────────── */
 /* 积分包明细共享缓存：「积分构成」视图与首页「积分到期提醒」卡片共用同一份
@@ -660,6 +697,49 @@ document.querySelectorAll('.nav a').forEach(a => a.onclick = e => {
   if (!a.dataset.view) return;
   e.preventDefault(); go(a.dataset.view); history.replaceState(null, '', '#' + a.dataset.view);
 });
+
+/* ── 账号池概览悬浮卡（右下角）──────────────────────────────────────
+     顶部统计条挪到右下角后的交互与同步。数据仍由 loadOverview() 一次拉全，
+     这里只做两件轻活：切展开/收起、把三个关键数字搬到收起态的那条 tab 上。 */
+  const STATFAB_KEY = 'wb2api.statfab';
+  let statFabOpen = false;
+
+  function initStatFab() {
+    const fab = $('statFab');
+    if (!fab) return;
+    // 卡片在 HTML 里带 hidden：未登录/未取到数据前先不占位置，首次 loadOverview
+    // 成功后由 syncFab 摘掉（否则访客一进来就看到一排 0）。
+    const tab = $('statFabTab');
+    if (!tab) return;
+    try { statFabOpen = localStorage.getItem(STATFAB_KEY) === '1'; } catch (e) { statFabOpen = false; }
+    tab.addEventListener('click', () => setStatFabOpen(!statFabOpen));
+    setStatFabOpen(statFabOpen, true);
+  }
+
+  function setStatFabOpen(on, initial) {
+    statFabOpen = !!on;
+    const body = $('statFabBody'), tab = $('statFabTab');
+    if (body) body.hidden = !statFabOpen;
+    if (tab) {
+      tab.setAttribute('aria-expanded', statFabOpen ? 'true' : 'false');
+      tab.title = statFabOpen ? '收起账号池概览' : '展开账号池概览（账号总数 / 可用 / 冷却 / 禁用 / 暂停 / 积分 / 粘性会话）';
+    }
+    try { localStorage.setItem(STATFAB_KEY, statFabOpen ? '1' : '0'); } catch (e) { /* 隐私模式 */ }
+    if (!initial) { /* 收起/展开不做多余动作 */ }
+  }
+
+  /* syncFab 把概览数据同步到悬浮卡：露出卡片、填角标数字、按可用数改脉冲点颜色。
+     loadOverview() 每次轮询都会走到这里，所以卡片数字与页内统计永远一致。 */
+  function syncFab(allTotal, allAvail, coolCount) {
+    const fab = $('statFab');
+    if (fab) fab.hidden = false;
+    const setNum = (id, v) => { const el = $(id); if (el) el.textContent = v; };
+    setNum('fabTotal', allTotal);
+    setNum('fabAvail', allAvail);
+    setNum('fabCooling', coolCount == null ? 0 : coolCount);
+    const p = $('fabPulse');
+    if (p) p.className = 'pulse' + (allAvail > 0 ? '' : (allTotal ? ' warn' : ' bad'));
+  }
 
 /* ── 视图内二级分组 Tab（供应商页 / 配置页共用）───────────────────────
    供应商页原本 4 张卡（供应商 / 积分快过期 / 指纹 / 可靠性与限流）纵向堆成
@@ -1141,6 +1221,8 @@ async function loadOverview(quiet) {
     ].filter(Boolean).join(' · ');
     const up = Math.floor(d.uptime_sec);
     $('subMeta').textContent = '运行 ' + (up >= 86400 ? Math.floor(up / 86400) + ' 天 ' : '') + Math.floor(up % 86400 / 3600) + ' 时 ' + Math.floor(up % 3600 / 60) + ' 分';
+    // 右下角悬浮卡与页内统计同源：同一次刷新的同一批数字，不另开请求。
+    syncFab(allTotal, allAvail, (d.cooling || 0) + ogCoolingCount);
     syncAccSourceOptions(omniList);
     renderAccounts(d.accounts || [], omniList);
     renderModelLocks(d.model_locks);

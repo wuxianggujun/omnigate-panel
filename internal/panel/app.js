@@ -720,6 +720,11 @@ document.querySelectorAll('.nav a').forEach(a => a.onclick = e => {
     statFabOpen = !!on;
     const body = $('statFabBody'), tab = $('statFabTab');
     if (body) body.hidden = !statFabOpen;
+    // .open 交给 CSS 判断「要不要给 sticky .savebar 让位」：让位只发生在展开态
+    // （收起态那条 33px 的 tab 撞不到任何东西，不必抬）。见 theme.css 里
+    // body[data-view=config/providers] .statfab.open 那两条。
+    const fab = $('statFab');
+    if (fab) fab.classList.toggle('open', statFabOpen);
     if (tab) {
       tab.setAttribute('aria-expanded', statFabOpen ? 'true' : 'false');
       tab.title = statFabOpen ? '收起账号池概览' : '展开账号池概览（账号总数 / 可用 / 冷却 / 禁用 / 暂停 / 积分 / 粘性会话）';

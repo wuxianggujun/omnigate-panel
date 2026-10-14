@@ -102,9 +102,15 @@ func TestStatFabCSS(t *testing.T) {
 		t.Error("#toasts 仍贴 bottom:20px：会与右下角悬浮卡重叠")
 	}
 	// ④ 有 sticky .savebar 的页面要抬高卡片，否则压住「保存」主按钮。
-	if !strings.Contains(C, `body[data-view="config"] .statfab`) ||
-		!strings.Contains(C, `body[data-view="providers"] .statfab`) {
-		t.Error("配置/供应商页未给 .savebar 让位：悬浮卡会压住保存按钮")
+	//    只让「展开态」让位（.statfab.open）：收起态只剩一条 33px 的 tab，
+	//    撞不到保存条，没必要跟着抬。
+	if !strings.Contains(C, `body[data-view="config"] .statfab.open`) ||
+		!strings.Contains(C, `body[data-view="providers"] .statfab.open`) {
+		t.Error("配置/供应商页未在展开态给 .savebar 让位：悬浮卡会盖住保存按钮")
+	}
+	// 旧方案是无脑 bottom:76px（收起态也抬），不能退回去。
+	if strings.Contains(C, `body[data-view="config"] .statfab,\nbody[data-view="providers"] .statfab {`) {
+		t.Error("退回了「收起态也抬」的旧让位方案")
 	}
 }
 
@@ -123,6 +129,11 @@ func TestStatFabJS(t *testing.T) {
 	}
 	if !strings.Contains(J, "wb2api.statfab") {
 		t.Error("app.js 未持久化展开状态（wb2api.statfab）")
+	}
+	// .open 是给 CSS 判断「要不要给 sticky .savebar 让位」的开关，只在展开态加上。
+	// 少了它，CSS 里 body[data-view=config] .statfab.open 永远不命中。
+	if !strings.Contains(J, "classList.toggle('open', statFabOpen)") {
+		t.Error("setStatFabOpen 未切换 .open：配置/供应商页的保存条仍会被展开面板盖住")
 	}
 	// loadOverview 内必须调用 syncFab —— 只在函数外定义等于没接线。
 	f := strings.Index(J, "async function loadOverview")

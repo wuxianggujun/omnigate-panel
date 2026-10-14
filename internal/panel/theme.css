@@ -824,11 +824,19 @@ body[data-role="public"] #btnTopLogin { border-color: var(--accent, var(--line))
 #loginVeil input { width: 100%; box-sizing: border-box; }
 #paccTable td, #paccTable th { white-space: nowrap; }
 
-/* 配置页 / 上游供应商页底部有 sticky .savebar（保存按钮条，实测高约 60px）。
-   悬浮卡是 fixed 定位，会压在保存条上 —— 这两页恰好都是「改完要保存」的页，
-   压住主按钮比挡住统计更糟。在这两页把卡片抬高到保存条上方。 */
-body[data-view="config"] .statfab,
-body[data-view="providers"] .statfab { bottom: 76px; }
+/* 配置页 / 供应商页底部有 sticky .savebar（保存按钮条）。悬浮卡是 fixed，
+   展开后面板高约 280px，会和保存条相交、把「保存」按钮盖住点不着。
+   这两页恰好都是「改完要保存」的页，压住主按钮比挡住统计更糟。
+
+   两点刻意的取舍：
+   1) 只让「展开态」让位（.statfab.open，由 app.js 在 setStatFabOpen 里增删）。
+      收起态只剩一条 33px 的 tab，天然撞不到保存条；旧方案连收起态一起抬，
+      白占几十像素。
+   2) 让位量按"savebar 停在自然位置时它有多高"给足（实测 config 80px /
+      providers 64px + 12px 呼吸），而不是按"吸底时算高度"猜 —— sticky 只在
+      容器能滚时才吸底，这两页内容一短它就停在原位，猜的量会落空。 */
+body[data-view="config"] .statfab.open { bottom: 92px; }
+body[data-view="providers"] .statfab.open { bottom: 76px; }
 
 /* ══════════════════════════════════════════════════════════════════════
    手机版适配（≤900px / ≤560px / ≤400px 三档）

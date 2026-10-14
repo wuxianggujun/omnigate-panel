@@ -933,3 +933,77 @@ body[data-role="public"] #btnTopLogin { border-color: var(--accent, var(--line))
   .acc { font-size: 11.5px; }
   .acc .c-acts { white-space: normal; }
 }
+
+/* ── 路由优先级有序列表（routing.prefer）──
+ * 替代原来的 <textarea id="cfgRoutingPrefer">：一行一个卡片，上移/下移/置顶/移除。
+ * 视觉对齐内部已有的 .acc 表格行（tag / og-s / xs 按钮），不引入新配色。 */
+.rrlist { list-style: none; margin: 0; padding: 0; border: 1px solid var(--line-soft); border-radius: 10px; overflow: hidden; }
+.rrlist > li { display: flex; align-items: center; gap: 10px; padding: 9px 12px; background: var(--surface-2); border-top: 1px solid var(--line-soft); }
+.rrlist > li:first-child { border-top: 0; }
+.rrlist > li.empty { display: block; }
+.rr-rank { flex: 0 0 auto; width: 22px; height: 22px; border-radius: 999px; background: var(--surface); border: 1px solid var(--line); color: var(--ink-3); font-size: 11.5px; font-weight: 600; display: inline-flex; align-items: center; justify-content: center; }
+.rr-main { flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 13px; }
+.rr-main > b { font-weight: 600; }
+.rr-main > i { font-size: 12px; color: var(--ink-3); font-style: normal; }
+.rr-acts { flex: 0 0 auto; display: flex; gap: 4px; }
+.rr-acts .xs { min-width: 26px; }
+.rr-acts .xs[disabled] { opacity: .4; cursor: not-allowed; }
+
+/* ── 裸模型名求值链路图（routeFlow）──
+ *  step 顺序必须与 gateway.go routeResolved 一致：模型名映射 → provider/ 前缀 →
+ *  prefer①…n → 默认供应商。终点高亮，因为它才是「前面的全落空」时真正接单的人。 */
+.routeflow { margin-top: 12px; }
+.flow-in { display: flex; align-items: stretch; gap: 6px; flex-wrap: wrap; }
+.flow-step { display: flex; flex-direction: column; gap: 2px; padding: 7px 10px; border-radius: 9px; border: 1px solid var(--line); background: var(--surface-2); font-size: 12.5px; min-width: 0; }
+.flow-step > b { font-weight: 600; font-size: 12.5px; }
+.flow-step > i { font-style: normal; font-size: 11.5px; color: var(--ink-3); }
+.flow-ar { align-self: center; color: var(--ink-3); font-size: 12px; }
+.flow-map { border-color: var(--line); }
+.flow-pre { border-style: dashed; }
+.flow-rr { border-color: var(--line-soft); }
+.flow-empty { opacity: .65; }
+.flow-dp { border-color: var(--acc, var(--ink-2)); background: var(--surface); }
+@media (max-width: 560px) {
+  .rrlist > li { flex-wrap: wrap; }
+  .rr-acts { width: 100%; justify-content: flex-end; }
+  .flow-step { flex: 1 1 100%; }
+  .flow-ar { display: none; }
+}
+/* ── 密钥作用域实时预览（keyScopePreviewHtml）─────────────────────
+   画在每张密钥卡片底下，把「这把 key 到底能调哪些模型」直接算出来。
+   起因是 403 反复出现而界面上看不出原因：改了 prefer / default_provider /
+   mapping 之后，scope 还锁在老渠道上，客户端就永久 403。
+   颜色只用既有令牌（--line / --ink-3 / --ok / --warn / --bad），暗亮均成立。 */
+.kscope {
+  margin-top: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--ok);
+  border-radius: 6px;
+  background: var(--ok-soft);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+.kscope > b { display: block; font-size: 13px; }
+.kscope > span { display: block; color: var(--ink-3); margin-top: 2px; }
+.kscope-s { font-size: 11.5px; opacity: .85; word-break: break-all; }
+.kscope code { font-size: 11.5px; padding: 0 2px; }
+.kscope-w { color: var(--warn) !important; margin-top: 4px !important; }
+.kscope-bad {
+  border-left-color: var(--bad);
+  background: var(--bad-soft);
+}
+.kscope-bad > b { color: var(--bad); }
+@media (prefers-color-scheme: light) {
+  .kscope { background: rgba(68, 187, 136, .07); }
+  .kscope-bad { background: rgba(192, 71, 63, .07); }
+}
+/* ── 逐模型优先供应商列（模型与档位页；与 .rr-pref 对称）──
+   两列都是下拉,宽度一致才不歪;窄屏下两列各让一半,不横向溢出。
+   手机上两列的 select 要能放下「跟随全局路由」这个长选项,所以不设死宽度。 */
+.acc.rr .rr-prov { width: 180px; }
+.acc.rr .rr-pref select, .acc.rr .rr-prov select { width: 100%; min-width: 0; }
+@media (max-width: 720px) {
+  .acc.rr .rr-pref { width: 42%; }
+  .acc.rr .rr-prov { width: 58%; }
+}

@@ -698,8 +698,15 @@ function go(v) {
     if (!$('mdBody').children.length) loadModels();
     if ($('omBody') && !$('omBody').children.length) loadOmniModels();
     loadRealmRouting();
-    // 模型名映射卡归本页：数据只在进这一页时拉（admin 才看得到卡片）。
-    if (isAdmin() && $('mmBody')) loadModelMappings();
+    // 模型名映射卡归本页：数据只在进这一页时拉。注意守卫是「能否读」而不是「是不是
+    // admin」——GET /panel/api/omni/model-mapping 走 privileged（admin 或 viewer，见
+    // panel.go:348 与 tenant.go:111），普通 user 会 403。
+    // 但快照本身不能被 viewer 之外的门挡：下方「逐模型优先供应商」那一列读的就是
+    // 这份 omniMapping，任何看得见该页的人都该看到「这个模型已被钉到哪家」，
+    // 否则那一列永远显示「跟随全局路由」，与实际路由不符。
+    // 普通 user 拉不到 → catch 里静默、列退化成「跟随全局路由」，不弹错（卡片对他
+    // 本来就被 data-admin 隐藏）。
+    if (canReadModelMap()) loadModelMappings();
     // 上游模型目录也归本页；同样只在首次进入时拉，之后靠「刷新模型」手动刷新。
     if ($('models') && !$('models').children.length) loadUpstreamModels();
   }
@@ -1571,6 +1578,15 @@ function rrEffective(name) {
 
 // renderRealmPicker 用已加载的模型目录（mdAll，裸名去重）渲染「逐模型优先域」表。
 // 无需手写模型名：直接在下拉里选国内版/国际版；未选的跟随默认优先级。
+//
+// 「优先供应商」这一列（2026-10 加的）把「模型可以单独设置」这件事落在这里：后端
+// 唯一支持按模型指定供应商的机制是 model_mapping（别名 → 目标，硬规则），没有
+// 单独的 pin 字段。所以这里不是在造第二套机制，而是把已有机制从「高级区的手填
+// 文本框」搬到模型行内：选一个供应商 = 写一条 alias→provider/allowed 的映射；
+// 选回「跟随全局」= 删掉这条映射。三列口径：
+//   域优先级  → realm_routing（WB 侧选号：同一个 provider 内先国际版还是国内版）
+//   优先供应商 → model_mapping（换个渠道：这个模型走哪家供应商）
+// 两者不冲突：映射先决定「去哪家」，域优先级再决定「这家内先试哪个域」。
 function renderRealmPicker() {
   const tb = $('rrBody');
   if (!tb) return;
@@ -1579,11 +1595,14 @@ function renderRealmPicker() {
     if (!m || !m.id) continue;
     (avail[m.id] = avail[m.id] || new Set()).add(m.realm);
   }
+  // 逐模型已被 mapping 钉到某家供应商 → 该行显示供应商名（否则看起来像没配过）
+  const pinnedOf = n => (omniMapping && omniMapping[n]) || null;
+  const provs = ((omniCfg && omniCfg.providers) || []).map(p => p && p.name).filter(Boolean);
   const names = Object.keys(avail).sort();
   const q = rrQuery.toLowerCase();
   const shown = q ? names.filter(n => n.toLowerCase().includes(q)) : names;
   if (!shown.length) {
-    tb.innerHTML = '<tr><td colspan="2"><div class="empty">' +
+    tb.innerHTML = '<tr><td colspan="4"><div class="empty">' +
       (names.length ? '无匹配模型' : '模型列表为空，点上方「重新获取」加载') + '</div></td></tr>';
   } else {
     tb.innerHTML = shown.map(n => {
@@ -1592,11 +1611,27 @@ function renderRealmPicker() {
       const tags = Array.from(avail[n] || [])
         .map(r => '<span class="realm-tag">' + realmLabel(r) + '</span>').join(' ');
       const hint = wild ? ' <span class="note">（通配→' + realmLabel(wild) + '）</span>' : '';
-      return '<tr><td><div class="nm">' + esc(n) + ' ' + tags + hint + '</div></td><td>' +
+      // 供应商列：把「这个裸名当前被映射到哪家」画出来。被钉住时禁用域下拉没有意义
+      // （域是 WB 侧内部选号，仍然生效），所以两列都可改，互不排斥。
+      const pin = pinnedOf(n);
+      const chain = pin ? (Array.isArray(pin) ? pin : [pin]) : [];
+      const pinProv = chain.length ? String(chain[0] || '').split('/')[0] : '';
+      const pinTag = pinProv
+        ? ' <span class="tag warn">已钉 → ' + esc(pinProv) + '</span>'
+        : '';
+      const provOpts = ['<option value="">跟随全局路由</option>']
+        .concat(provs.map(p => '<option value="' + esc(p) + '"' +
+          (pinProv === p ? ' selected' : '') + '>' + esc(p) + '</option>')).join('');
+      return '<tr><td><div class="nm">' + esc(n) + ' ' + tags + hint + pinTag + '</div></td>' +
+        '<td class="rr-pref">' +
         '<select data-model="' + esc(n) + '" class="rr-sel" aria-label="' + esc(n) + ' 优先域">' +
           '<option value=""' + (cur === '' ? ' selected' : '') + '>跟随默认</option>' +
           '<option value="cn"' + (cur === 'cn' ? ' selected' : '') + '>优先国内版</option>' +
           '<option value="global"' + (cur === 'global' ? ' selected' : '') + '>优先国际版</option>' +
+        '</select></td>' +
+        '<td class="rr-prov">' +
+        '<select data-pin="' + esc(n) + '" class="rr-pin" aria-label="' + esc(n) + ' 优先供应商">' +
+          provOpts +
         '</select></td></tr>';
     }).join('');
   }
@@ -1661,11 +1696,67 @@ const rrBodyEl = $('rrBody');
 if (rrBodyEl) {
   rrBodyEl.addEventListener('change', ev => {
     const sel = ev.target.closest('select.rr-sel');
-    if (!sel || !sel.dataset.model) return;
-    if (sel.value) rrExact[sel.dataset.model] = sel.value;
-    else delete rrExact[sel.dataset.model];
-    renderRealmPicker(); // 重渲染以刷新「通配→」提示
+    if (sel && sel.dataset.model) {
+      if (sel.value) rrExact[sel.dataset.model] = sel.value;
+      else delete rrExact[sel.dataset.model];
+      renderRealmPicker(); // 重渲染以刷新「通配→」提示
+      return;
+    }
+    const pin = ev.target.closest('select.rr-pin');
+    if (pin && pin.dataset.pin) mmPinFromPicker(pin.dataset.pin, pin.value, pin);
   });
+}
+
+/* mmPinFromPicker「模型与档位」页的逐模型优先供应商 → 一条模型名映射。
+ *
+ * 为什么是写 mapping 而不是新增配置字段：后端RoutingConfig 只有 Prefer 一个字段，
+ * ProviderConfig 也没有按模型的 pin。「把某模型钉到某供应商」在后端唯一载体就是
+ * model_mapping（Chain() 第一行 = 主目标）。所以这里只是把同一机制从高级区的手填
+ * 文本框搬进行内，写入口径与「模型名映射」卡片完全一致（同一个后端、同一份文件），
+ * 不会出现两套规则互相打架。
+ *
+ * 空值 = 删掉这条映射（恢复按全局路由 prefer 走）。删除前要确认它不是一条多目标
+ * 引流链——行内的下拉只看得见第一行，直接删会把用户辛苦配的回退链一起删掉。 */
+async function mmPinFromPicker(model, prov, sel) {
+  const cur = (omniMapping && omniMapping[model]) || null;
+  const chain = cur ? (Array.isArray(cur) ? cur : [cur]) : [];
+  if (!prov) {
+    if (!chain.length) { toast('「' + model + '」本来就没有单独设置', 'err'); return; }
+    if (chain.length > 1) {
+      const ok = confirm('「' + model + '」当前是一条 ' + chain.length + ' 级引流链：\n' +
+        chain.map((t, i) => '  ' + (i + 1) + '. ' + t).join('\n') +
+        '\n\n行内下拉只能管理第一行，继续将删除整条链（含后面的回退）。\n' +
+        '只想停用不断链，请去下方「模型名映射」卡片点「停用」。');
+      if (!ok) { renderRealmPicker(); return; }
+    }
+    try {
+      await apiAbs('/omni/model-mapping/' + encodeURIComponent(model), { method: 'DELETE' });
+      toast('已取消「' + model + '」的单独设置，改按全局路由走', 'ok');
+      await loadModelMappings();
+      renderKeyEditor();   // 这把 key 能调哪些模型的预览随映射变化
+      renderRealmPicker();
+    } catch (e) {
+      toast('取消失败：' + e.message, 'err');
+      renderRealmPicker();
+    }
+    return;
+  }
+  // 目标写成「供应商 + 同名模型」：行内只认裸名，映射后上游收到的仍是同名裸模型，
+  // 与用户在下拉里看到的名字一致，不会出现"配了 A 实际打 B"。
+  const target = prov + '/' + model;
+  try {
+    await apiAbs('/omni/model-mapping', {
+      method: 'POST',
+      body: JSON.stringify({ alias: model, targets: [target] }),
+    });
+    toast('已把「' + model + '」钉到 ' + prov + '（别名硬规则，盖过全局路由优先级）', 'ok');
+    await loadModelMappings();
+    renderKeyEditor();
+    renderRealmPicker();
+  } catch (e) {
+    toast('设置失败：' + e.message, 'err');
+    renderRealmPicker();
+  }
 }
 const rrSearchEl = $('rrSearch');
 if (rrSearchEl) {
@@ -4466,11 +4557,9 @@ async function loadOmniConfig() {
     if ($('cfgDefaultModel')) $('cfgDefaultModel').value = omniCfg.default_model || '';
     if ($('cfgMode')) $('cfgMode').value = omniCfg.mode || 'text';
     if ($('cfgReasoning')) $('cfgReasoning').checked = !!omniCfg.reasoning;
-    // 路由优先级（routing.prefer）：裸模型名的供应商偏好顺序，一行一个。
-    if ($('cfgRoutingPrefer')) {
-      const rt = (omniCfg.routing && typeof omniCfg.routing === 'object') ? omniCfg.routing : {};
-      $('cfgRoutingPrefer').value = Array.isArray(rt.prefer) ? rt.prefer.join('\n') : '';
-    }
+    // 路由优先级（routing.prefer）：裸模型名的供应商偏好顺序。已从手填 textarea
+    // 改成有序卡片列表（rrList + routeFlow 链路图）；渲染在 renderProvEditor 之后
+    // 统一做（那里的注释说明了为什么必须晚于它）。
     // 积分快过期优先（credit_routing）：缺省启用（enabled 缺失/false 之外的都算启用）。
     const cr = (omniCfg.credit_routing && typeof omniCfg.credit_routing === 'object') ? omniCfg.credit_routing : {};
     if ($('crEnabled')) $('crEnabled').checked = cr.enabled !== false;
@@ -4487,6 +4576,9 @@ async function loadOmniConfig() {
     if ($('cfRlWindow')) $('cfRlWindow').value = (rl.window != null && rl.window !== '') ? rl.window : '';
     if ($('cfRlMax')) $('cfRlMax').value = (rl.max != null && rl.max !== '') ? rl.max : '';
     renderProvEditor();
+    // 链路图与优先级列表放在 renderProvEditor 之后：它会重建 cfgDefaultProvider
+    // 下拉并写回 omniCfg.default_provider，链路图的终点要读这个值。
+    renderRrList();
     renderKeyEditor();
     renderFingerprint();
     if (isAdmin()) loadModelMappings();
@@ -4645,7 +4737,25 @@ async function fpSyncVersion() {
  *
  * 读取/写入都走面板代理 /panel/api/omni/model-mapping（面板服务端注入 api_key
  * 转发到进程内 OmniGate 的 /admin/model-mapping）。平台级设置：只有管理员能看到
- * 与修改（mmBox 带 data-admin，写入端点也走 admin 守卫）。 */
+ * 与修改（mmBox 带 data-admin，写入端点也走 admin 守卫）。
+ *
+ * omniMapping / omniMappingOff 是这份配置的模块级快照。它**不在 omniCfg 里**
+ * （后端落盘在单独的 data/model-mapping.json），但「配置页 → 网关密钥」的卡片要用
+ * 它算「这把 key 能调哪些模型」——别名出现在客户端 /v1/models 里，如果预览漏了
+ * 别名，就会对「别名 403」这类问题失明。所以谁改了 mapping，谁就同步这两个快照。 */
+
+let omniMapping = {};   // 别名 → 目标（裸串或数组），与后端 m.mappings 同形
+let omniMappingOff = {}; // 别名 → true，被停用的规则
+
+// canReadModelMap 对应当前用户能否读模型名映射（GET /panel/api/omni/model-mapping）。
+// 后端守卫是 privileged：admin 或 viewer 放行，普通 user 与游客 403
+// （panel.go:348 注册 + tenant.go:111 的 role 判定）。写操作更严，只 admin。
+// 这里必须与后端同口径——前端放行而后端 403 会在 Network 里留一条红色失败请求，
+// 且 loadModelMappings 的 catch 会把状态行打成错误态（卡片虽然隐藏，但白跑一次）。
+function canReadModelMap() {
+  const r = (authState && authState.role) || '';
+  return r === 'admin' || r === 'viewer';
+}
 
 async function loadModelMappings() {
   const tb = $('mmBody'), st = $('mmState');
@@ -4656,6 +4766,8 @@ async function loadModelMappings() {
     const d = await apiAbs('/omni/model-mapping');
     const m = (d && d.mappings) || {};
     const off = (d && d.disabled) || {};   // { 别名: true } —— 被停用的规则
+    omniMapping = m;                       // 同步快照（密钥卡片预览要用）
+    omniMappingOff = off;
     const keys = Object.keys(m).sort();
     if (st) st.hidden = true;
     if (!keys.length) {
@@ -5244,6 +5356,114 @@ function newKeyValue() {
   return 'sk-' + bytes.map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
+/* ── keyScopeModels：这把 key 实际能调哪些模型 ────────────────────────────
+ *
+ * 必须逐字复刻后端 gateway.go 的口径，否则预览就是在骗人。真实求值顺序：
+ *   1. ListModelsFor(allowed)：遍历 provider，取 p.models 目录，每个模型名前加
+ *      "provider/" 前缀；allowed 非空时只放行列出的供应商。
+ *   2. 再看 model-mapping 的别名：g.route(alias) → modelMap.Resolve(alias) 拿
+ *      Chain() 第一行 → routeResolved → (provider, model)。该 provider 在 scope
+ *      内才曝光；且 ID 不与前面重复。
+ *   3. 停用的映射规则不曝光（客户端看见名字却调不到，比不列更难排查）。
+ *   4. model_whitelist（若有）最后再过一遍收窄。
+ *
+ * 数据来源注意：mapping **不在 omniCfg 里**，它由 /panel/api/omni/model-mapping
+ * 单独一份（落盘 data/model-mapping.json）。所以这里读 omniMapping 这个模块级快照
+ * （loadModelMappings 拉到后写入，增删停用时同步刷新），而不是 omniCfg.model_mapping
+ * —— 后者从来没被赋过值，读它等于永远看不到别名，预览会对「别名在 scope 外」这类
+ * 403 完全失明。
+ *
+ * 现实里 90% 的 403 都出在这两处口径：改了路由（prefer / default_provider /
+ * mapping）之后忘了同步 key 的 scope，于是「模型明明在列表里却 403」。把结果直接
+ * 画在密钥卡片上，这个盲区就不存在了 —— 上面那次 drain key 403 就是这么来的。
+ */
+function keyScopeModels(k) {
+  const provs = ((omniCfg && omniCfg.providers) || []);
+  const has = (k && k.providers) || [];
+  // 复刻 ListModelsFor 的 allow 语义：空 = 全量
+  const allow = has.length ? new Set(has) : null;
+  const byName = new Map();
+  provs.forEach(p => { if (p && p.name) byName.set(p.name, p); });
+
+  const out = [];
+  const seen = new Set();
+  provs.forEach(p => {
+    if (!p || !p.name) return;
+    if (allow && !allow.has(p.name)) return;
+    const mods = (typeof p.models === 'string' ? p.models.split(/[\n,]+/) : (p.models || []))
+      .map(s => String(s).trim()).filter(Boolean);
+    for (const m of mods) {
+      const id = p.name + '/' + m;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      out.push({ id: id, prov: p.name, alias: false });
+    }
+  });
+
+  // model-mapping 别名：按 route() 的真实顺序解析到「目标」再取它的供应商。
+  const maps = omniMapping || {};
+  const disabled = omniMappingOff || {};
+  Object.keys(maps).forEach(alias => {
+    if (seen.has(alias)) return;
+    if (disabled[alias]) return;
+    const raw = maps[alias];
+    const chain = Array.isArray(raw) ? raw : (typeof raw === 'string' && raw.trim() ? [raw.trim()] : []);
+    if (!chain.length) return;
+    const first = String(chain[0] || '').trim();
+    if (!first) return;
+    const slash = first.indexOf('/');
+    let pn, target;
+    if (slash > 0) { pn = first.slice(0, slash); target = first.slice(slash + 1); }
+    else { pn = (omniCfg && omniCfg.default_provider) || ''; target = first; }
+    if (!pn) return;
+    if (allow && !allow.has(pn)) return;   // 目标供应商不在 scope 内 → 不曝光（后端同此）
+    seen.add(alias);
+    out.push({ id: alias, prov: pn, alias: true, target: target });
+  });
+
+  // model_whitelist 最后收窄
+  const wl = ((omniCfg && omniCfg.model_whitelist) || []).filter(Boolean);
+  return wl.length ? out.filter(m => wl.indexOf(m.id) >= 0) : out;
+}
+
+// keyScopePreviewHtml 在密钥卡片上渲染「这把 key 能调哪些模型」。
+// 关键不是把 41 个模型名罗列出来（没人看），而是给出**足以预防 403 的三个数**：
+// 模型数、覆盖哪些供应商、以及一句「改了路由要回来看这里」的提醒。
+function keyScopePreviewHtml(k) {
+  const list = keyScopeModels(k);
+  const provs = Array.from(new Set(list.map(m => m.prov))).sort();
+  const aliases = list.filter(m => m.alias);
+  const has = (k && k.providers) || [];
+
+  if (!list.length) {
+    // 三种死法要说清楚，否则用户只会看到「空」不知道该改哪：
+    //   a. 一家供应商都没勾，而供应商表本身是空的 → 无处可调
+    //   b. 勾了，但那些供应商的 models 目录是空的（账号删空后常见）→ 调什么 403
+    //   c. 勾了、目录也有模型，但全被 model_whitelist 挡了
+    const allProvs = ((omniCfg && omniCfg.providers) || []).map(p => p && p.name).filter(Boolean);
+    let why = '这家供应商的模型目录是空的（账号或模型还没配）。';
+    if (!allProvs.length) why = '还没有配置任何供应商。';
+    else if (has.length && !allProvs.filter(n => has.indexOf(n) >= 0).length) {
+      why = '授权的供应商「' + has.join('、') + '」在供应商表里已经不存在了 —— 请重新勾选。';
+    }
+    return '<div class="kscope kscope-bad"><b>0 个模型可调</b><span>' + esc(why) +
+      '客户端无论请求什么都会 403。</span></div>';
+  }
+
+  const wl = ((omniCfg && omniCfg.model_whitelist) || []).filter(Boolean);
+  const head = has.length
+    ? '锁 ' + has.length + ' 家供应商 · 共 <b>' + list.length + '</b> 个模型'
+    : '全量 · 共 <b>' + list.length + '</b> 个模型';
+  const sample = list.slice(0, 4).map(m => '<code>' + esc(m.id) + '</code>').join(' ');
+  const more = list.length > 4 ? ' <span class="og-s">等</span>' : '';
+  return '<div class="kscope"><b>' + head + '</b>' +
+    '<span>覆盖：' + esc(provs.join('、')) + (aliases.length ? '（含 ' + aliases.length + ' 个别名）' : '') + '</span>' +
+    '<span class="kscope-s">' + sample + more + '</span>' +
+    (wl.length ? '<span class="kscope-w">已开模型白名单，实际可调会更少</span>' : '') +
+    '<span class="kscope-w">改了「全局路由」的优先级 / 默认供应商 / 模型映射后，别名与默认落点可能变化 —— 保存前回来看一眼这里。</span>' +
+    '</div>';
+}
+
 function keyCard(k, i) {
   const provs = ((omniCfg && omniCfg.providers) || []).map(p => p.name).filter(Boolean);
   const has = (k.providers || []);
@@ -5267,6 +5487,7 @@ function keyCard(k, i) {
     '<div class="og-sep"></div>' +
     '<div class="og-s">授权供应商（<strong>不勾 = 全量</strong>，可调用所有模型）</div>' +
     '<div class="og-fields">' + boxes + '</div>' +
+    keyScopePreviewHtml(k) +
   '</div>';
 }
 
@@ -5295,7 +5516,22 @@ function onKeyInput(ev) {
     const at = k.providers.indexOf(el.value);
     if (el.checked && at < 0) k.providers.push(el.value);
     if (!el.checked && at >= 0) k.providers.splice(at, 1);
-    renderKeyEditor(); // 角标（全量/收窄）随之更新
+    // 只刷预览与角标，不整卡重绘：整卡重绘会重建 <input>，正在填「名称」的用户
+    // 会被打断输入（这是勾选时最常碰到的状态）。用 dataset 定位同卡片内的
+    // 角标与预览即可。
+    const card = el.closest('.og-card');
+    if (card) {
+      const tag = card.querySelector('.og-t');
+      if (tag) tag.innerHTML = '密钥 #' + (i + 1) + ' ' +
+        (k.providers.length ? '<span class="tag warn">收窄</span>' : '<span class="tag ok">全量</span>');
+      const old = card.querySelector('.kscope');
+      const fresh = document.createElement('div');
+      fresh.innerHTML = keyScopePreviewHtml(k);
+      const node = fresh.firstElementChild;
+      if (node) {
+        if (old) old.replaceWith(node); else card.appendChild(node);
+      }
+    }
   }
 }
 
@@ -5378,15 +5614,167 @@ function collectReliability() {
   omniCfg.rate_limit = rl;
 }
 
-// collectRouting 从表单读回「裸模型名路由优先级」（写进 omniCfg.routing.prefer）。
-// 留空 = 删除该字段（回落后端默认值 = 一律 default_provider）。
+// ── 裸模型名路由优先级（routing.prefer）：有序卡片列表 ──
+//
+// 历史：这里原本是 <textarea id="cfgRoutingPrefer">，一行一个供应商名。三个问题：
+//   1) 手填的名字打错一个字母就静默失效（routeResolved 用 g.providers[name] 查不到
+//      就跳过，没有任何提示），用户无从知道「我配了但没生效」；
+//   2) 看不出每家有没有账号 / 有没有 api_key，排在前面的可能根本不可用；
+//   3) 和 default_provider 隔着一条 hr，看不出「全落空时会掉到默认供应商」。
+// 现在改成可排序卡片：顺序即优先级，行内显示类型/账号数/可用性，未加入的从下拉补。
+//
+// 数据流（保存口径不变）：卡片只是 omniCfg.routing.prefer 的可视化编辑器，
+// collectRouting() 仍从 omniCfg 读回数组写盘，不新增任何后端字段。
+const RR_LIST_ID = 'rrList';
+
+// 从 omniCfg 读出当前 prefer 数组（做去重、剔掉已不存在的供应商，避免脏数据把
+// routeResolved 引到不存在的供应商上——虽然那只会被跳过，但列表会显示幽灵行）。
+function rrCurrent() {
+  const rt = (omniCfg && omniCfg.routing && typeof omniCfg.routing === 'object') ? omniCfg.routing : {};
+  const arr = Array.isArray(rt.prefer) ? rt.prefer.slice() : [];
+  const provs = (omniCfg && omniCfg.providers) || [];
+  const known = new Set(provs.map(p => p && p.name).filter(Boolean));
+  const seen = new Set();
+  return arr.filter(n => {
+    const s = String(n || '').trim();
+    if (!s || !known.has(s) || seen.has(s)) return false;
+    seen.add(s);
+    return true;
+  });
+}
+
+// 渲染链路图：把「一个裸模型名怎么落到供应商」按真实求值顺序画出来。
+// 必须与 gateway.go routeResolved 的语义逐字对应，否则图就是骗人的：
+//   1. model名映射（model_mapping，别名硬规则，本页管不着）
+//   2. 带 provider/ 前缀 → 直接指定，也不经本页
+//   3. 裸名按 prefer 顺序取第一个「目录里真有该模型」的
+//   4. 都没有 → 默认供应商
+function renderRouteFlow() {
+  const el = $('routeFlow');
+  if (!el) return;
+  const provs = (omniCfg && omniCfg.providers) || [];
+  const cur = rrCurrent();
+  const dp = (omniCfg && omniCfg.default_provider) || '';
+  const steps = [];
+  steps.push({ k: 'map', t: '模型名映射', s: '别名硬规则', cls: 'flow-map' });
+  steps.push({ k: 'pre', t: 'provider/ 前缀', s: '直接指定', cls: 'flow-pre' });
+  if (cur.length) {
+    cur.forEach((n, i) => {
+      const p = provs.find(x => x && x.name === n);
+      steps.push({ k: 'rr' + i, t: esc(n), s: p ? provByline(p) : '(已不存在)', cls: 'flow-rr' });
+    });
+  } else {
+    steps.push({ k: 'rr0', t: '（优先级为空）', s: '跳过本步', cls: 'flow-rr flow-empty' });
+  }
+  steps.push({ k: 'dp', t: dp ? esc(dp) : '（未设默认供应商）', s: '最终兜底', cls: 'flow-dp' });
+  el.innerHTML = '<div class="flow-in">' + steps.map((s, i) =>
+    (i ? '<span class="flow-ar" aria-hidden="true">→</span>' : '') +
+    '<span class="flow-step ' + s.cls + '"><b>' + s.t + '</b><i>' + s.s + '</i></span>'
+  ).join('') + '</div>';
+}
+
+function renderRrList() {
+  const list = $(RR_LIST_ID);
+  if (!list) return;
+  const cur = rrCurrent();
+  const provs = (omniCfg && omniCfg.providers) || [];
+  if (!cur.length) {
+    list.innerHTML = '<li class="empty" style="padding:14px;text-align:center;color:var(--mut)">' +
+      '还没有设置优先级 —— 裸模型名会直接走「默认供应商」</li>';
+  } else {
+    list.innerHTML = cur.map((n, i) => {
+      const p = provs.find(x => x && x.name === n);
+      const badge = p ? provBadgeHtml(p) : '<span class="tag bad">供应商不存在</span>';
+      const by = p ? provByline(p) : '请移除这一行';
+      return '<li data-i="' + i + '">' +
+        '<span class="rr-rank">' + (i + 1) + '</span>' +
+        '<span class="rr-main"><b>' + esc(n) + '</b>' +
+        (p ? ' <span class="tag mute">' + esc(p.type || 'runable') + '</span>' : '') + ' ' + badge +
+        '<i>' + esc(by) + '</i></span>' +
+        '<span class="rr-acts">' +
+        '<button type="button" class="xs" data-rr="up" data-i="' + i + '"' + (i === 0 ? ' disabled' : '') + ' title="上移">↑</button>' +
+        '<button type="button" class="xs" data-rr="down" data-i="' + i + '"' + (i === cur.length - 1 ? ' disabled' : '') + ' title="下移">↓</button>' +
+        '<button type="button" class="xs ghost" data-rr="top" data-i="' + i + '"' + (i === 0 ? ' disabled' : '') + ' title="移到最前">最前</button>' +
+        '<button type="button" class="xs danger" data-rr="del" data-i="' + i + '" title="移出优先级">移除</button>' +
+        '</span></li>';
+    }).join('');
+  }
+  // 下拉：只列还没加入优先级的供应商，避免重复加同一家
+  const sel = $('rrAddSel');
+  if (sel) {
+    const rest = provs.map(p => p && p.name).filter(Boolean).filter(n => !cur.includes(n));
+    sel.innerHTML = rest.length
+      ? rest.map(n => '<option value="' + esc(n) + '">' + esc(n) + '</option>').join('')
+      : '<option value="">（都已加入）</option>';
+    const btn = $('btnRrAdd');
+    if (btn) btn.disabled = !rest.length;
+  }
+  renderRouteFlow();
+}
+
+// 上移/下移/置顶/移除，全部直接改 omniCfg.routing.prefer 再重绘。
+// 不单独存 DOM 状态：本页保存按钮是 saveOmniConfig()，中间任何时刻刷新页面都只应
+// 丢掉未保存的改动，而不该出现「列表显示的顺序」和「实际写盘的顺序」不一致。
+function rrMove(i, delta) {
+  const cur = rrCurrent();
+  const j = i + delta;
+  if (i < 0 || j < 0 || j >= cur.length) return;
+  const t = cur[i]; cur[i] = cur[j]; cur[j] = t;
+  rrWrite(cur);
+}
+function rrWrite(arr) {
+  if (!omniCfg) return;
+  const rt = (omniCfg.routing && typeof omniCfg.routing === 'object') ? omniCfg.routing : {};
+  if (arr.length) rt.prefer = arr; else delete rt.prefer;
+  if (Object.keys(rt).length) omniCfg.routing = rt; else delete omniCfg.routing;
+  renderRrList();
+  ogMsg('rrMsg', '已调整顺序，别忘了点「保存并生效」', 'ok');
+}
+function onRrListClick(ev) {
+  const b = ev.target.closest('button[data-rr]');
+  if (!b) return;
+  const i = Number(b.dataset.i);
+  const act = b.dataset.rr;
+  const cur = rrCurrent();
+  if (act === 'up') rrMove(i, -1);
+  else if (act === 'down') rrMove(i, 1);
+  else if (act === 'top') {
+    const t = cur.splice(i, 1)[0];
+    cur.unshift(t);
+    rrWrite(cur);
+  } else if (act === 'del') {
+    const t = cur.splice(i, 1)[0];
+    rrWrite(cur);
+    ogMsg('rrMsg', '已移出「' + t + '」，别忘了点「保存并生效」', 'ok');
+  }
+}
+function rrAddFromSelect() {
+  const sel = $('rrAddSel');
+  if (!sel || !sel.value) return;
+  const cur = rrCurrent();
+  if (cur.includes(sel.value)) { ogMsg('rrMsg', '「' + sel.value + '」已在优先级里', 'err'); return; }
+  cur.push(sel.value);
+  rrWrite(cur);
+  ogMsg('rrMsg', '已加入「' + sel.value + '」（在最后一位），别忘了点「保存并生效」', 'ok');
+}
+
+// collectRouting 从 omniCfg 读回「裸模型名路由优先级」。
+// 注意：现在列表直接改 omniCfg.routing.prefer（rrWrite），本函数仍保留并在保存前
+// 跑一遍 —— 一是兜底（万一有人没走列表、直接改了对象），二是把
+// 「prefer 为空则删掉 routing」这条归一规则收在一处，与改前的行为完全一致。
 function collectRouting() {
   if (!omniCfg) return;
-  const el = $('cfgRoutingPrefer');
-  if (!el) return;
-  const list = el.value.split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
   const rt = (omniCfg.routing && typeof omniCfg.routing === 'object') ? omniCfg.routing : {};
-  if (list.length) rt.prefer = list; else delete rt.prefer;
+  if (Array.isArray(rt.prefer)) {
+    // 去重必须在保存前做：卡片列表的 rrWrite 已经去过重，但别处（旧的
+    // cfgRoutingPrefer textarea 时代留下的配置、或直接改 omniCfg 的调用方）仍可能
+    // 塞进重复项。重复的第二项在 routeResolved 里永远排不上号，却在列表里显示成
+    // 一个正常序号，用户会以为排了两个不同渠道。
+    const seen = new Set();
+    const list = rt.prefer.map(s => String(s || '').trim()).filter(Boolean).
+      filter(n => (seen.has(n) ? false : (seen.add(n), true)));
+    if (list.length) rt.prefer = list; else delete rt.prefer;
+  }
   if (Object.keys(rt).length) omniCfg.routing = rt; else delete omniCfg.routing;
 }
 
@@ -6200,6 +6588,11 @@ async function saveOutbound() {
   on('btnAddProv', addProvider);
   on('btnSaveCfg', () => saveOmniConfig());
   on('btnReloadCfg', loadOmniConfig);
+  // 路由优先级有序列表（routing.prefer）：上移/下移/置顶/移除走事件委托，动态渲染
+  // 的 <li> 不用重新绑定；加入按钮读 rrAddSel 的当前选项。
+  const rl = $('rrList');
+  if (rl) rl.addEventListener('click', onRrListClick);
+  on('btnRrAdd', rrAddFromSelect);
   const pb = $('provBody');
   if (pb) pb.addEventListener('click', onProvClick);
   // 供应商编辑弹窗

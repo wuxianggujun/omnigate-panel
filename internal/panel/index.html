@@ -213,10 +213,11 @@
           </div>
           <div class="tbl-wrap rr-wrap">
             <table class="acc rr">
-              <thead><tr><th>模型</th><th class="rr-pref">优先域</th></tr></thead>
+              <thead><tr><th>模型</th><th class="rr-pref">优先域</th><th class="rr-prov">优先供应商</th></tr></thead>
               <tbody id="rrBody"></tbody>
             </table>
           </div>
+          <div class="hint" style="margin-top:8px">两列各管一层、可以同时设：<strong>优先供应商</strong>决定这个模型走哪家渠道（= 一条模型名映射，别名硬规则，优先于全局路由的优先级顺序）；<strong>优先域</strong>决定这家渠道内部先试国际版还是国内版。选「跟随全局路由」即删除该模型的单独设置。</div>
           <details class="rr-adv">
             <summary>高级：通配规则（可选）</summary>
             <div class="fields">
@@ -523,7 +524,16 @@
             <button type="button" class="xs" id="btnAddKey">+ 新增密钥</button>
           </header>
           <div class="pad">
-            <div class="og-hint" style="margin-top:0">发给客户端的 <code>/v1/*</code> 与 <code>/omni/v1/*</code> 密钥。不勾任何供应商 = <strong>全量</strong>（所有模型都能调）；勾选后该密钥只能调用这些供应商的模型，<code>/v1/models</code> 也会相应收窄，越权请求直接 <strong>403</strong>（不静默改道到别的供应商）。<br><strong>面板自己那把密钥恒为全量、不在本列表里</strong>（就是上面「服务」卡里的 <code>API 密钥</code>），所以在这里删光密钥也不会把面板锁死。改完点保存即热生效。</div>
+            <!-- 说明前移 + 讲清「多 key 共用」：原说明埋在密钥列表下方，用户根本
+                 看不到「一把 key 可以只授权部分供应商」这回事，于是遇到 403 只能
+                 乱猜。现在把三件事顶到最上面：①不勾=全量 ②勾选=收窄 ③路由改了
+                 要回来看预览。-->
+            <div class="og-hint" style="margin-top:0">
+              发给客户端的 <code>/v1/*</code> 与 <code>/omni/v1/*</code> 密钥。<strong>一把密钥可以授权多家供应商</strong>（这就是「多把 key 共用」反过来用：同一条 key 走多个渠道），也可以<strong>只勾一家</strong>做成专用 key。<br>
+              <strong>不勾任何供应商 = 全量</strong>（所有模型都能调）；<strong>勾选 = 收窄</strong>，该密钥只能调用这些供应商的模型，<code>/v1/models</code> 也会相应收窄，越权请求直接 <strong>403</strong>（不静默改道到别的供应商，也不会假装 404）。<br>
+              <strong>每张卡片下方会实时算出「这把 key 到底能调哪些模型」</strong>——请养成习惯：改了「全局路由」的优先级 / 默认供应商 / 模型映射之后，回到这里看一眼。上面出现过一次 <code>api key is scoped to providers [raccoon, runable]; requested model routes to provider workbuddy</code> 的 403，就是路由全改到 workbuddy、而这把 key 还锁着两家空壳渠道导致的。<br>
+              <strong>面板自己那把密钥恒为全量、不在本列表里</strong>（就是上面「服务」卡里的 <code>API 密钥</code>），所以在这里删光密钥也不会把面板锁死。改完点保存即热生效。
+            </div>
             <div id="keyEditor"></div>
             <div class="og-row" style="margin-top:10px">
               <button type="button" class="primary" id="btnSaveCfgKeys">保存并生效</button>
@@ -872,20 +882,41 @@
       <div class="box">
         <header><h3>全局路由 <span class="hint">决定一个裸模型名落在哪个供应商</span></h3></header>
         <div class="pad">
-          <div class="og-hint" style="margin-top:0">客户端请求里的<strong>裸模型名</strong>（不带 <code>provider/</code> 前缀）先查「模型与档位」页的<strong>模型名映射</strong>（别名是硬规则，优先于这里的一切），没命中再按本页规则选供应商。</div>
+          <div class="og-hint" style="margin-top:0">客户端请求里的<strong>裸模型名</strong>（不带 <code>provider/</code> 前缀）先查「模型与档位」页的<strong>模型名映射</strong>（别名是硬规则，优先于这里的一切），没命中再按下面的顺序选供应商。</div>
+          <!-- 兜底四项：原来和 prefer 的 textarea 挤在同一个 grid2 里混成一片；现在单独
+               成组、放在链路图之前 —— 链路图的终点就是「默认供应商」，字段和图放在一起
+               才看得出它们说的是同一件事。
+                注意：这四个控件的 id 是 loadOmniConfig / saveOmniConfig 的取值依据，
+               一个都不能改（改了就静默丢字段：既读不出来、也写不回去）。 -->
           <div class="grid2" style="margin-top:12px">
-            <label class="fld"><span class="lb">默认 provider</span><select id="cfgDefaultProvider"></select>
-              <span class="hint">prefer 没命中、也没有映射时落到这里</span></label>
+            <label class="fld"><span class="lb">默认供应商</span><select id="cfgDefaultProvider"></select>
+              <span class="hint">上面的链路全走完、没有一家能接时落到这里</span></label>
             <label class="fld"><span class="lb">默认模型</span><input id="cfgDefaultModel" placeholder="留空 = 上游默认">
               <span class="hint">客户端不带模型名时用这个</span></label>
             <label class="fld"><span class="lb">模式</span><select id="cfgMode"><option value="text">text</option><option value="native">native</option></select>
               <span class="hint">native = 走上游原生协议；其余走 OpenAI 兼容</span></label>
             <div class="switch"><span class="lb">透传 reasoning</span><input type="checkbox" id="cfgReasoning"></div>
           </div>
+
+          <!-- 优先级链路：把「裸模型名怎么落到某家供应商」画出来。原来是默认 provider
+               与 prefer 隔着一条 hr，用户从看不出 prefer 全落空时会掉到默认 provider 上
+               —— 这也是几轮配置反复设错的根源（我自己就设错过 default_provider）。 -->
+          <div class="routeflow" id="routeFlow"></div>
           <div class="hr"></div>
-          <label class="fld"><span class="lb">路由优先级 routing.prefer（一行一个供应商名）</span>
-            <textarea id="cfgRoutingPrefer" rows="3" spellcheck="false" placeholder="atria&#10;runable&#10;raccoon"></textarea>
-            <span class="hint">裸模型名按此顺序选第一个「模型目录里真有该模型」的供应商；都不命中回落默认 provider；带 <code>provider/</code> 前缀的请求不受影响</span></label>
+          <div class="og-row" style="justify-content:space-between;margin-bottom:8px">
+            <strong style="font-size:13px">路由优先级</strong>
+            <span class="og-s">从上到下依次尝试；点「↑ ↓」调整顺序</span>
+          </div>
+          <!-- prefer 有序列表：原来是 textarea 手填供应商名（填错即静默失效，且看不出
+               谁有账号 / 谁有某个模型）。改成可排序卡片：上移下改变顺序，行内显示
+               类型与账号数，未加入的供应商从下方下拉补进来。 -->
+          <ol class="rrlist" id="rrList"></ol>
+          <div class="og-row" style="margin-top:10px">
+            <select id="rrAddSel"></select>
+            <button type="button" class="xs" id="btnRrAdd">+ 加入优先级</button>
+            <span class="og-msg" id="rrMsg"></span>
+          </div>
+          <span class="hint" style="margin-top:6px">裸模型名按此顺序选第一个「模型目录里真有该模型」的供应商；都不命中时落到上面的<strong>默认供应商</strong>；带 <code>provider/</code> 前缀的请求不受影响</span>
         </div>
       </div>
       </div>

@@ -486,8 +486,13 @@ process.stdout.write(JSON.stringify({
 	}
 }
 
-// 域优先级「逐模型优先域」表：按裸名去重渲染、逐模型下拉（默认/国内版/国际版）、
-// 通配规则命中提示、搜索过滤。无需用户手写模型名。
+// 域优先级「逐模型优先域 / 优先供应商」表：按裸名去重渲染、逐模型下拉（默认/国内版/
+// 国际版）、通配规则命中提示、搜索过滤、以及「优先供应商」列（= model_mapping 的行内
+// 呈现）。无需用户手写模型名。
+//
+// 2026-10：加了「优先供应商」列，renderRealmPicker 因此读 omniCfg.providers 与
+// omniMapping 两个模块级快照。沙箱必须注入它们，否则一 render 就 ReferenceError ——
+// 这也是这条测试存在的意义：前端新依赖一漏注入，这里立刻红。
 func TestAppJSRealmPicker(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
@@ -500,9 +505,11 @@ const start = src.indexOf('let rrOrder');
 const end = src.indexOf('async function loadRealmRouting');
 if (start < 0 || end < 0) throw new Error('realm picker helpers not found');
 const els = { rrBody: { innerHTML: '' }, rrCount: { textContent: '' } };
-const ctx = { Number, String, Array, Object, Set, console, $: id => els[id] || null, esc: s => String(s) };
+const ctx = { Number, String, Array, Object, Set, console, $: id => els[id] || null, esc: s => String(s),
+  omniCfg: { default_provider: 'workbuddy', providers: [{ name: 'workbuddy' }, { name: 'atria' }] },
+  omniMapping: {}, omniMappingOff: {} };
 vm.createContext(ctx);
-vm.runInContext(src.slice(start, end) + '\nthis.setModels=a=>{mdAll=a;};this.setState=o=>{if(o.exact)rrExact=o.exact;if(o.wild)rrWild=o.wild;if(o.query!=null)rrQuery=o.query;};this.render=renderRealmPicker;this.effective=rrEffective;', ctx);
+vm.runInContext(src.slice(start, end) + '\nthis.setModels=a=>{mdAll=a;};this.setState=o=>{if(o.exact)rrExact=o.exact;if(o.wild)rrWild=o.wild;if(o.query!=null)rrQuery=o.query;};this.setMap=m=>{omniMapping=m;};this.render=renderRealmPicker;this.effective=rrEffective;', ctx);
 ctx.setModels([
   { id: 'glm-5.2', realm: 'cn' },
   { id: 'glm-5.2', realm: 'global' },
@@ -515,6 +522,16 @@ const html = els.rrBody.innerHTML;
 const count = els.rrCount.textContent;
 const deepHint = html.includes('deepseek-v4.1-flash') && html.includes('（通配→国际版）');
 const hy3Sel = (html.match(/value="global" selected/g) || []).length;
+// 「优先供应商」列：未钉时列出所有供应商 + 一个「跟随全局路由」空选项；
+// 被 mapping 钉住的模型要显示 selected 与「已钉」角标。
+const provSelCount = (html.match(/class="rr-pin"/g) || []).length;
+const hasFollowGlobal = html.includes('<option value="">跟随全局路由</option>');
+const noPinBadgeOnDeep = html.includes('deepseek-v4.1-flash') && !html.split('deepseek-v4.1-flash')[1].split('</tr>')[0].includes('已钉');
+ctx.setMap({ 'hy3': 'atria/Atria-Dawn-Preview' });
+ctx.render();
+const hy3Pinned = els.rrBody.innerHTML.includes('已钉 → atria');
+const hy3PinSelected = /value="atria" selected/.test(els.rrBody.innerHTML);
+ctx.setMap({});
 ctx.setState({ query: 'deep' });
 ctx.render();
 const qHtml = els.rrBody.innerHTML;
@@ -525,6 +542,7 @@ process.stdout.write(JSON.stringify({
   eff: ctx.effective('deepseek-v4.1-flash'),
   qDeep: qHtml.includes('deepseek-v4.1-flash'),
   qGlm: qHtml.includes('glm-5.2'),
+  provSelCount, hasFollowGlobal, noPinBadgeOnDeep, hy3Pinned, hy3PinSelected,
 }));`
 	f, err := os.CreateTemp(t.TempDir(), "realm-picker-*.cjs")
 	if err != nil {
@@ -538,7 +556,8 @@ process.stdout.write(JSON.stringify({
 	if err != nil {
 		t.Fatalf("realm picker node test failed: %v\n%s", err, out)
 	}
-	const want = `{"count":"共 3 个模型","deepHint":true,"hy3Sel":1,"eff":"global","qDeep":true,"qGlm":false}`
+	const want = `{"count":"共 3 个模型","deepHint":true,"hy3Sel":1,"eff":"global","qDeep":true,"qGlm":false,` +
+		`"provSelCount":3,"hasFollowGlobal":true,"noPinBadgeOnDeep":true,"hy3Pinned":true,"hy3PinSelected":true}`
 	if strings.TrimSpace(string(out)) != want {
 		t.Fatalf("realm picker=%s\nwant %s", out, want)
 	}
@@ -1184,6 +1203,11 @@ func TestUsagePageSurfacesInterruptedRequests(t *testing.T) {
 // api_keys 允许裸串（全量，历史写法）与对象（可收窄到指定供应商）两种形态，编辑器
 // 必须把两者归一成同一形状，否则裸串条目在卡里会渲染成空。角标必须如实反映授权范围
 // ——「全量 / 收窄」是运维判断「这把钥匙能调什么」的唯一线索，标错会直接误判权限。
+//
+// 2026-10：卡片新增「这把 key 能调哪些模型」预览（keyScopePreviewHtml）。预览读
+// omniMapping / omniMappingOff 两个模块级快照（model_mapping 落单独文件、不在
+// omniCfg 里），沙箱必须注入；同时新增断言把预览钉住——它就是为了治「改了路由忘
+// 改 scope，客户端永久 403 却看不出原因」这个坑，不能悄悄退化。
 func TestAppJSGatewayKeyCard(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
@@ -1195,15 +1219,27 @@ const src = fs.readFileSync(process.argv[2], 'utf8');
 const start = src.indexOf('/* ── 网关密钥（按供应商收窄');
 const end = src.indexOf('async function saveOmniConfig');
 if (start < 0 || end < 0 || end < start) throw new Error('gateway key region not found');
-const ctx = { JSON, Math, Array, Object, String, Number, isNaN, esc: s => String(s == null ? '' : s) };
+const ctx = { JSON, Math, Array, Object, String, Number, Set, isNaN, esc: s => String(s == null ? '' : s) };
 vm.createContext(ctx);
 vm.runInContext(src.slice(start, end) + '\nthis.normOmniKeys = normOmniKeys; this.keyCard = keyCard;', ctx);
 ctx.omniCfg = {
-  providers: [{ name: 'raccoon' }, { name: 'runable' }],
+  providers: [
+    { name: 'raccoon', models: ['glm-5.2'] },
+    { name: 'runable', models: [] },
+  ],
   api_keys: ['sk-full', { key: 'sk-rc', name: '浣熊专用', providers: ['raccoon'] }],
 };
+ctx.omniMapping = { 'glm-5.2': 'raccoon/glm-5.2' };
+ctx.omniMappingOff = {};
 const keys = ctx.normOmniKeys();
 const cards = keys.map((k, i) => ctx.keyCard(k, i));
+// 预览口径：目录模型 + mapping 别名（别名只在「目标供应商在 scope 内」时曝光）。
+// 全量卡（scope 空 = 全量）：目录 1 个（raccoon/glm-5.2；runable 目录空）
+//         + 别名 glm-5.2（与目录项 ID 不同 → 不去重）→ 共 2 个、其中 1 个别名。
+// 收窄卡（scope=[raccoon]）：目录仍是那 1 个 + 同一别名 → 同样 2 个、1 个别名。
+const fullModelCount = /全量 · 共 <b>2<\/b> 个模型/.test(cards[0]);
+const fullHasAlias = cards[0].includes('含 1 个别名');
+const scopedHasAlias = cards[1].includes('含 1 个别名');
 process.stdout.write(JSON.stringify({
   norm: keys,
   fullTag: cards[0].includes('<span class="tag ok">全量</span>'),
@@ -1212,6 +1248,7 @@ process.stdout.write(JSON.stringify({
   keepsName: cards[1].includes('浣熊专用'),
   raccoonChecked: cards[1].includes('value="raccoon" checked'),
   runableChecked: cards[1].includes('value="runable" checked'),
+  fullModelCount, fullHasAlias, scopedHasAlias,
 }));`
 	f, err := os.CreateTemp(t.TempDir(), "gwkey-*.cjs")
 	if err != nil {
@@ -1226,7 +1263,8 @@ process.stdout.write(JSON.stringify({
 		t.Fatalf("gateway key card node test failed: %v\n%s", err, out)
 	}
 	const want = `{"norm":[{"key":"sk-full","name":"","providers":[]},{"key":"sk-rc","name":"浣熊专用","providers":["raccoon"]}],` +
-		`"fullTag":true,"scopedTag":true,"keepsFullKey":true,"keepsName":true,"raccoonChecked":true,"runableChecked":false}`
+		`"fullTag":true,"scopedTag":true,"keepsFullKey":true,"keepsName":true,"raccoonChecked":true,"runableChecked":false,` +
+		`"fullModelCount":true,"fullHasAlias":true,"scopedHasAlias":true}`
 	if strings.TrimSpace(string(out)) != want {
 		t.Fatalf("gateway key card=%s\nwant %s", out, want)
 	}
@@ -1479,17 +1517,22 @@ vm.runInContext(src.slice(start, end) +
   r.providersKept = b.providers.length === 1 && b.providers[0].models.join(',') === 'a,b';
 
   // 场景 3：控件存在时仍要正常收集（回归保护：不能因为「可能为 null」就一律不读）。
+  // 注意 cfgRoutingPrefer 已改成有序卡片列表（rrList / rrAddSel），不再从 DOM 读值：
+  // 收藏在 rrWrite 里直接改 omniCfg.routing.prefer，collectRouting 只做归一。
   ctx.omniCfg = { default_provider: 'raccoon', providers: [] };
-  ['cfgDefaultProvider', 'cfgDefaultModel', 'cfgMode', 'cfgReasoning', 'cfgRoutingPrefer',
+  ['cfgDefaultProvider', 'cfgDefaultModel', 'cfgMode', 'cfgReasoning',
    'crEnabled', 'crWindow', 'crMin', 'crRefresh'].forEach(registered.add, registered);
   Object.assign(els, {
     cfgDefaultProvider: { innerHTML: '', value: 'atria', classList: { add() {}, remove() {}, contains: () => false } },
     cfgDefaultModel: { value: '  md  ' },
     cfgMode: { value: 'text' },
     cfgReasoning: { checked: true },
-    cfgRoutingPrefer: { value: 'atria\nrunable\n' },
     crEnabled: { checked: false }, crWindow: { value: '' }, crMin: { value: '' }, crRefresh: { value: '' },
   });
+  // 列表里「+ 加入优先级」/「↑ ↓」最终写进 omniCfg.routing.prefer；这里直接模拟
+  // 用户排好的结果，再交给 collectRouting 归一（与真实交互路径一致：rrWrite →
+  // 收起 → saveOmniConfig → collectRouting）。
+  ctx.omniCfg.routing = { prefer: ['  atria  ', 'runable', '', 'atria'] };
   sentBody = null;
   await ctx.saveOmniConfig();
   const b3 = sentBody || {};

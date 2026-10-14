@@ -45,6 +45,25 @@
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M3 2.5h10v11H3z"/><path d="M5.2 5.2h5.6M5.2 8h5.6M5.2 10.8h3.2"/></svg>
         运行日志</a></li>
     </ul>
+    <!-- 登录账号卡片：左下角空白处，固定在侧边栏最底部（.nav ul 的 flex:1 把它顶下来）。
+         原来这里只有一行 .sig，账号名挤在顶栏 #whoami 里，手机端顶栏一折行就被压掉。
+         移到侧边栏后：桌面端常驻、手机端跟随抽屉，都不占主区。 -->
+    <div class="me" id="meCard" hidden>
+      <div class="me-top">
+        <span class="me-ava" id="meAva" aria-hidden="true">?</span>
+        <div class="me-id">
+          <div class="me-name" id="meName">-</div>
+          <div class="me-role" id="meRole">-</div>
+        </div>
+      </div>
+      <div class="me-acts">
+        <!-- 改密码：目标表单在配置页「面板账号」组，该组带 data-admin。
+             所以这个按钮也挂 data-admin，viewer/user 会被 CSS 隐掉，
+             不会点进去落到一个空分组里。 -->
+        <button type="button" class="xs ghost" id="btnMePw" data-admin>改密码</button>
+        <button type="button" class="xs ghost" id="btnMeOut">退出</button>
+      </div>
+    </div>
     <div class="sig">
       <div class="row"><span class="pulse" id="navPulse"></span><span id="navState">连接中</span></div>
       <div class="row" style="margin-top:5px"><span id="navVer">v-</span> · <span id="navRedis">-</span></div>

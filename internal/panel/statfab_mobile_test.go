@@ -368,3 +368,85 @@ func TestThemeCSSStructuralSanity(t *testing.T) {
 		}
 	}
 }
+
+// 左下角登录账号卡片（#meCard）。
+// 原来侧边栏底部只有一行 .sig，登录账号名只出现在顶栏 #whoami —— 手机端顶栏一折行
+// 就被挤出首屏，于是把账号信息放到侧边栏底部那块常驻空位上。
+// 锁的几处：结构 id 齐全、访客态整卡隐藏、与顶栏同源（authState）、
+// 退出复用 doLogout（不复制一份登出逻辑）、改密码按 data-admin 门禁
+// （目标表单 paccBox 本身带 data-admin，按钮不门禁就会点进空分组）。
+func TestLeftBottomMeCard(t *testing.T) {
+	h, err := os.ReadFile("index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	H := string(h)
+	// ① 结构：六个 id 一个不能少（renderMeCard 按 id 填内容）。
+	for _, id := range []string{"meCard", "meName", "meRole", "meAva", "btnMePw", "btnMeOut"} {
+		if !strings.Contains(H, "id=\""+id+"\"") {
+			t.Errorf("登录账号卡片缺少 #%s", id)
+		}
+	}
+	// ② 位置：必须在 .sig 之前、</nav> 之内 —— 放到别处就离开"左下角"了。
+	meIdx, sigIdx, navEnd := strings.Index(H, "id=\"meCard\""), strings.Index(H, "class=\"sig\""), strings.Index(H, "</nav>")
+	if meIdx < 0 || sigIdx < 0 || meIdx > sigIdx {
+		t.Error("#meCard 未放在 .sig 之前：顺序反了，视觉上不会贴在侧边栏底部")
+	}
+	if meIdx < 0 || navEnd < 0 || meIdx > navEnd {
+		t.Error("#meCard 跑到了 </nav> 外面")
+	}
+	// ③ 改密码按钮必须带 data-admin：目标 paccBox 带 data-admin，
+	//    非 admin 时整组 display:none，按钮不门禁会点进一个空白分组。
+	re := regexp.MustCompile(`(?s)<button[^>]*id="btnMePw"[^>]*>`)
+	m := re.FindString(H)
+	if m == "" {
+		t.Fatal("找不到 btnMePw 按钮")
+	}
+	if !strings.Contains(m, "data-admin") {
+		t.Error("btnMePw 缺 data-admin：viewer/user 点进去会落到被隐藏的空分组")
+	}
+
+	js, err := os.ReadFile("app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	J := string(js)
+	// ④ 渲染函数 + 从 applyRole 调用（只在函数里定义等于没接线）。
+	if !strings.Contains(J, "function renderMeCard(") {
+		t.Fatal("app.js 缺少 renderMeCard")
+	}
+	if f := strings.Index(J, "function applyRole()"); f < 0 {
+		t.Fatal("app.js 缺少 applyRole")
+	} else if !strings.Contains(J[f:f+1600], "renderMeCard(") {
+		t.Error("applyRole 未调用 renderMeCard：卡片永远不会被填上账号")
+	}
+	// ⑤ 访客态整卡隐藏 —— 没账号可展示时露出一张空卡比不显示更糟。
+	if !strings.Contains(J, "card.hidden = !(authed && name)") {
+		t.Error("renderMeCard 未按登录态隐藏卡片")
+	}
+	// ⑥ 登出必须复用 doLogout：顶栏和卡片各写一份，将来只会改一处。
+	if !strings.Contains(J, "async function doLogout()") {
+		t.Error("登出逻辑未抽成 doLogout：顶栏与卡片会各有一份")
+	}
+	if !strings.Contains(J, "$('btnMeOut').onclick = doLogout") ||
+		!strings.Contains(J, "$('btnLogout').onclick = doLogout") {
+		t.Error("顶栏与卡片的退出按钮未统一走 doLogout")
+	}
+	// ⑦ 改密码跳到配置页 panel 组（那里有改自己密码的表单）。
+	if !strings.Contains(J, "showCfgSec('panel')") {
+		t.Error("改密码未跳到配置页「面板账号」组")
+	}
+
+	css, err := os.ReadFile("theme.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	C := string(css)
+	// ⑧ 账号名过长要省略：.nav 宽 208px 固定，不省略会把侧边栏撑开。
+	if !strings.Contains(C, ".nav .me-name") || !strings.Contains(C, "text-overflow: ellipsis") {
+		t.Error(".nav .me-name 未做省略：长账号名会把侧边栏撑宽")
+	}
+	if !strings.Contains(C, ".nav .me[hidden]") {
+		t.Error(".nav .me 未处理 [hidden]：hidden 属性对 display:flex 的块不生效")
+	}
+}

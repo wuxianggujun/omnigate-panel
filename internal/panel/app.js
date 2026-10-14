@@ -561,10 +561,36 @@ $('loginPass2').addEventListener('keydown', e => { if (e.key === 'Enter') { e.pr
 /* 顶部「登录」：未登录时打开登录门（未配置账号则给命令行引导）。 */
 $('btnTopLogin').onclick = () => { if (authState.configured) openLogin(); else openSetup(); };
 
-/* 退出登录：注销会话并回到登录页。 */
-$('btnLogout').onclick = async () => {
+/* 退出登录：注销会话并回到登录页。顶栏按钮和侧边栏账号卡片的「退出」都走这里。 */
+async function doLogout() {
   try { await api('session', { method: 'DELETE' }); } catch (e) { /* 已失效也照常回登录页 */ }
   location.reload();
+}
+$('btnLogout').onclick = doLogout;
+
+/* renderMeCard：把当前登录账号填进左下角那张卡片。
+   与顶栏 #whoami 同源（authState），但位置更稳：顶栏在手机上会折行，
+   账号名容易被挤出首屏；侧边栏底部这块地方桌面常驻、手机随抽屉。
+
+   访客态整卡隐藏——没有账号可展示，两个按钮也无意义。 */
+function renderMeCard(role) {
+  const card = $('meCard');
+  if (!card) return;
+  const authed = !!authState.authenticated, name = authed ? (authState.username || '') : '';
+  card.hidden = !(authed && name);
+  if (card.hidden) return;
+  // 首字母头像：中文账号名取首字，英文取首字母大写。
+  $('meName').textContent = name;
+  $('meRole').textContent = roleLabel(role);
+  $('meAva').textContent = (name.trim()[0] || '?').toUpperCase();
+}
+/* 卡片上的两个按钮与顶栏功能重复但更顺手：退出直接复用 doLogout；
+   改密码跳到配置页的「面板账号」组（那里已有重置密码的表单）。 */
+$('btnMeOut').onclick = doLogout;
+$('btnMePw').onclick = () => {
+  if (setNavDrawer) setNavDrawer(false);   // 手机端先关抽屉，否则看不到目标页
+  go('config');
+  showCfgSec && showCfgSec('panel');      // 「面板账号」组：里面有改自己密码的表单
 };
 
 /* roleLabel 面板角色 → 中文名。 */
@@ -586,6 +612,9 @@ function applyRole() {
     w.hidden = !show;
     if (show) w.textContent = authState.username + ' · ' + roleLabel(role);
   }
+  // 左下角账号卡片与顶栏 #whoami 同一份数据，但侧边栏底部这块地方更稳：
+  // 桌面端常驻不被折行压掉，手机端跟随抽屉而非顶栏。
+  renderMeCard(role);
   const lo = $('btnLogout');
   if (lo) lo.hidden = !authState.authenticated;
   const li = $('btnTopLogin');

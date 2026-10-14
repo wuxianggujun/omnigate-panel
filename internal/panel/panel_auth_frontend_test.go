@@ -28,7 +28,7 @@ func TestPanelAuthFrontendWiring(t *testing.T) {
 	html := get("/panel/")
 	for _, id := range []string{
 		`id="loginVeil"`, `id="loginForm"`, `id="loginUser"`, `id="loginPass"`,
-		`id="btnLogin"`, `id="whoami"`, `id="btnLogout"`, `id="paccBox"`, `id="loginErr"`,
+		`id="btnLogin"`, `id="btnLogout"`, `id="paccBox"`, `id="loginErr"`,
 		// 默认公开只读：未登录时顶部的「登录」入口。
 		`id="btnTopLogin"`,
 	} {

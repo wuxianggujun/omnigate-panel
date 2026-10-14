@@ -606,14 +606,8 @@ function roleLabel(r) {
 function applyRole() {
   const role = authState.authenticated ? (authState.role || 'viewer') : 'public';
   document.body.dataset.role = role;
-  const w = $('whoami');
-  if (w) {
-    const show = !!(authState.authenticated && authState.username);
-    w.hidden = !show;
-    if (show) w.textContent = authState.username + ' · ' + roleLabel(role);
-  }
-  // 左下角账号卡片与顶栏 #whoami 同一份数据，但侧边栏底部这块地方更稳：
-  // 桌面端常驻不被折行压掉，手机端跟随抽屉而非顶栏。
+  // 顶栏原来还有个 #whoami 显示「账号 · 角色」，与左下角账号卡片重复
+  // （而且手机端顶栏一折行就被挤掉），已删。现在登录账号只在这一处展示。
   renderMeCard(role);
   const lo = $('btnLogout');
   if (lo) lo.hidden = !authState.authenticated;
@@ -643,7 +637,6 @@ async function bootstrapAuth() {
   pageBuild = (s && s.build) || '';   // 版本自检基准（见 checkBuild）
   setAuthMode('login');
   applyRole();
-  initStatFab();   // 右下角账号池概览卡：读本地记忆的展开状态
   initNavDrawer();   // 手机端导航抽屉（桌面端无按钮，直接返回）
   closeGates();
   start();
@@ -681,7 +674,6 @@ async function bootstrapAuth() {
     // 窗口拉宽到桌面尺寸时自动收起，否则抽屉状态会残留（遮罩还盖着）
     window.addEventListener('resize', () => {
       if (window.innerWidth > 900 && navDrawerOpen()) setNavDrawer(false);
-      syncFabLift();   // 窗口宽度变化会改变保存条是否吸底
     });
   }
 
@@ -721,121 +713,17 @@ function go(v) {
   // 到期提醒卡片不再「打开账号池就自动查」：逐账号实时查上游，账号一多打开面板
   // 就卡死。数据只由卡片上的「检查」按钮显式触发；卡片初始隐藏。
   if (v === 'taskscenter') reattachQueueView();
-  // 切页后重算悬浮卡让位（保存条的位置随页面内容变）
-  syncFabLift();
 }
-// 滚动会让 sticky 保存条在「吸底 / 回原位」之间切换（桌面端内容是靠滚出视口
-// 才吸底的），悬浮卡的让位量必须跟着变。passive: 声明不 preventDefault，
-// 滚动性能不受影响。
-window.addEventListener('scroll', () => syncFabLift(), { passive: true });
 document.querySelectorAll('.nav a').forEach(a => a.onclick = e => {
   // 无 data-view 的导航项（如纯外链）走默认跳转，不做视图切换。
   if (!a.dataset.view) return;
   e.preventDefault(); go(a.dataset.view); history.replaceState(null, '', '#' + a.dataset.view);
 });
 
-/* ── 账号池概览悬浮卡（右下角）──────────────────────────────────────
-     顶部统计条挪到右下角后的交互与同步。数据仍由 loadOverview() 一次拉全，
-     这里只做两件轻活：切展开/收起、把三个关键数字搬到收起态的那条 tab 上。 */
-  const STATFAB_KEY = 'wb2api.statfab';
-  let statFabOpen = false;
-
-  function initStatFab() {
-    const fab = $('statFab');
-    if (!fab) return;
-    // 卡片在 HTML 里带 hidden：未登录/未取到数据前先不占位置，首次 loadOverview
-    // 成功后由 syncFab 摘掉（否则访客一进来就看到一排 0）。
-    const tab = $('statFabTab');
-    if (!tab) return;
-    try { statFabOpen = localStorage.getItem(STATFAB_KEY) === '1'; } catch (e) { statFabOpen = false; }
-    tab.addEventListener('click', () => setStatFabOpen(!statFabOpen));
-    setStatFabOpen(statFabOpen, true);
-  }
-
-  function setStatFabOpen(on, initial) {
-    statFabOpen = !!on;
-    const body = $('statFabBody'), tab = $('statFabTab');
-    if (body) body.hidden = !statFabOpen;
-    // .open 交给 CSS 判断「要不要给 sticky .savebar 让位」：让位只发生在展开态
-    // （收起态那条 33px 的 tab 撞不到任何东西，不必抬）。见 theme.css 里
-    // body[data-view=config/providers] .statfab.open 那两条。
-    const fab = $('statFab');
-    if (fab) fab.classList.toggle('open', statFabOpen);
-    if (tab) {
-      tab.setAttribute('aria-expanded', statFabOpen ? 'true' : 'false');
-      tab.title = statFabOpen ? '收起账号池概览' : '展开账号池概览（账号总数 / 可用 / 冷却 / 禁用 / 暂停 / 积分 / 粘性会话）';
-    }
-    try { localStorage.setItem(STATFAB_KEY, statFabOpen ? '1' : '0'); } catch (e) { /* 隐私模式 */ }
-    // 展开后面板变大，可能与保存条开始相交；收起时相交消失 —— 两种都要重算
-    syncFabLift();
-  }
-
-  /* syncFab 把概览数据同步到悬浮卡：露出卡片、填角标数字、按可用数改脉冲点颜色。
-     loadOverview() 每次轮询都会走到这里，所以卡片数字与页内统计永远一致。 */
-  /* syncFabLift：实测悬浮卡会不会被当前页的底部固定元素压住，该抬多少
-     写进 CSS 变量 --fab-lift。
-
-     为什么不让 CSS 自己算：.savebar 在桌面端是 sticky bottom:0 —— 内容不满
-     一屏时它停在屏幕中间（不在底边），滚动到底才吸底；手机端它是 fixed 通栏
-     底栏，高度还随内容折行变。写死偏移必然在某种组合下失效，所以这里在每次
-     可能改变几何的事件后，用真实矩形求一次该抬多少。
-
-     五个坑（都实测踩过，缺一个就不对）：
-     1) 要判的是"矩形相交"，不是"垂直投影重叠"。桌面端 config 页 tab 在屏幕
-        最下行、savebar 停在屏幕中部时两者垂直投影并不重叠，但水平方向 tab 正好
-        压在保存条右端按钮上 —— 这种情况也必须抬。
-     2) 抬的量用「相交高度」不够：手机上折叠 tab 整个落进底栏区间时，相交高度
-        恰等于 tab 自身高度（33px），按它抬还剩 17px 压在栏内。改成抬
-        「卡底 − 栏顶」（= 相交高 + 卡在栏下的剩余部分），这才是真正需要的量。
-     3) 但也不能一律抬「卡底 − 栏顶」：桌面端保存条停在屏幕中部而卡片在它下方
-        时（tab 底 784 - 栏顶 443 = +341），会把本该贴右下角的卡片一路抬到
-        屏幕上方。所以抬之前必须先确认垂直投影真的重叠（over > 0）。
-     4) 量之前必须先把 --fab-lift 清 0 并强制同步布局，否则读到的是"已经抬过"
-        的位置：抬完不相交 → 下一个事件清零 → 又相交，两个值来回翻。
-        （providers 页收起态就这么卡在 0，tab 被 z-index:85 的底栏压住点不着。）
-     5) 桌面端滚到底时 sticky 保存条真的会吸到视口底部，这时 tab 会被抬离右下角。
-        这是唯一让 tab 离开角落的情形，可接受：抬起来至少还能点，压住才是 bug。 */
-  const FAB_LIFT_ID = 'fabLiftStyle';
-  function syncFabLift() {
-    if (view !== 'config' && view !== 'providers') {
-      // 离开这两页要把变量清掉：否则抬起来的偏移会带到别的页面去。
-      const old = $(FAB_LIFT_ID); if (old) old.remove();
-      return;
-    }
-    const fab = $('statFab');
-    if (!fab || fab.hidden) return;
-    // 保存条：桌面端 sticky、手机端 fixed，选择器相同但定位不同
-    const sb = document.querySelector('.view:not([hidden]) .savebar');
-    if (!sb) return;
-    let st = $(FAB_LIFT_ID);
-    if (!st) { st = document.createElement('style'); st.id = FAB_LIFT_ID; document.head.appendChild(st); }
-    // 先清零再量（坑 4）。写完样式要强制一次同步布局，否则读到上一帧的矩形。
-    st.textContent = ':root { --fab-lift: 0px }';
-    void fab.offsetHeight;
-    const fr = fab.getBoundingClientRect();
-    const sr = sb.getBoundingClientRect();
-    const hOver = Math.min(fr.right, sr.right) - Math.max(fr.left, sr.left);   // 水平投影重叠
-    const vOver = Math.min(fr.bottom, sr.bottom) - Math.max(fr.top, sr.top);  // 垂直投影重叠
-    // 坑 2/3：矩形真的相交才抬，抬多少 =「卡底要越过栏顶多少」+ 16px 呼吸。
-    // 只抬相交高度不够：tab 整个落进底栏区间时相交高度 = tab 自身高度，抬完还剩
-    // 一截压在栏内。而直接抬「卡底 − 栏顶」又不能少了 vOver 这个闸：桌面端保存条
-    // 停在屏幕中部、卡片在它下方时两者并不相交，照搬这个差值会把本该贴右下角的
-    // 卡片一路抬到屏幕上方（实测 358px，tab 跑到 t=392）。
-    const lift = (hOver > 0 && vOver > 0) ? Math.ceil(fr.bottom - sr.top + 16) : 0;
-    st.textContent = ':root { --fab-lift: ' + lift + 'px }';
-    void fab.offsetHeight;
-  }
-
-  function syncFab(allTotal, allAvail, coolCount) {
-    const fab = $('statFab');
-    if (fab) fab.hidden = false;
-    const setNum = (id, v) => { const el = $(id); if (el) el.textContent = v; };
-    setNum('fabTotal', allTotal);
-    setNum('fabAvail', allAvail);
-    setNum('fabCooling', coolCount == null ? 0 : coolCount);
-    const p = $('fabPulse');
-    if (p) p.className = 'pulse' + (allAvail > 0 ? '' : (allTotal ? ' warn' : ' bad'));
-  }
+/* 账号池概览的 7 项统计条就放在账号池页顶部（.stats 网格），数据由 loadOverview()
+   直接写进各自的 id。这里不再需要任何悬浮卡交互 —— 早先为了"切页也能看见"把它
+   挪到右下角，实测反而不如放回原处：悬浮卡会被配置/供应商页的 sticky 保存条压住，
+   还要靠 JS 量矩形抬位置。统计本来就属于账号池这一页。 */
 
 /* ── 视图内二级分组 Tab（供应商页 / 配置页共用）───────────────────────
    供应商页原本 4 张卡（供应商 / 积分快过期 / 指纹 / 可靠性与限流）纵向堆成
@@ -1317,8 +1205,6 @@ async function loadOverview(quiet) {
     ].filter(Boolean).join(' · ');
     const up = Math.floor(d.uptime_sec);
     $('subMeta').textContent = '运行 ' + (up >= 86400 ? Math.floor(up / 86400) + ' 天 ' : '') + Math.floor(up % 86400 / 3600) + ' 时 ' + Math.floor(up % 3600 / 60) + ' 分';
-    // 右下角悬浮卡与页内统计同源：同一次刷新的同一批数字，不另开请求。
-    syncFab(allTotal, allAvail, (d.cooling || 0) + ogCoolingCount);
     syncAccSourceOptions(omniList);
     renderAccounts(d.accounts || [], omniList);
     renderModelLocks(d.model_locks);

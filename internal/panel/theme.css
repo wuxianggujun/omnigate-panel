@@ -222,57 +222,6 @@ label.fld > .hint { display: block; font-size: 11.5px; color: var(--ink-3); marg
 .stat .k { color: var(--ink-3); font-size: 11.5px; margin-top: 5px; }
 .stat.good .v { color: var(--ok); } .stat.warn .v { color: var(--warn); } .stat.bad .v { color: var(--bad); }
 
-/* ── 账号池概览悬浮卡（右下角）──────────────────────────────────────
-     原来 7 项统计横在账号池页最上面，把账号表本身挤到第二屏；而且它在 .view 内部，
-     切到别的页面就看不见了。改成右下角悬浮后：任何页面都能看到池子概况，也不再
-     遮挡账号表。
-     收起态只露一条 tab（脉冲点 + 总数/可用/冷却），展开态弹出完整 7 项。
-     tab 与 body 是两个元素而非同一元素的 class 切换：收起时 body 要彻底从布局里
-     消失（不然它会占住右下角一块，挡住运行日志/请求记录的滚动条）。 */
-  .statfab {
-    position: fixed; right: 16px; bottom: 16px; z-index: 80;
-    display: flex; flex-direction: column-reverse; align-items: flex-end; gap: 8px;
-    max-width: calc(100vw - 32px);
-  }
-  .statfab[hidden] { display: none; }
-  .statfab-tab {
-    display: inline-flex; align-items: center; gap: 7px;
-    padding: 8px 13px; border-radius: 999px;
-    background: var(--surface); border: 1px solid var(--line);
-    box-shadow: var(--shadow);
-    font: 550 12.5px var(--sans); color: var(--ink-2);
-    white-space: nowrap; max-width: 100%;
-  }
-  .statfab-tab:hover { border-color: var(--accent); }
-  .statfab-tab .t { color: var(--ink); }
-  .statfab-tab .k { color: var(--ink-3); font-weight: 400; }
-  .statfab-tab .num { font-variant-numeric: tabular-nums; }
-  .statfab-tab .num.ok { color: var(--ok); }
-  .statfab-tab .num.warn { color: var(--warn); }
-  .statfab-tab .chev { color: var(--ink-3); font-size: 10px; margin-left: 2px; transition: transform .15s; }
-  .statfab-tab[aria-expanded="true"] .chev { transform: rotate(180deg); }
-  .statfab-body {
-    background: var(--surface); border: 1px solid var(--line);
-    border-radius: 12px; box-shadow: var(--shadow);
-    overflow: hidden; max-width: 100%;
-    /* 7 项在手机上会排成 2 列 4 行，接近 300px —— 不封顶的话一屏去一半。
-       超了在卡片内部滚：看统计本来就不该把内容全遮住。 */
-    max-height: calc(100vh - 132px); max-height: calc(100dvh - 132px);
-    overflow-y: auto; overscroll-behavior: contain;
-  }
-  .statfab-body[hidden] { display: none; }
-  /* 展开态复用原 .stats 网格，但去掉自身的外边距与圆角（外层卡片已经有了），
-     并按可用宽度收紧列数：手机上 7 列挤成一条不如 2 列两行。 */
-  .statfab-body .stats {
-    margin: 0; border: none; border-radius: 0; box-shadow: none;
-    grid-template-columns: repeat(4, minmax(88px, 1fr));
-  }
-  .statfab-body .stat { padding: 11px 13px; }
-  .statfab-body .stat .v { font-size: 21px; }
-  .statfab-body .stat .k { font-size: 11px; }
-  /* 触屏设备：tab 高一点好点（拇指目标 ≥ 36px）。 */
-  @media (pointer: coarse) { .statfab-tab { padding: 10px 15px; } }
-
 /* ── 面板块 ───────────────────────────────────────────────────────── */
 .box { background: var(--surface); border: 1px solid var(--line); border-radius: 11px; box-shadow: var(--shadow); margin-bottom: 20px; overflow: hidden; }
 .box > header { display: flex; align-items: center; gap: 12px; padding: 12px 17px; border-bottom: 1px solid var(--line-soft); }
@@ -498,9 +447,8 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
 .vc.expired .hd, .vc.expired .meta { opacity: .55; }
 
 /* ── Toast ──────────────────────────────────────────────────────────
-   bottom 抬到 64px：右下角常驻账号池概览卡（.statfab），贴着 bottom:20px 会和
-   卡片叠在一起、把卡片挡得点不着。toast 是临时提示，理应在卡片上方淡出。 */
-#toasts { position: fixed; right: 20px; bottom: 64px; z-index: 90; display: flex; flex-direction: column; gap: 8px; align-items: flex-end; }
+   右下角不再有常驻悬浮卡，toast 贴着右侧距底 20px 即可，不会被任何东西挡住。 */
+#toasts { position: fixed; right: 20px; bottom: 20px; z-index: 90; display: flex; flex-direction: column; gap: 8px; align-items: flex-end; }
 .tst {
   background: var(--raise); border: 1px solid var(--line); border-left: 3px solid var(--ink-3);
   border-radius: 8px; padding: 10px 15px; font-size: 13px; box-shadow: var(--shadow); max-width: 380px;
@@ -834,43 +782,9 @@ body[data-role="viewer"] [data-write],
 body[data-role="public"] [data-write] { display: none !important; }
 /* 未登录时给「登录」按钮一点存在感（它是公开只读视图里唯一的操作入口）。 */
 body[data-role="public"] #btnTopLogin { border-color: var(--accent, var(--line)); }
-.whoami {
-  font: 500 12px/1 var(--sans);
-  color: var(--ink-2);
-  padding: 4px 9px;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  background: var(--surface-2);
-  white-space: nowrap;
-}
 #loginVeil .fld { margin: 0; }
 #loginVeil input { width: 100%; box-sizing: border-box; }
 #paccTable td, #paccTable th { white-space: nowrap; }
-
-/* 配置页 / 供应商页底部有 .savebar（保存按钮条），悬浮卡是 fixed，展开态
-   面板高约 320px，会把它盖住、让「保存」点不着。
-
-   为什么不能靠"给 bottom 加个偏移"糊过去：.savebar 在桌面端是 sticky bottom:0，
-   位置由内容高度决定 —— 内容不满一屏时（比如配置页只展开「基本」分组）
-   它停在屏幕中间，不在底边。此时任何固定偏移都算不准，b1998e9 试过按它
-   "停在自然位置时的高度"给 92px，复测仍被压住（详见 git log）。
-
-   所以改成让位置本身变确定：--fab-lift 变量表示"底部被固定元素占掉多少"，
-   桌面端 0（保存条随文档流，悬浮卡贴右下角即可），手机端 76px
-   （保存条改成 fixed 通栏底栏，见手机版适配段）。让位量只跟随这个变量，
-   不再按页写死数字，也不会出现"桌面端白白抬高 76px"。
-
-   只让「展开态」让位：收起态只剩一条 33px 的 tab，撞不到任何东西。 */
-/* --fab-lift 由 app.js 的 syncFabLift() 实测写入，这里只给初值。
-   为什么让 CSS 只写公式、让 JS 算数：保存条的位置和高度都是浮动的 ——
-   桌面端它是 sticky（内容不满一屏时停在屏幕中间，滚动到底才吸底），
-   手机端它会因 .savebar 折行而变化。任何写死的偏移都会在某种状态下失效
-   （b1998e9 就是这么翻的车）。JS 每次切页/展开/滚动/轮询后实测一次相交
-   高度，写进变量，CSS 只负责把它加到 bottom 上。 */
-:root { --fab-lift: 0px; }
-/* 收起态的 tab 也一样会被盖住（折叠 tab 就在右下角），所以让位时整个卡片抬。 */
-body[data-view="config"] .statfab,
-body[data-view="providers"] .statfab { bottom: calc(16px + var(--fab-lift)); }
 
 /* ══════════════════════════════════════════════════════════════════════
    手机版适配（≤900px / ≤560px / ≤400px 三档）
@@ -899,24 +813,22 @@ body[data-view="providers"] .statfab { bottom: calc(16px + var(--fab-lift)); }
   /* ── ⓿ 保存条 → 固定通栏底栏 ─────────────────────────────────────
       桌面端 .savebar 是 sticky bottom:0，跟着文档流走；手机上表单页的
       「保存」是主操作，必须一直够得着，所以改成 fixed 通栏底栏。
-      副作用是它脱离了文档流，要给页面底部垫出等高空间（--savebar-h），
-      否则表单最后一行会被压在栏下看不见。
-      同时给悬浮卡让位：--fab-lift = 底栏高度 + 呼吸。 */
+       副作用是它脱离了文档流，要给页面底部垫出等高空间，
+      否则表单最后一行会被压在栏下看不见。 */
   body[data-view="config"] .savebar,
   body[data-view="providers"] .savebar {
     position: fixed; left: 0; right: 0; bottom: 0; z-index: 85;
     margin: 0; border-radius: 0; border-left: 0; border-right: 0; border-bottom: 0;
     padding: 10px 14px;
-    /* 让位状态下的悬浮卡会浮在底栏上方一点，阴影别叠在一起 */
     box-shadow: 0 -8px 24px rgba(0, 0, 0, .18);
   }
-  /* 底栏脱离流形后垫回等高空间：两页各自的 --savebar-h 由实测高度给。
+  /* 底栏脱离流形后垫回等高空间。config 保存条含“重启提示”会折行，
      config 保存条含"重启提示"说明文字会折行，providers 只有按钮排。 */
   body[data-view="config"] .view, body[data-view="config"] .view form { padding-bottom: 92px; }
   body[data-view="providers"] .view, body[data-view="providers"] .view form { padding-bottom: 84px; }
   /* toast 也得避开底栏：否则刚保存成功的提示会被底栏压住一半 */
-  #toasts { bottom: calc(64px + var(--fab-lift, 0px)); }
-  @media (max-width: 560px) { #toasts { bottom: calc(64px + var(--fab-lift, 0px)); } }
+  #toasts { bottom: calc(20px + 92px); }
+  @media (max-width: 560px) { #toasts { bottom: calc(20px + 92px); } }
 
   /* ── ① 侧导航 → 抽屉 ─────────────────────────────────────────────
      汉堡按钮（#btnNav）放在顶栏最左，默认收起；点开是从左侧滑出的面板，
@@ -944,11 +856,10 @@ body[data-view="providers"] .statfab { bottom: calc(16px + var(--fab-lift)); }
   .view { padding: 16px 14px 72px; }
 
   /* ── ② 顶栏按钮折行 ─────────────────────────────────────────────
-     flex-wrap 让按钮自然折行；whoami 与图标按钮 flex:none 不被压扁，
+      flex-wrap 让按钮自然折行；图标按钮 flex:none 不被压扁，
      文字按钮允许收缩换行。 */
   .topbar { flex-wrap: wrap; }
   .topbar h2 { white-space: nowrap; }
-  .topbar .whoami { flex: none; }
   .topbar button { flex: 0 1 auto; }
   .topbar button.icon { flex: none; }
   /* 低频操作折到第二行：靠 order 把它们推到 grow 之后。桌面端 order 全是 0，
@@ -1005,8 +916,6 @@ body[data-view="providers"] .statfab { bottom: calc(16px + var(--fab-lift)); }
   .box .pad { padding: 13px 12px; }
   .acc th, .acc td { padding: 8px 7px; }
   .acc { font-size: 12px; }
-  /* 统计悬浮卡更窄 */
-  .statfab-body .stats { grid-template-columns: repeat(2, minmax(96px, 1fr)); }
   /* 保存条折行：按钮各占一半 */
   .savebar { flex-wrap: wrap; gap: 8px; }
   .savebar button { flex: 1 1 auto; }
@@ -1023,6 +932,4 @@ body[data-view="providers"] .statfab { bottom: calc(16px + var(--fab-lift)); }
   .acc th, .acc td { padding: 7px 5px; }
   .acc { font-size: 11.5px; }
   .acc .c-acts { white-space: normal; }
-  .statfab { right: 8px; bottom: 8px; }
-  .statfab-tab { padding: 8px 11px; font-size: 12px; }
 }

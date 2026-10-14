@@ -1,7 +1,7 @@
 // statfab_mobile_test.go 锁两件事：
-//  1) 账号池概览卡：从页内顶部统计条挪到右下角悬浮卡片后，7 项统计的 id 一个
-//     都不能少（setStat/markStat 全按 id 找，少一个就静默不刷新），且不能再
-//     留在 #view-accounts 里（否则等于没挪）。
+//  1) 账号池概览：7 项统计条归位在 #view-accounts 顶部，id 一个都不能少
+//     （setStat/markStat 全按 id 找，少一个就静默不刷新）；右下角那套悬浮卡
+//     整套已删除（HTML / CSS / JS 都不许留残留，否则就是死代码）。
 //  2) 手机版适配：三档断点必须存在，且都只覆盖 max-width（桌面端一行声明不动）。
 //     抽屉相关元素（汉堡按钮 / 遮罩）与 JS 开关函数要一一对应。
 package panel
@@ -13,7 +13,7 @@ import (
 	"testing"
 )
 
-// 任务 A：账号池概览右下角化。
+// 账号池概览：统计条放回 #view-accounts 顶部，且悬浮卡整套不留残余。
 func TestAccountStatsMovedToFloatingCard(t *testing.T) {
 	h, err := os.ReadFile("index.html")
 	if err != nil {
@@ -30,51 +30,56 @@ func TestAccountStatsMovedToFloatingCard(t *testing.T) {
 			t.Errorf("id=%s 出现 %d 次，want 1（挪位置不能丢统计项）", id, n)
 		}
 	}
-	// 悬浮卡片三件套。
-	for _, id := range []string{"statFab", "statFabTab", "statFabBody"} {
-		if !strings.Contains(H, `id="`+id+`"`) {
-			t.Errorf("index.html 缺少 #%s", id)
+	// 悬浮卡片整套必须删干净（收回账号池页），一个 id 都不能留。
+	for _, id := range []string{"statFab", "statFabTab", "statFabBody", "fabPulse", "fabTotal", "fabAvail", "fabCooling"} {
+		if strings.Contains(H, `id="`+id+`"`) {
+			t.Errorf("index.html 仍残留悬浮卡 #%s：已收回账号池页，请删干净", id)
 		}
 	}
-	// 关键：.stats 必须离开 #view-accounts。还在里面 = 改造没生效。
+	// 关键：.stats 必须回到 #view-accounts 里。
 	acc := H[strings.Index(H, `id="view-accounts"`):]
 	acc = acc[:strings.Index(acc, `id="view-taskscenter"`)]
-	if strings.Contains(acc, `<div class="stats">`) {
-		t.Error("统计条仍在 #view-accounts 内：应挪到右下角悬浮卡片")
+	if !strings.Contains(acc, `<div class="stats">`) {
+		t.Error("统计条不在 #view-accounts 内：应放回账号池页顶部")
 	}
-	// 卡片里仍是一个 .stats 容器（复用原网格，避免引入第二套统计样式）。
-	if strings.Count(H, `<div class="stats">`) != 1 {
-		t.Errorf(".stats 容器 %d 个，want 1", strings.Count(H, `<div class="stats">`))
+	// .stats 容器只此一个（不引入第二套统计样式）。
+	if n := strings.Count(H, `<div class="stats">`); n != 1 {
+		t.Errorf(".stats 容器 %d 个，want 1", n)
 	}
-	// 角标数字：收起态也要看得见关键三个数。
-	for _, id := range []string{"fabTotal", "fabAvail", "fabCooling", "fabPulse"} {
-		if !strings.Contains(H, `id="`+id+`"`) {
-			t.Errorf("悬浮卡角标缺少 #%s", id)
+	// 7 个统计项必须都在那一个 .stats 里（不能散到别处）。
+	i := strings.Index(H, `<div class="stats">`)
+	block := H[i:]
+	if j := strings.Index(block, `</div>`); j > 0 {
+		// 逐层找到 .stats 的收尾：最后一个统计项的 </div></div> 之后。
+		block = H[i : i+len(block)]
+	}
+	for _, id := range []string{"sTotal", "sHealthy", "sCooling", "sDisabled", "sPaused", "sCredits", "sSticky"} {
+		if !strings.Contains(H[i:], `id="`+id+`"`) {
+			t.Errorf("统计项 #%s 不在页内", id)
 		}
 	}
 }
 
-// 任务 A 的 CSS：悬浮卡必须 fixed 定位，且复用 .stats 网格（不另立一套）。
+// 统计条放回页内后的 CSS：不得留任何悬浮卡规则，#toasts 回到右下角贴底。
 func TestStatFabCSS(t *testing.T) {
 	css, err := os.ReadFile("theme.css")
 	if err != nil {
 		t.Fatal(err)
 	}
 	C := string(css)
-	if !strings.Contains(C, ".statfab {") {
-		t.Error("theme.css 缺少 .statfab 规则")
+	// 悬浮卡整套必须删干净（收回账号池页），一条规则都不能留。
+	for _, must := range []string{".statfab", "statfab-body", "statfab-tab"} {
+		if strings.Contains(C, must) {
+			t.Errorf("theme.css 仍残留悬浮卡规则 %q：已收回账号池页，请删干净", must)
+		}
 	}
-	// fixed 定位：这是"悬浮"的实质。
-	i := strings.Index(C, ".statfab {")
-	seg := C[i:]
-	if j := strings.Index(seg, "\n  }"); j > 0 {
-		seg = seg[:j]
+	// --fab-lift 机制只服务悬浮卡，一并删除。
+	if strings.Contains(C, "--fab-lift") {
+		t.Error("theme.css 仍残留 --fab-lift：服务它的悬浮卡已删")
 	}
-	if !strings.Contains(seg, "position: fixed") {
-		t.Errorf(".statfab 未 fixed 定位：\n%s", seg)
-	}
-	if !strings.Contains(C, ".statfab-body .stats {") {
-		t.Error("theme.css 缺少 .statfab-body .stats（应复用原统计网格）")
+	// #toasts 回到右下角贴底（悬浮卡没了，不必再抬）。
+	if !strings.Contains(C, "#toasts { position: fixed; right: 20px; bottom: 20px;") {
+		t.Error("#toasts 未回到右下角贴底")
 	}
 	// #btnNav 桌面端隐藏、900px 内显示。
 	if !strings.Contains(C, "#btnNav { display: none; }") {
@@ -83,111 +88,48 @@ func TestStatFabCSS(t *testing.T) {
 	if !strings.Contains(C, "#btnNav { display: inline-flex !important; }") {
 		t.Error("#btnNav 未在 ≤900px 显示")
 	}
-
-	// ── 四个集成问题（都是"加了个固定元素，却忘了它会和谁打架"）──────────
-	// ① 展开面板往上长：.statfab 是 flex column，默认 DOM 顺序会让面板掉到
-	//    tab 下面（贴屏幕底边看不见）。column-reverse 让 tab 贴底、面板向上。
-	if !strings.Contains(C, "flex-direction: column-reverse") {
-		t.Error(".statfab 未用 column-reverse：展开面板会掉到 tab 下方、贴屏幕底边")
-	}
-	// ② 展开面板限高：7 项在手机上排 2 列 4 行近 300px，不封顶会占掉半屏。
-	if !strings.Contains(C, "max-height: calc(100dvh - 132px)") {
-		t.Error(".statfab-body 未限高：手机上展开会占掉半屏")
-	}
-	if !strings.Contains(C, "overscroll-behavior: contain") {
-		t.Error(".statfab-body 未做 overscroll 收边：滚到底会把页面也带着滚")
-	}
-	// ③ toast 让位：#toasts 原来贴 bottom:20px，会和卡片叠在一起挡住它。
-	if !regexp.MustCompile(`#toasts \{[^}]*bottom: 64px`).MatchString(C) {
-		t.Error("#toasts 仍贴 bottom:20px：会与右下角悬浮卡重叠")
-	}
-	// ④ 有 sticky .savebar 的页面要抬高卡片，否则压住「保存」主按钮。
-	//    关键是让位量必须走 CSS 变量 --fab-lift：写死偏移必错（B 方案按"停在自然
-	//    位置时的高度"给 92px，复测仍被压住 —— 内容不满一屏时 sticky 保存条停在
-	//    屏幕中间而不是底边）。变量由 app.js 的 syncFabLift() 实测写入。
-	if !strings.Contains(C, `body[data-view="config"] .statfab,`) ||
-		!strings.Contains(C, `body[data-view="providers"] .statfab {`) ||
-		!strings.Contains(C, `bottom: calc(16px + var(--fab-lift))`) {
-		t.Error("配置/供应商页未按 --fab-lift 变量让位：悬浮卡会盖住保存按钮")
-	}
-	if !strings.Contains(C, `:root { --fab-lift: 0px; }`) {
-		t.Error("theme.css 缺少 --fab-lift 初始值")
-	}
-	// 写死的让位量不能回来：那种 .statfab.open { bottom: 92px } 一律拒绝。
-	// 注意不能无脑匹配"任何 .statfab 带 bottom: Npx"—— ≤400px 断点里的
-	// .statfab { bottom: 8px } 是窄机收边距，合法。只查让位规则那段。
-	if regexp.MustCompile(`\.statfab[^{}]*(?:\.open[^{}]*)?\{[^}]*bottom: \d+px`).MatchString(
-		regexp.MustCompile(`(?s)配置页 / 供应商页底部.*?:root`).FindString(C)) {
-		t.Error("让位量又被写死了：必须走 var(--fab-lift)，否则某状态下会压住保存按钮")
-	}
 }
 
-// 任务 A 的 JS：initStatFab / setStatFabOpen / syncFab 三件套 + loadOverview 内
-// 必须真的调用 syncFab（否则卡片永远显示 "-"）。
+// 统计条放回页内后的 JS：悬浮卡三件套与让位机制必须全部删除。
 func TestStatFabJS(t *testing.T) {
 	js, err := os.ReadFile("app.js")
 	if err != nil {
 		t.Fatal(err)
 	}
 	J := string(js)
-	for _, fn := range []string{"function initStatFab()", "function setStatFabOpen(", "function syncFab("} {
-		if !strings.Contains(J, fn) {
-			t.Errorf("app.js 缺少 %s", fn)
+	// 悬浮卡相关函数与调用全部删除（收回账号池页）。
+	for _, fn := range []string{
+		"function initStatFab(", "function setStatFabOpen(", "function syncFab(",
+		"function syncFabLift(", "initStatFab();", "STATFAB_KEY", "wb2api.statfab",
+		"statFabOpen", "classList.toggle('open', statFabOpen)",
+	} {
+		if strings.Contains(J, fn) {
+			t.Errorf("app.js 仍残留悬浮卡代码 %q：已收回账号池页，请删干净", fn)
 		}
 	}
-	if !strings.Contains(J, "wb2api.statfab") {
-		t.Error("app.js 未持久化展开状态（wb2api.statfab）")
+	// --fab-lift 的 JS 侧写入也必须删除。
+	if strings.Contains(J, "--fab-lift") {
+		t.Error("app.js 仍写入 --fab-lift：服务它的悬浮卡已删")
 	}
-	// .open 是让 CSS/调试时能看出展开态的类，保留。
-	if !strings.Contains(J, "classList.toggle('open', statFabOpen)") {
-		t.Error("setStatFabOpen 未切换 .open")
-	}
-	// syncFabLift：让位量由 JS 实测写入 --fab-lift（写死必错）。
-	// 四个挂载点缺一不可：切页、展开/收起、resize、scroll。
-	if !strings.Contains(J, "function syncFabLift()") {
-		t.Fatal("app.js 缺少 syncFabLift：让位量没人算")
-	}
-	if !strings.Contains(J, `--fab-lift: `) {
-		t.Error("syncFabLift 未写入 CSS 变量 --fab-lift")
-	}
-	if !strings.Contains(J, "addEventListener('scroll', () => syncFabLift()") {
-		t.Error("未挂 scroll：滚动时 sticky 保存条吸底/回原位，让位量会失效")
-	}
+	// resize 挂钩本身要留着（抽屉要靠它自动收起），只是不能再带 syncFabLift。
 	if !strings.Contains(J, "window.innerWidth > 900 && navDrawerOpen()") {
 		t.Error("resize 挂钩丢了")
 	}
-	// 量之前必须先清零 —— 否则量到"已抬过的"位置，两个值来回翻（实测卡在 0）。
-	if !strings.Contains(J, "':root { --fab-lift: 0px }'") {
-		t.Error("syncFabLift 未先清零再量：抬起的值会自我打架")
-	}
-	// 公式闸门：矩形相交才抬。少了 vOver>0，桌面端保存条停中部、卡片在下方时会
-	// 被一路抬到屏幕上方（实测 358px，tab 从 t=750 跑到 t=392）。
-	if !strings.Contains(J, "hOver > 0 && vOver > 0") {
-		t.Error("让位判定少了矩形相交闸门：不相交时也会被抬走")
-	}
-	// 抬的量 = 卡底越过栏顶的距离，不是相交高度：tab 整个落进底栏区间时
-	// 相交高度恰等于 tab 自身高度，照它抬永远差一截。
-	if !strings.Contains(J, "Math.ceil(fr.bottom - sr.top + 16)") {
-		t.Error("让位量算错：必须抬「卡底 − 栏顶」，不能用相交高度")
-	}
-	// loadOverview 内必须调用 syncFab —— 只在函数外定义等于没接线。
+	// loadOverview 必须仍在（统计条的数据全从这里走），且不能再调 syncFab。
 	f := strings.Index(J, "async function loadOverview")
 	if f < 0 {
 		t.Fatal("app.js 缺少 loadOverview")
 	}
-	// Go 的 strings.Index 没有 fromIndex 参数，要往后找得先切片。
 	e := strings.Index(J[f+10:], "\nasync function ")
 	end := len(J)
 	if e >= 0 {
 		end = f + 10 + e
 	}
-	if !strings.Contains(J[f:end], "syncFab(") {
-		t.Error("loadOverview 未调用 syncFab：悬浮卡数字永远是 -")
+	if strings.Contains(J[f:end], "syncFab(") {
+		t.Error("loadOverview 仍调用 syncFab：悬浮卡已删")
 	}
-	// bootstrapAuth 里初始化。
-	b := strings.Index(J, "async function bootstrapAuth")
-	if b < 0 || !strings.Contains(J[b:], "initStatFab();") {
-		t.Error("bootstrapAuth 未调用 initStatFab")
+	if !strings.Contains(J[f:end], "setStat('sTotal'") {
+		t.Error("loadOverview 未写统计条：账号池页统计条会是 -")
 	}
 }
 

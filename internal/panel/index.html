@@ -874,7 +874,11 @@
           <div class="tbl-wrap" style="margin-top:12px">
             <table class="acc md" id="provTable">
               <thead><tr><th>供应商</th><th class="c-acts">操作</th></tr></thead>
+              <!-- 两段 tbody：空壳供应商默认不进 provBody，只在下面这行说明里点名；
+                   展开时它们才并回 provBody。分开写是为了 renderProvEditor 不必把
+                   过滤逻辑和说明行搅在一起，也避免 colspan 与数据行冲突。 -->
               <tbody id="provBody"></tbody>
+              <tbody id="provIdleRow" hidden></tbody>
             </table>
           </div>
         </div>

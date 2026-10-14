@@ -5317,6 +5317,11 @@ function omniModelsText(p) { return Array.isArray(p.models) ? p.models.join('\n'
  */
 const PROV_TYPES = ['runable', 'raccoon', 'trae', 'newapi', 'geminiweb', 'openai'];
 let provEdit = null; // {i, isNew, draft}
+/* provShowIdle 供应商列表是否连「没账号 / 没密钥」的空壳一起列出。
+   默认 false —— 用户原话「都没有添加账号的供应商为什么要显示」。折叠时列表只留
+   真正能服务的，空壳在表格下方一行说明里点明名字，可随时展开。偏好记 localStorage。 */
+let provShowIdle = false;
+try { provShowIdle = localStorage.getItem('wb2api.provShowIdle') === '1'; } catch (e) { /* 隐私模式 */ }
 
 function provTypeHasKey(type) { return type === 'openai' || type === 'newapi'; }
 function provTypeHasAccounts(type) { return type === 'raccoon' || type === 'runable' || type === 'trae' || type === 'geminiweb'; }
@@ -5327,6 +5332,19 @@ function provBadgeHtml(p) {
   if (provTypeHasKey(type) && !hasKey) return '<span class="tag bad">缺 api_key</span>';
   if (provTypeHasAccounts(type) && !(p.accounts || []).length) return '<span class="tag warn">无账号</span>';
   return '<span class="tag ok">正常</span>';
+}
+
+/* provIsIdle 这家供应商当前是否服务不了任何请求。
+   判定与 provBadgeHtml 同源：账号型类型（raccoon/runable/trae/geminiweb）没有账号，
+   或 key 型类型（openai/newapi）既没有 api_key 也没有 api_keys。
+   两者必须一致——徽标标「缺 api_key / 无账号」的，正是列表要隐藏的那些。 */
+function provIsIdle(p) {
+  if (!p) return true;
+  const type = p.type || 'runable';
+  const hasKey = !!(p.api_key || '').trim() || (Array.isArray(p.api_keys) && p.api_keys.some(k => (k || '').trim()));
+  if (provTypeHasKey(type) && !hasKey) return true;
+  if (provTypeHasAccounts(type) && !(p.accounts || []).length) return true;
+  return false;
 }
 
 function provByline(p) {
@@ -5349,37 +5367,74 @@ function provRowHtml(p, i) {
     '</td></tr>';
 }
 
+/* provFormHtml 供应商弹窗的表单结构。
+ *
+ * 2026-10：从老的 .og-fields 换成全站统一的 label.fld + .lb + .grid2。
+ * 起因是用户说「上游供应商里面的添加和修改对话框主题不统一」——同一套面板里
+ * 两套表单结构（标签字号、间距、列宽都不一样）看着就是一桩没做完的活。
+ * 短字段（名称 / 类型）并排走 .grid2，长字段各占一整行（.fld.wide）。
+ *
+ * data-pf 一个都没动：onProvFormInput 与 commitProvEdit 按它取值，改名会静默丢字段。 */
 function provFormHtml(d) {
   const type = d.type || 'runable';
   const typeOpts = PROV_TYPES.map(t => '<option value="' + t + '"' + (t === type ? ' selected' : '') + '>' + t + '</option>').join('');
-  const raccoonFields = type === 'raccoon' ? '' +
-      '<label>main_origin<input data-pf="main_origin" value="' + esc(d.main_origin || '') + '" placeholder="https://..."></label>' +
-      '<label>llm_base<input data-pf="llm_base" value="' + esc(d.llm_base || '') + '"></label>' +
-      '<label>auth_base<input data-pf="auth_base" value="' + esc(d.auth_base || '') + '"></label>' : '';
-  const traeFields = type === 'trae' ? '' +
-      '<label>agent_host<input data-pf="agent_host" value="' + esc(d.agent_host || '') + '" placeholder="留空 = 默认"></label>' +
-      '<label>ug_host<input data-pf="ug_host" value="' + esc(d.ug_host || '') + '" placeholder="留空 = 默认"></label>' +
-      '<label>oauth_host<input data-pf="oauth_host" value="' + esc(d.oauth_host || '') + '" placeholder="留空 = 默认"></label>' : '';
-  const deviceField = type === 'runable' ? '' +
-      '<label>device_header<input data-pf="device_header" value="' + esc(d.device_header || '') + '" placeholder="留空 = 默认"></label>' : '';
-  const geminiField = type === 'geminiweb' ? '' +
-      '<div class="og-hint og-full" style="margin-top:2px">Gemini Web 不需要 base_url / api_key：账号凭证是 <code>gemini.google.com</code> 的 Google Cookie。保存本供应商后，去「账号池 → 添加账号 → 选它 → 粘贴 Cookie」。models 留空 = 用内置的 <code>gemini-pro / gemini-flash / gemini-flash-thinking / gemini-flash-lite</code>。</div>' : '';
-  return '<div class="og-fields">' +
-      '<label>名称（唯一）<input data-pf="name" value="' + esc(d.name || '') + '" placeholder="如 my-openai"></label>' +
-      '<label>类型<select data-pf="type">' + typeOpts + '</select></label>' +
-      '<label class="og-full">base_url<input data-pf="base_url" value="' + esc(d.base_url || '') + '" placeholder="https://api.example.com/v1"></label>' +
-      '<label class="og-full">api_key<input data-pf="api_key" value="' + esc(d.api_key || '') + '" placeholder="上游密钥（openai 类用）；已脱敏，不改 = 保持原值"></label>' +
-      '<label class="og-full">api_keys（上游密钥池：一行一个；多把按请求轮询，401/403/429 自动冷却换下一把）' +
-        '<textarea data-pf="api_keys" rows="3" placeholder="留空 = 用上面的 api_key；一行一个上游密钥">' + esc((Array.isArray(d.api_keys) ? d.api_keys : []).join('\n')) + '</textarea></label>' +
-      deviceField + raccoonFields + traeFields + geminiField +
-      '<label class="og-full">models（逗号或换行分隔，留空 = 自动发现）<textarea data-pf="models" rows="2">' + esc(omniModelsText(d)) + '</textarea></label>' +
-      '<label class="og-full">system_prompt（供应商级系统提示词，留空 = 不注入）' +
-        '<textarea data-pf="system_prompt" rows="3" placeholder="给这个上游的每个请求前置一段系统提示词">' + esc(d.system_prompt || '') + '</textarea></label>' +
-    '</div>' +
-    '<div class="og-sep"></div>' +
-    '<div class="og-s">账号 ' + ((d.accounts || []).length) + ' 个 · 在「账号池」统一添加与管理</div>';
-}
+  // 数组拼装：每段独立成行，改哪一段都不会牵动别处
+  const out = [];
+  out.push('<div class="grid2">');
+  out.push('<label class="fld"><span class="lb">名称（唯一）</span>' +
+    '<input data-pf="name" value="' + esc(d.name || '') + '" placeholder="如 my-openai"></label>');
+  out.push('<label class="fld"><span class="lb">类型</span>' +
+    '<select data-pf="type">' + typeOpts + '</select>' +
+    '<span class="hint">账号型：raccoon / runable / trae / geminiweb；密钥型：openai / newapi</span></label>');
+  out.push('</div>');
 
+  if (type === 'geminiweb') {
+    out.push('<div class="hint" style="margin:0 0 14px">Gemini Web 不需要 base_url / api_key：账号凭证是 <code>gemini.google.com</code> 的 Google Cookie。保存本供应商后，去「账号池 → 添加账号 → 选它 → 粘贴 Cookie」。models 留空 = 用内置的 <code>gemini-pro / gemini-flash / gemini-flash-thinking / gemini-flash-lite</code>。</div>');
+  }
+  if (type === 'runable') {
+    out.push('<label class="fld"><span class="lb">device_header</span>' +
+      '<input data-pf="device_header" value="' + esc(d.device_header || '') + '" placeholder="留空 = 默认"></label>');
+  }
+  if (type === 'raccoon') {
+    out.push('<div class="grid2">');
+    out.push('<label class="fld"><span class="lb">main_origin</span>' +
+      '<input data-pf="main_origin" value="' + esc(d.main_origin || '') + '" placeholder="https://..."></label>');
+    out.push('<label class="fld"><span class="lb">llm_base</span>' +
+      '<input data-pf="llm_base" value="' + esc(d.llm_base || '') + '"></label>');
+    out.push('</div>');
+    out.push('<label class="fld"><span class="lb">auth_base</span>' +
+      '<input data-pf="auth_base" value="' + esc(d.auth_base || '') + '"></label>');
+  }
+  if (type === 'trae') {
+    out.push('<div class="grid3">');
+    out.push('<label class="fld"><span class="lb">agent_host</span>' +
+      '<input data-pf="agent_host" value="' + esc(d.agent_host || '') + '" placeholder="留空 = 默认"></label>');
+    out.push('<label class="fld"><span class="lb">ug_host</span>' +
+      '<input data-pf="ug_host" value="' + esc(d.ug_host || '') + '" placeholder="留空 = 默认"></label>');
+    out.push('<label class="fld"><span class="lb">oauth_host</span>' +
+      '<input data-pf="oauth_host" value="' + esc(d.oauth_host || '') + '" placeholder="留空 = 默认"></label>');
+    out.push('</div>');
+  }
+
+  // 长字段各占整行
+  out.push('<label class="fld wide"><span class="lb">base_url</span>' +
+    '<input data-pf="base_url" value="' + esc(d.base_url || '') + '" placeholder="https://api.example.com/v1"></label>');
+  out.push('<label class="fld wide"><span class="lb">api_key</span>' +
+    '<input data-pf="api_key" value="' + esc(d.api_key || '') + '" placeholder="上游密钥（openai 类用）；已脱敏，不改 = 保持原值"></label>');
+  out.push('<label class="fld wide"><span class="lb">api_keys</span>' +
+    '<span class="hint" style="margin:0 0 5px">上游密钥池：一行一个；多把按请求轮询，401/403/429 自动冷却换下一把</span>' +
+    '<textarea data-pf="api_keys" rows="3" spellcheck="false" placeholder="留空 = 用上面的 api_key；一行一个上游密钥">' + esc((Array.isArray(d.api_keys) ? d.api_keys : []).join('\n')) + '</textarea></label>');
+  out.push('<label class="fld wide"><span class="lb">models</span>' +
+    '<span class="hint" style="margin:0 0 5px">逗号或换行分隔，留空 = 自动发现</span>' +
+    '<textarea data-pf="models" rows="2" spellcheck="false">' + esc(omniModelsText(d)) + '</textarea></label>');
+  out.push('<label class="fld wide"><span class="lb">system_prompt</span>' +
+    '<span class="hint" style="margin:0 0 5px">供应商级系统提示词，留空 = 不注入</span>' +
+    '<textarea data-pf="system_prompt" rows="3">' + esc(d.system_prompt || '') + '</textarea></label>');
+
+  out.push('<div class="hr"></div>');
+  out.push('<div class="hint" style="margin:0">账号 ' + ((d.accounts || []).length) + ' 个 · 在「账号池」统一添加与管理</div>');
+  return out.join('');
+}
 function openProvEdit(i) {
   const isNew = (i == null || i < 0);
   const base = isNew ? { name: '', type: 'runable', base_url: '', models: [], accounts: [] } : (omniCfg.providers || [])[i];
@@ -5448,8 +5503,30 @@ function renderProvEditor() {
     if (cur) sel.value = cur;
   }
   if ($('provCnt')) $('provCnt').textContent = provs.length ? (provs.length + ' 个') : '';
-  if (!provs.length) { body.innerHTML = '<tr><td colspan="2"><div class="empty">还没有供应商，点「+ 添加供应商」开始</div></td></tr>'; return; }
-  body.innerHTML = provs.map((p, i) => provRowHtml(p, i)).join('');
+  // 空壳供应商默认折叠（用户：「都没有添加账号的供应商为什么要显示」）。
+  // 不删配置、也不从路由下拉里消失，只是不占列表；说明行点明是哪几家、可展开。
+  const idleList = provs.filter(provIsIdle);
+  const shown = provShowIdle ? provs : provs.filter(p => !provIsIdle(p));
+  const idleRow = $('provIdleRow');
+  if (idleRow) {
+    if (idleList.length && !provShowIdle) {
+      idleRow.hidden = false;
+      idleRow.innerHTML = '<tr><td colspan="2"><div class="og-row" style="justify-content:space-between">' +
+        '<span class="og-s">还有 ' + idleList.length + ' 家供应商未配置账号 / 密钥（已隐藏）：' + esc(idleList.map(p => p.name || '(未命名)').join('、')) + '</span>' +
+        '<button type="button" class="xs" data-act="showIdle">展开全部 ' + provs.length + ' 家</button>' +
+        '</div></td></tr>';
+    } else {
+      idleRow.hidden = true; idleRow.innerHTML = '';
+    }
+  }
+  if (!shown.length) {
+    body.innerHTML = provs.length
+      ? '<tr><td colspan="2"><div class="empty">现有供应商都还没配置账号 / 密钥，暂时都不能服务请求。点右上角「+ 添加供应商」开始。</div></td></tr>'
+      : '<tr><td colspan="2"><div class="empty">还没有供应商，点「+ 添加供应商」开始</div></td></tr>';
+    return;
+  }
+  // 索引用 provs.indexOf：过滤后 i 会错位，而 openProvEdit 等按 omniCfg.providers 的原始下标取值
+  body.innerHTML = shown.map(p => provRowHtml(p, provs.indexOf(p))).join('');
 }
 
 function onProvClick(ev) {
@@ -5459,6 +5536,13 @@ function onProvClick(ev) {
   if (!act) return;
   const i = +(btn ? btn.dataset.i : row.dataset.i);
   if (act === 'editProv') { openProvEdit(i); return; }
+  if (act === 'showIdle') {
+    // 展开被折叠的空壳供应商。偏好落 localStorage，下次进来仍是展开态。
+    provShowIdle = true;
+    try { localStorage.setItem('wb2api.provShowIdle', '1'); } catch (e) { /* 隐私模式 */ }
+    renderProvEditor();
+    return;
+  }
   if (act === 'goPool') {
     // 跳「账号池」并打开「添加账号」，来源预选为该供应商。
     const name = omniCfg.providers[i] && omniCfg.providers[i].name;

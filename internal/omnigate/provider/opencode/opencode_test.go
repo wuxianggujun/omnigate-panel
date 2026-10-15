@@ -465,3 +465,85 @@ func TestModelUnavailableFallsBackToNextTier(t *testing.T) {
 		t.Fatalf("应恰好打两次（go 一次 + zen 一次），得到 %d 次", len(got))
 	}
 }
+
+// 密钥无效时也必须能拿到模型目录：目录是公开的，带坏密钥会被 401 拒，摘掉鉴权重试即可。
+//
+// 为什么值得专门钉：不重试时用户看到的是「模型下拉是空的」，第一反应是查网络、
+// 查供应商有没有配错，而不是查那把密钥——把「密钥错」伪装成「目录拉不到」是很难查的。
+func TestListModelsRetriesWithoutKeyOnBadCredential(t *testing.T) {
+	var withAuth, withoutAuth int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "" {
+			withAuth++
+			w.WriteHeader(http.StatusUnauthorized)
+			io.WriteString(w, `{"error":{"type":"server_error","message":"Upstream request failed: Invalid credential"}}`)
+			return
+		}
+		withoutAuth++
+		json.NewEncoder(w).Encode(map[string]any{
+			"object": "list",
+			"data":   []map[string]any{{"id": "public-a"}, {"id": "public-b"}},
+		})
+	}))
+	defer srv.Close()
+
+	p := New(Options{Name: "oc", ZenKeys: []string{"bad"}, ZenBase: srv.URL})
+	models, err := p.ListModels(context.Background())
+	if err != nil {
+		t.Fatalf("密钥无效不该连目录都拿不到，得到 %v", err)
+	}
+	if len(models) != 2 || models[0].ID != "public-a" {
+		t.Fatalf("应拿到公开目录，得到 %+v", models)
+	}
+	if withAuth != 1 || withoutAuth != 1 {
+		t.Fatalf("应「带密钥一次 → 摘掉密钥重试一次」，实际 带=%d 不带=%d", withAuth, withoutAuth)
+	}
+}
+
+// 密钥有效时不该多打一次：带密钥拿到的目录可能比公开目录更全（付费可见范围）。
+func TestListModelsUsesKeyWhenValid(t *testing.T) {
+	n := 0
+	sawAuth := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n++
+		if r.Header.Get("Authorization") == "Bearer good" {
+			sawAuth = true
+		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"object": "list",
+			"data":   []map[string]any{{"id": "paid-only"}},
+		})
+	}))
+	defer srv.Close()
+
+	p := New(Options{Name: "oc", ZenKeys: []string{"good"}, ZenBase: srv.URL})
+	models, err := p.ListModels(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(models) != 1 || models[0].ID != "paid-only" {
+		t.Fatalf("应拿到带密钥的目录，得到 %+v", models)
+	}
+	if n != 1 || !sawAuth {
+		t.Fatalf("密钥有效时应只打一次且带鉴权，实际 %d 次 带鉴权=%v", n, sawAuth)
+	}
+}
+
+// 密钥无效会同时打两次（带/不带），但目录仍然拿到——顺带确认不会把错误体的原始
+// 大响应整段塞进报错（上游出错时可能回一页 HTML）。
+func TestListTierErrorIsClipped(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		io.WriteString(w, strings.Repeat("x", 5000))
+	}))
+	defer srv.Close()
+
+	p := New(Options{Name: "oc", ZenKeys: []string{"k"}, ZenBase: srv.URL})
+	_, err := p.ListModels(context.Background())
+	if err == nil {
+		t.Fatal("500 应报错")
+	}
+	if len(err.Error()) > 600 {
+		t.Fatalf("报错应被裁剪，实际 %d 字符", len(err.Error()))
+	}
+}

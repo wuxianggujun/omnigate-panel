@@ -412,28 +412,54 @@ func (p *Provider) ListModels(ctx context.Context) ([]openai.Model, error) {
 }
 
 // listTier 拉取单个 tier 的模型目录。
+//
+// 带密钥失败（401/403）时摘掉 Authorization 重试一次：目录本身是公开的——实测不带
+// 鉴权返回完整目录，而带一把**无效**密钥会被直接拒（401 Invalid credential）。不重试
+// 的后果很误导：用户密钥填错时模型下拉是空的，他会去查网络，而不是去查那把密钥。
+//
+// 带有效密钥时仍优先带密钥请求：付费账号可能看到比公开目录更多的模型。
 func (p *Provider) listTier(ctx context.Context, pl *pool) ([]openai.Model, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, pl.base+"/v1/models", nil)
+	models, status, body, err := p.fetchModels(ctx, pl, true)
 	if err != nil {
 		return nil, err
 	}
+	if status < 400 {
+		return models, nil
+	}
+	if status == http.StatusUnauthorized || status == http.StatusForbidden {
+		if m2, st2, _, err2 := p.fetchModels(ctx, pl, false); err2 == nil && st2 < 400 {
+			return m2, nil
+		}
+	}
+	return nil, fmt.Errorf("opencode/%s 拉取模型目录 HTTP %d: %s",
+		pl.name, status, clipBody(body))
+}
+
+// fetchModels 发一次模型目录请求，返回模型、状态码与响应体（出错时 body 原样带回，
+// 供上层拼报错）。useKey=false 时不带 Authorization（公开目录）。
+func (p *Provider) fetchModels(ctx context.Context, pl *pool, useKey bool) ([]openai.Model, int, string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, pl.base+"/v1/models", nil)
+	if err != nil {
+		return nil, 0, "", err
+	}
 	req.Header.Set("User-Agent", UserAgent)
-	if key, ok := pl.pick(nil); ok {
-		req.Header.Set("Authorization", "Bearer "+key)
+	if useKey {
+		if key, ok := pl.pick(nil); ok {
+			req.Header.Set("Authorization", "Bearer "+key)
+		}
 	}
 	resp, err := p.http.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("opencode/%s 拉取模型目录失败: %w", pl.name, err)
+		return nil, 0, "", fmt.Errorf("opencode/%s 拉取模型目录失败: %w", pl.name, err)
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("opencode/%s 拉取模型目录 HTTP %d: %s",
-			pl.name, resp.StatusCode, strings.TrimSpace(string(body)))
+		return nil, resp.StatusCode, string(raw), nil
 	}
 	var ml openai.ModelList
-	if err := json.Unmarshal(body, &ml); err != nil {
-		return nil, fmt.Errorf("opencode/%s 模型目录解析失败: %w", pl.name, err)
+	if err := json.Unmarshal(raw, &ml); err != nil {
+		return nil, resp.StatusCode, string(raw), fmt.Errorf("opencode/%s 模型目录解析失败: %w", pl.name, err)
 	}
 	out := make([]openai.Model, 0, len(ml.Data))
 	for _, m := range ml.Data {
@@ -448,7 +474,17 @@ func (p *Provider) listTier(ctx context.Context, pl *pool) ([]openai.Model, erro
 		}
 		out = append(out, m)
 	}
-	return out, nil
+	return out, resp.StatusCode, string(raw), nil
+}
+
+// clipBody 把响应体裁到报错可读的长度：上游出错时可能回一整页 HTML。
+func clipBody(s string) string {
+	s = strings.TrimSpace(s)
+	const max = 300
+	if len(s) > max {
+		return s[:max] + "…"
+	}
+	return s
 }
 
 // StreamChat 发一次流式 chat completion。

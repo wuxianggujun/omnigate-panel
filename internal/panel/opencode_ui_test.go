@@ -71,6 +71,9 @@ const ctx = {
   esc: s => String(s == null ? '' : s),
   $: id => mk(id),
   toast: () => {}, ogMsg: () => {}, setTimeout: () => 0, confirm: () => true,
+  // 密钥字段标签会问 isAdmin（管理员才有「查看完整」按钮）；这里跑 viewer 口径，
+  // 表单里不出现按钮，既有断言不受管理员口径影响。
+  isAdmin: () => false,
 };
 vm.createContext(ctx);
 vm.runInContext(src.slice(start, end) +

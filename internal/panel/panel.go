@@ -289,6 +289,10 @@ func (p *Panel) routes() {
 	// 平台配置类只读接口（admin / viewer）：即便脱敏也会暴露全部供应商与账号
 	// 标签，不属于「自己的账号」，普通 user 与未登录访客一律 403。
 	p.mux.HandleFunc("GET /panel/api/omni/config", p.privileged(p.getOmniConfig))
+	// 管理员查看某供应商的完整密钥（明文，no-store，审计留痕）：「编辑供应商」
+	// 弹窗里的「查看完整」按钮专用。独立于上面的常驻脱敏 GET——明文只在管理员
+	// 显式点击时按供应商出门一次，不进入任何常驻回显。
+	p.mux.HandleFunc("GET /panel/api/omni/provider-secret", p.admin(p.providerSecret))
 	p.mux.HandleFunc("GET /panel/api/omni/outbound", p.privileged(p.getOutbound))
 	p.mux.HandleFunc("GET /panel/api/realm_routing", p.privileged(p.getRealmRouting))
 	p.mux.HandleFunc("GET /panel/api/config", p.privileged(p.getConfig))

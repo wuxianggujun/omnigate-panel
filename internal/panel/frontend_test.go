@@ -1381,6 +1381,10 @@ const ctx = {
   ogMsg: () => {},
   setTimeout: () => 0,
   confirm: () => true,
+  // provFormHtml 里的密钥字段标签会问 isAdmin（管理员才有「查看完整」按钮）；
+  // 这个垫子跑 viewer 口径，旧版表单输出保持不变。管理员口径由
+  // provsec_reveal_test.go 的运行时断言单独钉。
+  isAdmin: () => false,
 };
 vm.createContext(ctx);
 vm.runInContext(src.slice(start, end) +

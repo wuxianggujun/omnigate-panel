@@ -5316,7 +5316,7 @@ function omniModelsText(p) { return Array.isArray(p.models) ? p.models.join('\n'
  * 避免边打字边重渲染把光标顶掉。写盘仍走列表下方的「保存并生效」（整份配置一起提交）。
  */
 const PROV_TYPES = ['runable', 'raccoon', 'trae', 'newapi', 'geminiweb', 'openai', 'opencode'];
-let provEdit = null; // {i, isNew, draft}
+let provEdit = null; // {i, isNew, draft, revealed, masked, secret}
 /* provShowIdle 供应商列表是否连「没账号 / 没密钥」的空壳一起列出。
    默认 false —— 用户原话「都没有添加账号的供应商为什么要显示」。折叠时列表只留
    真正能服务的，空壳在表格下方一行说明里点明名字，可随时展开。偏好记 localStorage。 */
@@ -5416,6 +5416,22 @@ function provRowHtml(p, i) {
     '</td></tr>';
 }
 
+/* provKeyLabel 密钥字段的标签行。
+ *
+ * 管理员多一个「查看完整」按钮：点击从服务端取回明文（GET provider-secret，no-store，
+ * 服务端每次审计留痕），再点「隐藏」恢复掩码形态。viewer / 未登录不渲染按钮——
+ * 服务端那条端点也只放行管理员（403），前端这层只是不给无意义的入口。
+ * 新建供应商还没落盘、空字段没东西可回显，两种情况都不给按钮。 */
+function provKeyLabel(text, field, hasValue) {
+  if (!isAdmin() || !provEdit || provEdit.isNew || !hasValue) {
+    return '<span class="lb">' + text + '</span>';
+  }
+  const on = provEdit.revealed && provEdit.revealed[field];
+  return '<span class="lb">' + text +
+    '<button type="button" class="xs ghost" data-reveal="' + field + '" style="margin-left:6px"' +
+    ' title="仅管理员：从服务端取回明文（有审计记录）；再点隐藏">' + (on ? '隐藏' : '查看完整') + '</button></span>';
+}
+
 /* provFormHtml 供应商弹窗的表单结构。
  *
  * 2026-10：从老的 .og-fields 换成全站统一的 label.fld + .lb + .grid2。
@@ -5491,16 +5507,16 @@ function provFormHtml(d) {
       '<option value="zen"' + (d.tier_prefer === 'zen' ? ' selected' : '') + '>zen</option>' +
       '</select></label>');
     out.push('</div>');
-    out.push('<label class="fld wide"><span class="lb">zen_keys</span>' +
+    out.push('<label class="fld wide">' + provKeyLabel('zen_keys', 'zen_keys', Array.isArray(d.zen_keys) && d.zen_keys.length > 0) +
       '<span class="hint" style="margin:0 0 5px">付费模型用。OpenCode Zen（按量付费）密钥池：一行一个；多把按请求轮询，401/403/429 自动冷却换下一把</span>' +
       '<textarea data-pf="zen_keys" rows="3" spellcheck="false" placeholder="sk-...；留空 = 不启用 zen tier；已脱敏，不改 = 保持原值">' + esc((Array.isArray(d.zen_keys) ? d.zen_keys : []).join('\n')) + '</textarea></label>');
-    out.push('<label class="fld wide"><span class="lb">go_keys</span>' +
+    out.push('<label class="fld wide">' + provKeyLabel('go_keys', 'go_keys', Array.isArray(d.go_keys) && d.go_keys.length > 0) +
       '<span class="hint" style="margin:0 0 5px">付费模型用。OpenCode Go（订阅套餐）密钥池：一行一个；两个 tier 的密钥不通用，填错只会拿到 Invalid credential</span>' +
       '<textarea data-pf="go_keys" rows="3" spellcheck="false" placeholder="sk-...；留空 = 不启用 go tier；已脱敏，不改 = 保持原值">' + esc((Array.isArray(d.go_keys) ? d.go_keys : []).join('\n')) + '</textarea></label>');
   } else {
-    out.push('<label class="fld wide"><span class="lb">api_key</span>' +
+    out.push('<label class="fld wide">' + provKeyLabel('api_key', 'api_key', !!d.api_key) +
       '<input data-pf="api_key" value="' + esc(d.api_key || '') + '" placeholder="上游密钥（openai 类用）；已脱敏，不改 = 保持原值"></label>');
-    out.push('<label class="fld wide"><span class="lb">api_keys</span>' +
+    out.push('<label class="fld wide">' + provKeyLabel('api_keys', 'api_keys', Array.isArray(d.api_keys) && d.api_keys.length > 0) +
       '<span class="hint" style="margin:0 0 5px">上游密钥池：一行一个；多把按请求轮询，401/403/429 自动冷却换下一把</span>' +
       '<textarea data-pf="api_keys" rows="3" spellcheck="false" placeholder="留空 = 用上面的 api_key；一行一个上游密钥">' + esc((Array.isArray(d.api_keys) ? d.api_keys : []).join('\n')) + '</textarea></label>');
   }
@@ -5519,7 +5535,11 @@ function openProvEdit(i) {
   const isNew = (i == null || i < 0);
   const base = isNew ? { name: '', type: 'runable', base_url: '', models: [], accounts: [] } : (omniCfg.providers || [])[i];
   if (!base) return;
-  provEdit = { i: isNew ? -1 : i, isNew: isNew, draft: JSON.parse(JSON.stringify(base)) };
+  provEdit = { i: isNew ? -1 : i, isNew: isNew, draft: JSON.parse(JSON.stringify(base)), revealed: {}, masked: {} };
+  // 开窗快照：只拍密钥字段（掩码形态）。「隐藏」按它还原，其它字段不需要。
+  for (const f of ['api_key', 'api_keys', 'zen_keys', 'go_keys']) {
+    if (provEdit.draft[f] !== undefined) provEdit.masked[f] = JSON.parse(JSON.stringify(provEdit.draft[f]));
+  }
   $('provDlgTitle').textContent = isNew ? '添加供应商' : '编辑供应商';
   $('provDlgHint').textContent = isNew ? '填好点「确定」加入列表，再点「保存并生效」写盘。' : '改完点「确定」，再回列表点「保存并生效」才写盘（保存时「不改动 = 保持原值」）。';
   $('btnProvDel').hidden = isNew;
@@ -5546,6 +5566,55 @@ function onProvFormInput(ev) {
     return;
   }
   provEdit.draft[f] = el.value;
+}
+
+/* provRevealKeys 管理员查看 / 隐藏完整密钥（「查看完整」按钮的处理）。
+ *
+ * 明文只走「显式点击」这一条路：GET /panel/api/omni/provider-secret（admin-only，
+ * no-store，服务端每次审计留痕）→ 填入对应字段；再点按开窗快照还原掩码形态。
+ * 明文只活在本次编辑会话的内存里（provEdit.draft / provEdit.secret），关掉弹窗即弃——
+ * 不写 localStorage、不进 omniCfg 常驻状态、更不会留在任何回显接口里。 */
+async function provRevealKeys(field) {
+  if (!provEdit || !isAdmin()) return;
+  const d = provEdit.draft;
+  provEdit.revealed = provEdit.revealed || {};
+  try {
+    if (provEdit.revealed[field]) {
+      // 隐藏：还原开窗快照（那次 GET config 回来的掩码形态）
+      if (provEdit.masked && field in provEdit.masked) {
+        d[field] = JSON.parse(JSON.stringify(provEdit.masked[field]));
+      } else {
+        delete d[field];
+      }
+      provEdit.revealed[field] = false;
+    } else {
+      // 一次编辑会话只拉一次：第一次点击取回整家供应商的密钥字段，之后复用缓存
+      if (!provEdit.secret) {
+        const r = await api('omni/provider-secret?name=' + encodeURIComponent(d.name || ''));
+        provEdit.secret = (r && r.secrets) || {};
+      }
+      if (!(field in provEdit.secret)) {
+        toast('该供应商没有配置「' + field + '」', 'err');
+        return;
+      }
+      const v = provEdit.secret[field];
+      d[field] = Array.isArray(v) ? v.slice() : v;
+      provEdit.revealed[field] = true;
+    }
+    $('provForm').innerHTML = provFormHtml(d);
+  } catch (e) {
+    toast(e && e.message ? e.message : '取回完整密钥失败', 'err');
+  }
+}
+
+/* onProvFormClick 表单点击代理：目前只管「查看完整 / 隐藏」。
+ * 按钮在 <label> 里，preventDefault 防止 label 把这次点击转发给关联控件（焦点乱跳）。 */
+function onProvFormClick(ev) {
+  const el = ev.target;
+  const f = el && el.dataset && el.dataset.reveal;
+  if (!f) return;
+  ev.preventDefault();
+  provRevealKeys(f);
 }
 
 function commitProvEdit() {
@@ -6929,7 +6998,7 @@ async function saveOutbound() {
   const pv = $('provVeil');
   if (pv) pv.addEventListener('click', e => { if (e.target === pv) closeProvEdit(); });
   const pf = $('provForm');
-  if (pf) { pf.addEventListener('input', onProvFormInput); pf.addEventListener('change', onProvFormInput); }
+  if (pf) { pf.addEventListener('input', onProvFormInput); pf.addEventListener('change', onProvFormInput); pf.addEventListener('click', onProvFormClick); }
   document.addEventListener('keydown', e => { if (e.key === 'Escape' && $('provVeil') && $('provVeil').classList.contains('on')) closeProvEdit(); });
   // 网关密钥卡（按供应商收窄的客户端密钥）
   on('btnAddKey', addKey);

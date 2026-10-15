@@ -182,12 +182,20 @@ func TestFactoryBuildsOpencodeProvider(t *testing.T) {
 		t.Fatal("只要有任一 tier 的密钥就应 Ready")
 	}
 
-	// 一个池都没配 = 不可用（面板按空壳隐藏、签到守卫会挂起它）。
+	// 零密钥 + 匿名通道默认开启（字段缺省）= 可用：面板不再把它当空壳隐藏，
+	// 免费模型零密钥直接能跑（见 provider/opencode/anonymous.go）。
 	oc = build(t, config.ProviderConfig{Name: "oc4", Type: "opencode"})
-	if oc.Ready() {
-		t.Fatal("没有任何密钥的 opencode 不该 Ready")
+	if !oc.Ready() {
+		t.Fatal("零密钥 + 默认匿名通道应 Ready")
 	}
 	if got := oc.Tiers(); len(got) != 0 {
-		t.Fatalf("没有密钥时不该有可用 tier，得到 %v", got)
+		t.Fatalf("没有密钥时不该有密钥 tier，得到 %v", got)
+	}
+
+	// 显式关闭匿名通道、又没密钥 = 不可用（空壳口径回到「只认密钥」）。
+	anonOff := false
+	oc = build(t, config.ProviderConfig{Name: "oc5", Type: "opencode", Anonymous: &anonOff})
+	if oc.Ready() {
+		t.Fatal("显式关闭匿名且无密钥的 opencode 不该 Ready")
 	}
 }

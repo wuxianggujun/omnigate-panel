@@ -1,6 +1,7 @@
 package opencode
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -30,17 +31,38 @@ type reqInfo struct {
 	ua      string
 	client  string
 	session string
+	// 匿名通道断言用（见 anonymous_test.go）：四个会话头、项目头、被点名拒绝的
+	// 请求头，以及请求体（读完原样放回，不干扰 handler）。
+	sessionID  string
+	affinity   string
+	xSessionID string
+	project    string
+	requestHdr string
+	body       []byte
 }
 
 func (r *recorder) add(req *http.Request) {
+	var body []byte
+	if req.Body != nil {
+		if b, err := io.ReadAll(io.LimitReader(req.Body, 1<<20)); err == nil {
+			body = b
+			req.Body = io.NopCloser(bytes.NewReader(b)) // 放回去，handler 想读还能读
+		}
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.seen = append(r.seen, reqInfo{
-		path:    req.URL.Path,
-		auth:    req.Header.Get("Authorization"),
-		ua:      req.Header.Get("User-Agent"),
-		client:  req.Header.Get("x-opencode-client"),
-		session: req.Header.Get("x-opencode-session"),
+		path:       req.URL.Path,
+		auth:       req.Header.Get("Authorization"),
+		ua:         req.Header.Get("User-Agent"),
+		client:     req.Header.Get("x-opencode-client"),
+		session:    req.Header.Get("x-opencode-session"),
+		sessionID:  req.Header.Get("x-opencode-session-id"),
+		affinity:   req.Header.Get("x-session-affinity"),
+		xSessionID: req.Header.Get("X-Session-Id"),
+		project:    req.Header.Get("x-opencode-project"),
+		requestHdr: req.Header.Get("x-opencode-request"),
+		body:       body,
 	})
 }
 
@@ -164,13 +186,10 @@ func TestTierOrderFollowsPrefer(t *testing.T) {
 	}
 }
 
-// 守卫测试：本 provider 必须如实申报身份，且绝不触碰匿名免费通道。
-//
-// 这条边界是刻意划的（见包注释）：匿名 tier 用 Bearer public，但它的门禁卡的是
-// 「客户端身份」——逐字节比对官方工具定义、要求官方 UA 与 x-opencode-client: cli、
-// 以及特定形态的 ses_* 会话 id——目的就是排除第三方网关。任何改动如果让下面的
-// 断言失败，说明它在重新引入对官方客户端的伪装，请先回去读包注释。
-func TestNeverImpersonatesOfficialClientAndNeverUsesAnonymousTier(t *testing.T) {
+// 守卫测试（zen/go 一侧）：密钥通道必须如实申报身份——不伪装官方 CLI、不用匿名
+// 凭证、不碰 /inference。匿名通道是另一条刻意分开的通道，它有自己的一整套镜像
+// 断言（TestAnonymousLaneMirrorsOfficialClient）；改这里前先回去读包注释。
+func TestKeyLanesDeclareOwnIdentity(t *testing.T) {
 	rec := &recorder{}
 	srv := okServer(t, rec)
 
@@ -205,8 +224,8 @@ func TestNeverImpersonatesOfficialClientAndNeverUsesAnonymousTier(t *testing.T) 
 		if strings.Contains(s.path, "/inference") {
 			t.Errorf("不得访问匿名 tier：%q", s.path)
 		}
-		if s.session == "" {
-			t.Errorf("必须发送 x-opencode-session（上游文档要求，用于路由与提示词缓存）")
+		if len(s.session) != 32 {
+			t.Errorf("zen/go 会话 id 是网关自己的 32 位 hex 形态，得到 %q", s.session)
 		}
 	}
 }
@@ -297,7 +316,9 @@ func TestListModelsToleratesOneTierFailure(t *testing.T) {
 	}
 }
 
-// 没配任何密钥时应给出可操作的错误，而不是静默失败或去撞匿名通道。
+// 没配密钥、匿名通道也没开时应给出可操作的错误（提示两条路），而不是静默失败。
+// 注意：配置层给 opencode 的默认是「匿名通道开启」（见 config.AnonymousEnabled），
+// 这里不写 Anonymous 就是明确关闭的那个分支。
 func TestNoKeysYieldsActionableError(t *testing.T) {
 	p := New(Options{Name: "opencode"})
 	if _, err := p.StreamChat(context.Background(), nil, provider.ChatInput{Model: "m"}); err == nil {
@@ -361,8 +382,8 @@ func TestRegionErrorDoesNotPoisonKeyPool(t *testing.T) {
 	}
 }
 
-// 免费模型的门禁（FreeTierError）同理：那是「只对官方客户端开放」，换密钥不会有任何
-// 变化，也不能把密钥冷却掉。
+// 免费模型的门禁（FreeTierError）同理：那是「客户端身份」问题（匿名通道没开、或镜像
+// 被上游拒了才会打到密钥通道），换密钥不会有任何变化，也不能把密钥冷却掉。
 func TestFreeTierErrorDoesNotPoisonKeyPool(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusForbidden)
@@ -375,8 +396,8 @@ func TestFreeTierErrorDoesNotPoisonKeyPool(t *testing.T) {
 	if err == nil {
 		t.Fatal("免费门禁应报错")
 	}
-	if !strings.Contains(err.Error(), "官方客户端") {
-		t.Fatalf("错误信息应说明这是客户端身份门禁，得到 %v", err)
+	if !strings.Contains(err.Error(), "门禁") {
+		t.Fatalf("错误信息应说明这是客户端身份门禁（而不是让人去查密钥），得到 %v", err)
 	}
 	if n := cooling(p.pools[0]); n != 0 {
 		t.Fatalf("不该冷却任何密钥，实际冷却 %d 把", n)

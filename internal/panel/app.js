@@ -5326,6 +5326,16 @@ try { provShowIdle = localStorage.getItem('wb2api.provShowIdle') === '1'; } catc
 function provTypeHasKey(type) { return type === 'openai' || type === 'newapi' || type === 'opencode'; }
 function provTypeHasAccounts(type) { return type === 'raccoon' || type === 'runable' || type === 'trae' || type === 'geminiweb'; }
 
+/* provAnonEnabled opencode 的匿名免费通道是否生效。
+   与服务端口径一致（config.ProviderConfig.AnonymousEnabled 的三态）：字段缺省
+   （undefined / null）= 开启——零密钥的 opencode 供应商默认就能服务免费模型；
+   显式 false 才关闭。两边口径必须一样，否则会出现「面板说空壳、服务端其实能用」
+   （或反过来）：前者把可用供应商藏了，后者放个空壳出来丢人。 */
+function provAnonEnabled(p) {
+  if (!p || (p.type || '') !== 'opencode') return false;
+  return (p.anonymous === undefined || p.anonymous === null) ? true : !!p.anonymous;
+}
+
 /* provKeyCount 这家供应商手上有几把可用上游密钥。
    opencode 是两个独立密钥池（zen 按量 / go 订阅，密钥互不通用），且**不认**通用
    api_key——表单刻意不给它那个输入框。所以这里按类型取字段：把 api_key 也算进去
@@ -5346,20 +5356,28 @@ function provKeyCount(p) {
 function provBadgeHtml(p) {
   const type = p.type || 'runable';
   const hasKey = provKeyCount(p) > 0;
-  if (provTypeHasKey(type) && !hasKey) return '<span class="tag bad">' + (type === 'opencode' ? '缺密钥' : '缺 api_key') + '</span>';
+  if (provTypeHasKey(type) && !hasKey) {
+    // opencode 开着匿名免费通道时不是空壳：零密钥也能真服务免费模型。
+    if (type === 'opencode' && provAnonEnabled(p)) return '<span class="tag ok">免费通道</span>';
+    return '<span class="tag bad">' + (type === 'opencode' ? '缺密钥' : '缺 api_key') + '</span>';
+  }
   if (provTypeHasAccounts(type) && !(p.accounts || []).length) return '<span class="tag warn">无账号</span>';
   return '<span class="tag ok">正常</span>';
 }
 
 /* provIsIdle 这家供应商当前是否服务不了任何请求。
    判定与 provBadgeHtml 同源：账号型类型（raccoon/runable/trae/geminiweb）没有账号，
-   或 key 型类型（openai/newapi）既没有 api_key 也没有 api_keys。
-   两者必须一致——徽标标「缺 api_key / 无账号」的，正是列表要隐藏的那些。 */
+   或 key 型类型（openai/newapi/opencode）没有密钥——但 opencode 开着匿名免费通道时
+   例外：零密钥也能真服务免费模型，不算空壳。
+   两者必须一致——徽标标「缺密钥 / 无账号」的，正是列表要隐藏的那些。 */
 function provIsIdle(p) {
   if (!p) return true;
   const type = p.type || 'runable';
   const hasKey = provKeyCount(p) > 0;
-  if (provTypeHasKey(type) && !hasKey) return true;
+  if (provTypeHasKey(type) && !hasKey) {
+    if (type === 'opencode' && provAnonEnabled(p)) return false;
+    return true;
+  }
   if (provTypeHasAccounts(type) && !(p.accounts || []).length) return true;
   return false;
 }
@@ -5420,9 +5438,10 @@ function provFormHtml(d) {
   out.push('</div>');
 
   if (type === 'opencode') {
-    out.push('<div class="hint" style="margin:0 0 14px">OpenCode Zen / Go：两个 tier 各一个密钥池。' +
-      'Go 是订阅套餐（10/40 美元档），zen 是按量付费；<b>免费模型</b>（<code>cat-jam-free</code> / <code>longcat-2.5-preview-free</code> / <code>step-5-preview-free</code>）在 Go 套餐里就是不限量，用你自己的 go key 正常调用，不需要别的通道。' +
-      '本供应商按上游文档要求如实申报自己的 User-Agent，并发送每会话稳定的 <code>x-opencode-session</code>。</div>');
+    out.push('<div class="hint" style="margin:0 0 14px">OpenCode 的三个上游 tier：<b>匿名免费通道</b>（零密钥，免费模型 <code>longcat-2.5-preview-free</code> / <code>step-5-preview-free</code> / <code>big-pickle</code> 等直接可用）、<b>go</b> 订阅套餐（10/40 美元档）、<b>zen</b> 按量付费。请求路由：免费模型匿名优先 → zen/go 密钥回落。</div>');
+    const anon = (d.anonymous === undefined || d.anonymous === null) ? true : !!d.anonymous;
+    out.push('<label class="fld wide"><span class="lb"><input type="checkbox" data-pf="anonymous"' + (anon ? ' checked' : '') + '> 匿名免费通道（零密钥）</span>' +
+      '<span class="hint" style="margin:0 0 5px">默认开启：网关按官方客户端形态调用 opencode.ai/inference 的公共免费层，免费模型不需要任何密钥；被门禁拒时自动回落到下面的密钥池。关闭后只用 zen / go 密钥池。</span></label>');
   }
 
   if (type === 'geminiweb') {
@@ -5473,10 +5492,10 @@ function provFormHtml(d) {
       '</select></label>');
     out.push('</div>');
     out.push('<label class="fld wide"><span class="lb">zen_keys</span>' +
-      '<span class="hint" style="margin:0 0 5px">OpenCode Zen（按量付费）密钥池：一行一个；多把按请求轮询，401/403/429 自动冷却换下一把</span>' +
+      '<span class="hint" style="margin:0 0 5px">付费模型用。OpenCode Zen（按量付费）密钥池：一行一个；多把按请求轮询，401/403/429 自动冷却换下一把</span>' +
       '<textarea data-pf="zen_keys" rows="3" spellcheck="false" placeholder="sk-...；留空 = 不启用 zen tier；已脱敏，不改 = 保持原值">' + esc((Array.isArray(d.zen_keys) ? d.zen_keys : []).join('\n')) + '</textarea></label>');
     out.push('<label class="fld wide"><span class="lb">go_keys</span>' +
-      '<span class="hint" style="margin:0 0 5px">OpenCode Go（订阅套餐）密钥池：一行一个；两个 tier 的密钥不通用，填错只会拿到 Invalid credential</span>' +
+      '<span class="hint" style="margin:0 0 5px">付费模型用。OpenCode Go（订阅套餐）密钥池：一行一个；两个 tier 的密钥不通用，填错只会拿到 Invalid credential</span>' +
       '<textarea data-pf="go_keys" rows="3" spellcheck="false" placeholder="sk-...；留空 = 不启用 go tier；已脱敏，不改 = 保持原值">' + esc((Array.isArray(d.go_keys) ? d.go_keys : []).join('\n')) + '</textarea></label>');
   } else {
     out.push('<label class="fld wide"><span class="lb">api_key</span>' +
@@ -5520,6 +5539,7 @@ function onProvFormInput(ev) {
   const f = el.dataset && el.dataset.pf;
   if (!f) return;
   if (f === 'type') { provEdit.draft.type = el.value; $('provForm').innerHTML = provFormHtml(provEdit.draft); return; }
+  if (f === 'anonymous') { provEdit.draft.anonymous = el.checked; return; }
   if (f === 'api_keys' || f === 'zen_keys' || f === 'go_keys') {
     // 一行一个；空行丢弃。掩码行（未改动的旧 key）原样留下，服务端按「掩码 = 未改动」还原。
     provEdit.draft[f] = el.value.split('\n').map(s => s.trim()).filter(Boolean);

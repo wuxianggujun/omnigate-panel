@@ -282,17 +282,20 @@ func New(cfg *config.Config, st *state.State, log *logx.Logger, opts ...Option) 
 		case "openai":
 			prov = openaibackend.New(p.Name, p.BaseURL, p.APIKey, p.Models)
 		case "opencode":
-			// OpenCode Zen / Go：两个 tier 各一个密钥池，分开轮换。密钥只能走
-			// 构造函数（本 provider 刻意不实现 SetAPIKeys，避免下面那条通用
-			// 注入路径用空切片把 zen 池清掉）。见 provider/opencode 包注释。
+			// OpenCode Zen / Go + 匿名免费通道：两个 tier 各一个密钥池，分开轮换；
+			// 匿名通道默认开启（零密钥即用，见 config.ProviderConfig.AnonymousEnabled），
+			// 显式关闭才只看密钥。密钥只能走构造函数（本 provider 刻意不实现
+			// SetAPIKeys，避免下面那条通用注入路径用空切片把 zen 池清掉）。
+			// 见 provider/opencode 包注释。
 			prov = opencode.New(opencode.Options{
-				Name:    p.Name,
-				ZenKeys: p.ZenKeys,
-				GoKeys:  p.GoKeys,
-				Prefer:  p.TierPrefer,
-				ZenBase: p.BaseURL,
-				GoBase:  p.GoBaseURL,
-				Models:  p.Models,
+				Name:      p.Name,
+				ZenKeys:   p.ZenKeys,
+				GoKeys:    p.GoKeys,
+				Prefer:    p.TierPrefer,
+				ZenBase:   p.BaseURL,
+				GoBase:    p.GoBaseURL,
+				Models:    p.Models,
+				Anonymous: p.AnonymousEnabled(),
 			})
 		case "raccoon":
 			prov = raccoon.NewProvider(p.Name, p.MainOrigin, p.LLMBase, p.AuthBase)

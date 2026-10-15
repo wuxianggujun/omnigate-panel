@@ -290,6 +290,11 @@ type ProviderConfig struct {
 	// 写作 /inference/go/v1/...，而实测 /zen/go 同样可达，将来若只有一个可用，
 	// 改配置即可，不用改代码。
 	GoBaseURL string `json:"go_base_url,omitempty"`
+	// Anonymous 是 opencode 的「匿名免费通道」开关：零密钥时按官方客户端形态调用
+	// opencode.ai/inference 的公共免费层，免费模型匿名优先（见 provider/opencode）。
+	// 三态：字段缺省（nil）= 开启——零密钥的 opencode 供应商默认就能服务免费模型，
+	// 面板不按空壳处理；显式 false = 关闭，只用 zen/go 密钥池。
+	Anonymous *bool `json:"anonymous,omitempty"`
 	// SystemPrompt 是「供应商级系统提示词」：非空时注入发给该上游的每个请求。
 	// 消息型上游（openai/newapi/raccoon/trae）在 messages 头部插一条 system；
 	// 单条 prompt 型上游（runable/geminiweb）拼到 prompt 开头。留空 = 不注入。
@@ -308,6 +313,13 @@ type ProviderConfig struct {
 	// 超限时网关保留开头与结尾、从中间省略后照跑（静默丢一点上下文），不再整条
 	// 拒绝。0 = 用该类型的默认值，负数 = 关闭这项限制（超长原样转发给上游）。
 	MaxPromptChars int `json:"max_prompt_chars,omitempty"`
+}
+
+// AnonymousEnabled 解析 opencode 匿名通道的三态：未设置 = 开启（零密钥即用的
+// 默认形态），显式关闭才停用。面板（provAnonEnabled）与网关工厂必须用同一口径，
+// 否则会出现「面板说空壳、服务端其实能用」的静默不一致。
+func (p *ProviderConfig) AnonymousEnabled() bool {
+	return p.Anonymous == nil || *p.Anonymous
 }
 
 // AccountConfig is one credential set.

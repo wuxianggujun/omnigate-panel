@@ -164,6 +164,21 @@ func (p *Provider) metaIndex() *metaIndex {
 	return c.idx
 }
 
+// peekMeta 只看已缓存、不抓取——请求路径上的路由判定（isAnonEligible）用。
+// 绝不为了判定去下 5.6MB 目录：那是模型列表该干的事，抓完自然就进缓存了。
+func (p *Provider) peekMeta() *metaIndex {
+	if p == nil || p.meta.url == "" {
+		return nil
+	}
+	c := &p.meta
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.idx != nil && time.Now().Before(c.next) {
+		return c.idx
+	}
+	return nil
+}
+
 // fetchMeta 拉一次目录并建成索引。任何一步失败都返回 nil（调用方保持 bare 目录）。
 //
 // 刻意用 context.Background() + 自己的超时，而不是跟随调用方的 ctx：调用方（网关的模型

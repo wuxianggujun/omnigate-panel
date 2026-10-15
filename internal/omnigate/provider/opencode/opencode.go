@@ -1,22 +1,15 @@
-// Package opencode adapts OpenCode Zen / OpenCode Go (opencode.ai) to the
+// Package opencode adapts OpenCode Zen / Go / 匿名免费 (opencode.ai) to the
 // provider.Provider interface.
 //
 // # 设计边界（改这个包之前请先读完）
 //
-// OpenCode 有三个上游 tier，本项目只使用其中两个：
+// OpenCode 有三个上游 tier，本包全部使用：
 //
 //	zen    付费按量   https://opencode.ai/zen       仅凭 Authorization: Bearer <key>
 //	go     订阅套餐   https://opencode.ai/zen/go    需要 key + x-opencode-session
-//	anon   匿名免费   https://opencode.ai/inference 需要伪装成 OpenCode 官方客户端
+//	anon   匿名免费   https://opencode.ai/inference 零密钥（凭证是字面量 "public"）
 //
-// 匿名 tier 用字面量凭证 "public"，但它的门禁卡的是「客户端身份」而不是「凭证」：
-// 上游会逐字节比对 tools 的定义、要求 User-Agent 形如 opencode/latest/<ver>/cli、
-// x-opencode-client: cli，以及按降序时间戳铸造的 ses_* 会话 id；任一项不符就是
-// 403 FreeTierError ——「OpenCode's free tier can only be used from within OpenCode」。
-// 这道门禁的**目的**就是排除第三方网关，所以本包不实现它，也不实现其变体
-// （不伪造官方 UA、不铸造 ses_* 形态的会话 id、不注入官方工具定义表）。
-//
-// 我们走的是上游明确欢迎的那条路。OpenCode Go 官方文档（opencode.ai/docs/go）写着：
+// zen / go 走上游明确欢迎的那条路。OpenCode Go 官方文档（opencode.ai/docs/go）写着：
 //
 //	"OpenCode Go is designed for OpenCode and other coding agents that produce
 //	 similar types of requests. ...
@@ -25,11 +18,24 @@
 //	 Send a stable session ID in x-opencode-session for each conversation so we
 //	 can optimize routing and prompt caching."
 //
-// 并列出已通过验证的第三方客户端（Hermes / Claude Code / Codex / ZCode / Pi /
-// jcode / Kilo Code CLI）。本包照此执行：User-Agent 如实申报为 omnigate，
-// 会话 id 用网关自己的稳定标识。免费模型（cat-jam-free /
-// longcat-2.5-preview-free / step-5-preview-free）在 Go 套餐里本来就是 unlimited，
-// 用你自己的 key 正常访问即可，不需要匿名通道。
+// 本包照此执行：zen/go 上 User-Agent 如实申报为 omnigate，会话 id 用网关自己的
+// 稳定标识（见 TestKeyLanesDeclareOwnIdentity）。
+//
+// 匿名 tier 是另一回事：它的门禁卡的是「客户端身份」而不是凭证——上游逐项核验
+// 官方工具定义表（五件套 shell/edit/glob/grep/read 缺一不可、名字必须一致）、
+// UA 形态（opencode/latest/<ver>/cli）、x-opencode-client: cli、按降序时间戳
+// 铸造的 ses_* 会话 id，并点名拒绝 x-opencode-request；任一项不符即
+// 403 FreeTierError——「OpenCode's free tier can only be used from within OpenCode」。
+// 门禁的目的本是排除第三方网关。
+//
+// 本包实现匿名通道，是**项目所有者的明确要求**（2026-10-15 决定反转）：面板把
+// 它做成默认开启的「零密钥免费通道」，免费模型匿名优先、zen/go 密钥降为付费通道
+// 与免费模型回退。协议事实全部来自同一出口 IP 上的实测，并写成测试钉死——
+// 上游门禁一变，TestAnonymousLane* 先亮红灯，而不是线上静默 403。
+//
+// 取舍摆在这里：两条通道的身份策略刻意不同（zen/go 如实申报、anon 镜像客户端），
+// 镜像只用于匿名免费层。若上游把门禁收紧到需要复刻整条客户端链路（TLS 指纹、
+// 请求时序、TUI 行为……），应当停下来重新评估，而不是无条件加码。
 package opencode
 
 import (
@@ -63,8 +69,11 @@ const (
 	TierGo  = "go"
 )
 
-// UserAgent 如实申报本网关。见包注释：上游文档明确要求第三方客户端「用自己的
-// UA」，而不是通用 SDK / HTTP 库名，更不是伪装成 opencode 官方 CLI。
+// UserAgent 是 zen / go tier 上如实申报本网关的 UA。见包注释：上游文档明确要求
+// 第三方客户端「用自己的 UA」，而不是通用 SDK / HTTP 库名。
+//
+// 匿名通道不适用它——那里的门禁要求官方 CLI 形态的 UA（anonUserAgent，见
+// anonymous.go）。两条通道的身份策略刻意分开，改这里前先想清楚改的是哪条。
 const UserAgent = "omnigate/1.0"
 
 // 密钥冷却时长与 openaibackend 保持一致：鉴权失败（密钥被吊销 / 无权限）冷得久
@@ -224,7 +233,7 @@ func modelFailureHint(body []byte) string {
 	case strings.Contains(s, "RegionError"):
 		return "该模型在当前出口 IP 的地区不可用；换密钥或换 tier 都不会变，请改用它支持的模型或换出口"
 	case strings.Contains(s, "FreeTierError"):
-		return "该模型的免费额度只对官方客户端开放；本 provider 如实申报自己的身份、不伪装，请改用套餐内其它模型"
+		return "免费门禁拒绝了该请求：模型不在匿名免费范围内，或匿名通道的客户端镜像已过期（上游门禁变动，请上报）；付费模型请在面板给本供应商配置 zen/go 密钥"
 	case strings.Contains(s, "MissingSessionID"):
 		return "上游要求 x-opencode-session 头，说明本 provider 的请求装配有问题，请上报"
 	}
@@ -248,19 +257,32 @@ type Options struct {
 	// MetaURL 覆盖模型元数据目录地址（上下文长度 / 价格 / 免费标记，见 metadata.go）；
 	// 空 = DefaultMetaURL。
 	MetaURL string
+	// Anonymous 开启匿名免费通道（零密钥，见 anonymous.go）：免费模型匿名优先，
+	// zen/go 密钥池降为付费通道与免费模型回退。配置层的默认值见
+	// config.ProviderConfig.AnonymousEnabled（未设置 = 开启）。
+	Anonymous bool
+	// AnonBase 覆盖匿名通道地址；空 = DefaultAnonBase。
+	AnonBase string
 }
 
-// Provider 是 OpenCode Zen / Go 的上游适配器。
+// Provider 是 OpenCode Zen / Go / 匿名免费 的上游适配器。
 type Provider struct {
-	name   string
-	pools  []*pool
-	models []string
-	http   *http.Client
-	meta   metaCache // 模型元数据缓存（见 metadata.go）
+	name string
+	// all 是全部 tier 的密钥池（按 prefer 顺序，含没配密钥的）：列公开目录、
+	// 纯匿名供应商的目录来源都要用它；pools 只留配了密钥的（轮询用）。
+	all   []*pool
+	pools []*pool
+	anon  string // 匿名免费通道 base；空 = 未启用
+	// models 是配置里的兜底模型清单。
+	models  []string
+	http    *http.Client
+	meta    metaCache   // 模型元数据缓存（见 metadata.go）
+	anonCat anonCatalog // 匿名免费目录缓存（见 anonymous.go）
 }
 
-// New 构造 provider。只保留「配了密钥」的 tier——没有密钥的 tier 留在轮询里
-// 只会让每次请求都白跑一趟 401。
+// New 构造 provider。只保留「配了密钥」的 tier 进轮询——没有密钥的 tier 留在
+// 轮询里只会让每次请求都白跑一趟 401；但它们仍记在 all 里，因为匿名通道开启时
+// 纯匿名供应商要用它们的公开目录列模型（目录本身不需要密钥）。
 func New(o Options) *Provider {
 	zenBase := o.ZenBase
 	if zenBase == "" {
@@ -295,9 +317,18 @@ func New(o Options) *Provider {
 		},
 	}
 	for _, name := range order {
-		if pl := byName[name]; len(pl.snapshot()) > 0 {
+		pl := byName[name]
+		p.all = append(p.all, pl)
+		if len(pl.snapshot()) > 0 {
 			p.pools = append(p.pools, pl)
 		}
+	}
+	if o.Anonymous {
+		base := strings.TrimSpace(o.AnonBase)
+		if base == "" {
+			base = DefaultAnonBase
+		}
+		p.anon = strings.TrimRight(base, "/")
 	}
 	return p
 }
@@ -308,10 +339,12 @@ func (p *Provider) Name() string { return p.name }
 // Type returns the provider type.
 func (p *Provider) Type() string { return "opencode" }
 
-// Ready 报告是否有任何一个 tier 配了密钥。面板与健康检查用它区分「空壳」。
-func (p *Provider) Ready() bool { return len(p.pools) > 0 }
+// Ready 报告这个供应商有没有任何一条能服务的通道：任一 tier 配了密钥，或匿名
+// 免费通道已启用（零密钥也真能服务免费模型，面板不按空壳隐藏）。
+func (p *Provider) Ready() bool { return len(p.pools) > 0 || p.anon != "" }
 
-// Tiers 返回参与轮询的 tier 名（按 prefer 顺序），供诊断使用。
+// Tiers 返回配了密钥、参与轮询的 tier 名（按 prefer 顺序），供诊断使用。
+// 匿名通道不是密钥 tier，不出现在这里。
 func (p *Provider) Tiers() []string {
 	out := make([]string, 0, len(p.pools))
 	for _, pl := range p.pools {
@@ -344,10 +377,10 @@ func (p *Provider) SetProxySelector(sel outbound.Selector) {
 	p.http.Transport = outbound.WrapTransport(base, sel)
 }
 
-// decorate 给请求带上鉴权与会话身份。
+// decorate 给 zen/go 请求带上鉴权与会话身份。
 //
 // 会话头按上游文档发送，用于路由与提示词缓存优化；User-Agent 如实申报本网关
-// （见包注释，这里刻意不伪装成官方客户端）。
+// （见包注释）。匿名通道不走这里——它有自己的一套镜像头（streamAnonymous）。
 func (p *Provider) decorate(req *http.Request, key, session string) {
 	req.Header.Set("Authorization", "Bearer "+key)
 	req.Header.Set("User-Agent", UserAgent)
@@ -378,11 +411,18 @@ func sessionID(in provider.ChatInput) string {
 	return hex.EncodeToString(sum[:16])
 }
 
-// ListModels 拉取各 tier 的 /v1/models 并取并集。
+// ListModels 拉取各来源的 /v1/models 并取并集。
 //
-// 目录是公开的（实测无需密钥即返回 200），两个 tier 的模型集并不相同——zen 86 个、
-// go 37 个——所以逐个 tier 拉、按 prefer 顺序去重合并；全部失败才回落到配置里写死
-// 的模型清单。某个 tier 拉不到不算错误：另一个 tier 还能提供模型。
+// 来源与顺序：
+//  1. 配了密钥的 tier 按轮询顺序拉（带密钥优先，见 listTier）；
+//  2. 没配密钥的 tier——只在匿名通道开启时——用公开目录补上（纯匿名供应商的
+//     唯一目录来源就是它：免费模型就分布在这两份目录里）；
+//  3. 匿名免费目录（/inference/v1/models，Bearer public）：权威的「匿名通道真能
+//     服务」清单，同时给纯匿名供应商兜底（见 anonymous.go）。
+//
+// 目录都是公开的（实测无需有效密钥即返回 200），两个 tier 的模型集并不相同——
+// zen 86 个、go 37 个——所以逐个来源拉、按顺序去重合并；全部失败才回落到配置里
+// 写死的模型清单。某个来源拉不到不算错误：别的来源还能提供模型。
 //
 // 并集之后用上游元数据目录补齐 /v1/models 不带的字段（上下文长度、输出上限、价格、
 // 免费标记，见 metadata.go）。这一步是纯增益：抓不到就保持 bare，不影响目录本身。
@@ -390,13 +430,7 @@ func (p *Provider) ListModels(ctx context.Context) ([]openai.Model, error) {
 	seen := map[string]bool{}
 	out := make([]openai.Model, 0, 64)
 	var lastErr error
-	for _, pl := range p.pools {
-		models, err := p.listTier(ctx, pl)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		p.enrich(pl.name, models)
+	add := func(models []openai.Model) {
 		for _, m := range models {
 			if seen[m.ID] {
 				continue
@@ -404,6 +438,36 @@ func (p *Provider) ListModels(ctx context.Context) ([]openai.Model, error) {
 			seen[m.ID] = true
 			out = append(out, m)
 		}
+	}
+	for _, pl := range p.all {
+		if len(pl.snapshot()) == 0 {
+			if p.anon == "" {
+				continue // 没密钥、又没匿名通道：这个 tier 拿它没辙
+			}
+			models, err := p.listPublic(ctx, pl.name, pl.base)
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			p.enrich(pl.name, models)
+			add(models)
+			continue
+		}
+		models, err := p.listTier(ctx, pl)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		p.enrich(pl.name, models)
+		add(models)
+	}
+	if ids := p.anonCatalogIDs(); len(ids) > 0 {
+		free := make([]openai.Model, 0, len(ids))
+		for _, id := range ids {
+			free = append(free, openai.Model{ID: id, Object: "model", OwnedBy: p.name, IsFree: true})
+		}
+		p.enrichMerged(free)
+		add(free)
 	}
 	if len(out) > 0 {
 		return out, nil
@@ -422,10 +486,10 @@ func (p *Provider) ListModels(ctx context.Context) ([]openai.Model, error) {
 	if lastErr != nil {
 		return nil, lastErr
 	}
-	return nil, fmt.Errorf("opencode: 未配置 zen/go 密钥池，无法获取模型目录")
+	return nil, fmt.Errorf("opencode: 没有配密钥池、匿名通道也未开启，无法获取模型目录")
 }
 
-// listTier 拉取单个 tier 的模型目录。
+// listTier 拉取单个配了密钥的 tier 的模型目录。
 //
 // 带密钥失败（401/403）时摘掉 Authorization 重试一次：目录本身是公开的——实测不带
 // 鉴权返回完整目录，而带一把**无效**密钥会被直接拒（401 Invalid credential）。不重试
@@ -433,15 +497,16 @@ func (p *Provider) ListModels(ctx context.Context) ([]openai.Model, error) {
 //
 // 带有效密钥时仍优先带密钥请求：付费账号可能看到比公开目录更多的模型。
 func (p *Provider) listTier(ctx context.Context, pl *pool) ([]openai.Model, error) {
-	models, status, body, err := p.fetchModels(ctx, pl, true)
+	key, _ := pl.pick(nil)
+	models, status, body, err := p.fetchModels(ctx, pl.name, pl.base, key)
 	if err != nil {
 		return nil, err
 	}
 	if status < 400 {
 		return models, nil
 	}
-	if status == http.StatusUnauthorized || status == http.StatusForbidden {
-		if m2, st2, _, err2 := p.fetchModels(ctx, pl, false); err2 == nil && st2 < 400 {
+	if (status == http.StatusUnauthorized || status == http.StatusForbidden) && key != "" {
+		if m2, st2, _, err2 := p.fetchModels(ctx, pl.name, pl.base, ""); err2 == nil && st2 < 400 {
 			return m2, nil
 		}
 	}
@@ -449,22 +514,32 @@ func (p *Provider) listTier(ctx context.Context, pl *pool) ([]openai.Model, erro
 		pl.name, status, clipBody(body))
 }
 
+// listPublic 拉没配密钥的 tier 的公开目录（匿名通道开启时用）。
+func (p *Provider) listPublic(ctx context.Context, tier, base string) ([]openai.Model, error) {
+	models, status, body, err := p.fetchModels(ctx, tier, base, "")
+	if err != nil {
+		return nil, err
+	}
+	if status >= 400 {
+		return nil, fmt.Errorf("opencode/%s 拉取公开模型目录 HTTP %d: %s", tier, status, clipBody(body))
+	}
+	return models, nil
+}
+
 // fetchModels 发一次模型目录请求，返回模型、状态码与响应体（出错时 body 原样带回，
-// 供上层拼报错）。useKey=false 时不带 Authorization（公开目录）。
-func (p *Provider) fetchModels(ctx context.Context, pl *pool, useKey bool) ([]openai.Model, int, string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, pl.base+"/v1/models", nil)
+// 供上层拼报错）。key 为空时不带 Authorization（公开目录）。
+func (p *Provider) fetchModels(ctx context.Context, tier, base, key string) ([]openai.Model, int, string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(base, "/")+"/v1/models", nil)
 	if err != nil {
 		return nil, 0, "", err
 	}
 	req.Header.Set("User-Agent", UserAgent)
-	if useKey {
-		if key, ok := pl.pick(nil); ok {
-			req.Header.Set("Authorization", "Bearer "+key)
-		}
+	if key != "" {
+		req.Header.Set("Authorization", "Bearer "+key)
 	}
 	resp, err := p.http.Do(req)
 	if err != nil {
-		return nil, 0, "", fmt.Errorf("opencode/%s 拉取模型目录失败: %w", pl.name, err)
+		return nil, 0, "", fmt.Errorf("opencode/%s 拉取模型目录失败: %w", tier, err)
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
@@ -473,7 +548,7 @@ func (p *Provider) fetchModels(ctx context.Context, pl *pool, useKey bool) ([]op
 	}
 	var ml openai.ModelList
 	if err := json.Unmarshal(raw, &ml); err != nil {
-		return nil, resp.StatusCode, string(raw), fmt.Errorf("opencode/%s 模型目录解析失败: %w", pl.name, err)
+		return nil, resp.StatusCode, string(raw), fmt.Errorf("opencode/%s 模型目录解析失败: %w", tier, err)
 	}
 	out := make([]openai.Model, 0, len(ml.Data))
 	for _, m := range ml.Data {
@@ -503,11 +578,15 @@ func clipBody(s string) string {
 
 // StreamChat 发一次流式 chat completion。
 //
-// 轮询是两层：外层按 prefer 顺序走 tier，内层走该 tier 的密钥池。失败按性质分三类
-// （见 classifyFailure）：密钥类在池内轮换；模型类当场失败（换密钥、换 tier 都是
-// 白打，还会把好密钥冷却掉）；其余 4xx（例如该模型不在这个 tier 上）放弃本 tier、
-// 回落到下一个 tier——这样「模型只在 go 上」和「模型只在 zen 上」都能自动落到对的
-// 一侧，不需要在配置里逐模型标注。
+// 通道顺序：免费模型匿名优先（零密钥，见 anonymous.go）；失败或不在免费范围时
+// 回落密钥轮询——外层按 prefer 顺序走 tier，内层走该 tier 的密钥池。失败按性质
+// 分三类（见 classifyFailure）：密钥类在池内轮换；模型类当场失败（换密钥、换
+// tier 都是白打，还会把好密钥冷却掉）；其余 4xx（例如该模型不在这个 tier 上）
+// 放弃本 tier、回落到下一个 tier——这样「模型只在 go 上」和「模型只在 zen 上」
+// 都能自动落到对的一侧，不需要在配置里逐模型标注。
+//
+// 匿名通道只试一次、不重试也不冷却：它没有凭证可轮换，被门禁拒了就该回落密钥池；
+// 密钥池也没有就报错，并把两条路都写进提示里（见 noChannelError）。
 func (p *Provider) StreamChat(ctx context.Context, acc *provider.Account, in provider.ChatInput) (provider.Stream, error) {
 	body := map[string]any{
 		"model":    in.Model,
@@ -525,6 +604,17 @@ func (p *Provider) StreamChat(ctx context.Context, acc *provider.Account, in pro
 	session := sessionID(in)
 
 	var lastErr error
+	if p.anon != "" && p.isAnonEligible(in.Model) {
+		st, err := p.streamAnonymous(ctx, raw, in, session)
+		if err == nil {
+			return st, nil
+		}
+		if ctx.Err() != nil {
+			// 客户端断开之类的中止：继续打密钥池没有意义。
+			return nil, err
+		}
+		lastErr = err
+	}
 	for _, pl := range p.pools {
 		tried := map[string]bool{}
 		for {
@@ -577,7 +667,18 @@ func (p *Provider) StreamChat(ctx context.Context, acc *provider.Account, in pro
 		}
 	}
 	if lastErr == nil {
-		lastErr = fmt.Errorf("opencode: 没有可用的上游密钥（请在面板的「上游供应商 → %s」里填写 zen / go 密钥池）", p.name)
+		lastErr = p.noChannelError(in.Model)
 	}
 	return nil, lastErr
+}
+
+// noChannelError 是「一条通道都没跑成」时的兜底报错，按配置情况给可操作的话。
+// 能走到这里的组合只有两种：没开匿名且没配密钥（一个通道都没有），或开了匿名、
+// 模型不在免费范围、密钥又全在冷却中（本次没有可用通道）。其它失败路径都有
+// 各自的 lastErr（匿名/密钥的原始报错），不会落进这个兜底。
+func (p *Provider) noChannelError(model string) error {
+	if p.anon == "" {
+		return fmt.Errorf("opencode: 没有可用的上游密钥（请在面板的「上游供应商 → %s」里填写 zen / go 密钥池，或开启匿名免费通道）", p.name)
+	}
+	return fmt.Errorf("opencode: 模型 %q 不属于匿名免费范围，可用的 zen / go 密钥又都在冷却中；请稍后重试，或改用免费模型（零密钥直连匿名通道）", model)
 }

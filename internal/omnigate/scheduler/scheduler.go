@@ -27,6 +27,10 @@ type Scheduler struct {
 	// 不要所有签到任务在同一秒齐发（既像机器人，又可能触发上游风控）。
 	startedAt time.Time
 	firstOff  map[string]time.Duration
+
+	// skipNoted 记录已提示过「不具备执行条件」的任务及其原因。守卫每周期都复检
+	// （补齐凭证后自动恢复），但提示只在原因变化时打一次，不刷屏。
+	skipNoted map[string]string
 }
 
 // New builds a Scheduler.
@@ -38,6 +42,7 @@ func New(cfg *config.Config, gw *gateway.Gateway, log *logx.Logger) *Scheduler {
 		stop:      make(chan struct{}),
 		startedAt: time.Now(),
 		firstOff:  map[string]time.Duration{},
+		skipNoted: map[string]string{},
 	}
 	def := cfg.DefaultInterval()
 	for _, t := range cfg.Checkin.Tasks {
@@ -52,8 +57,31 @@ func (s *Scheduler) Start() {
 		s.log.Info("自动签到未启用")
 		return
 	}
+	// 启动先盘一遍执行条件：供应商不存在 / 账号为 0 的任务不具备执行条件。
+	// 这里报一次总账，之后 runDue 的复检只在状态变化时提示。
+	total := len(s.cfg.Checkin.Tasks)
+	ready := 0
+	for _, t := range s.cfg.Checkin.Tasks {
+		name := taskName(t)
+		ok, why := s.taskReady(t)
+		if ok {
+			ready++
+			continue
+		}
+		if s.skipNoted[name] != why {
+			s.skipNoted[name] = why
+			s.log.Warn("签到任务 %q 已挂起：%s（补齐凭证后自动恢复）", name, why)
+		}
+	}
+	switch {
+	case ready == 0:
+		s.log.Warn("自动签到已启用，但 %d 个任务全部不具备执行条件", total)
+	case ready < total:
+		s.log.Info("自动签到已启用：%d 个任务可执行，%d 个挂起", ready, total-ready)
+	default:
+		s.log.Info("自动签到已启用，共 %d 个任务", total)
+	}
 	go s.loop()
-	s.log.Info("自动签到已启用，共 %d 个任务", len(s.cfg.Checkin.Tasks))
 }
 
 // Stop halts the loop.
@@ -79,6 +107,19 @@ func (s *Scheduler) runDue() {
 	now := time.Now()
 	for _, task := range s.cfg.Checkin.Tasks {
 		name := taskName(task)
+		// 执行条件守卫：不具备条件的任务直接跳过，且**不** MarkCheckin——这样补齐
+		// 凭证后的下一个周期就能自动恢复，而不是白等一个完整间隔。
+		if ok, why := s.taskReady(task); !ok {
+			if s.skipNoted[name] != why {
+				s.skipNoted[name] = why
+				s.log.Warn("签到任务 %q 已挂起：%s（补齐凭证后自动恢复）", name, why)
+			}
+			continue
+		}
+		if why, noted := s.skipNoted[name]; noted {
+			delete(s.skipNoted, name)
+			s.log.Info("签到任务 %q 恢复执行（此前挂起原因：%s）", name, why)
+		}
 		interval := task.Interval(def)
 		jitter := task.Jitter(s.cfg.Checkin.JitterMinutes)
 		last := s.gw.LastCheckin(name)
@@ -106,6 +147,36 @@ func taskName(task config.CheckinTask) string {
 		return task.Name
 	}
 	return task.Type + ":" + task.Provider
+}
+
+// taskReady 判断一个签到任务当前是否具备执行条件，返回 (可执行, 不可执行的原因)。
+//
+// 内置任务（runable / raccoon / trae / newapi / newapi-refresh / geminiweb）的语义
+// 都是「维护某个供应商已有账号的会话或额度」：供应商不存在、或账号数为 0 时，任务
+// 既没有可续的 cookie 也没有可签的账号，跑起来只会在每次到点时留下一条必然失败的
+// 日志。历史上 4 个空壳供应商各自挂着签到任务，就是这么每天空转的——没有账号的
+// 供应商本就不该被排进签到。
+//
+// 通用 HTTP 任务（type=http 或空）自带 url，凭证靠 {{cookie}} 等占位符替换，没有
+// 供应商也能执行，所以不设门槛（此时 runHTTP 会以空替换跑一次）。
+func (s *Scheduler) taskReady(task config.CheckinTask) (bool, string) {
+	if task.Type == "" || task.Type == "http" {
+		return true, ""
+	}
+	name := task.Provider
+	if name == "" {
+		name = s.cfg.DefaultProvider
+	}
+	if name == "" {
+		return false, "任务未指定供应商，且配置里没有默认供应商"
+	}
+	if s.cfg.Provider(name) == nil {
+		return false, fmt.Sprintf("供应商 %q 不存在", name)
+	}
+	if len(s.gw.Accounts(name)) == 0 {
+		return false, fmt.Sprintf("供应商 %q 尚未添加账号", name)
+	}
+	return true, ""
 }
 
 // firstRunOffset derives a stable per-task first-run stagger in [0, cap), where

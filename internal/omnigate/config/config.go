@@ -669,6 +669,21 @@ func (c *Config) validate() error {
 			return fmt.Errorf("routing.prefer: 未知 provider %q", name)
 		}
 	}
+	// 签到任务同理：内置签到任务（runable/raccoon/trae/newapi/geminiweb）的语义是
+	// 「维护某个供应商已有账号的会话或额度」，指向不存在的供应商 = 一条永远空转的
+	// 任务。与 api_keys / routing.prefer 同一口径，加载/保存时就拒绝，而不是等它
+	// 每次到点静默失败。
+	//
+	// 注意：供应商存在但账号数为 0 属于**运行时状态**（账号随时可能补上），不在这里
+	// 拒绝——那种情况由调度器的执行条件守卫挂起，补齐后自动恢复。
+	for _, t := range c.Checkin.Tasks {
+		if t.Provider == "" {
+			continue // 省略 provider = 落到 default_provider
+		}
+		if !seen[t.Provider] {
+			return fmt.Errorf("checkin.tasks[%s]: 未知 provider %q", taskLabel(t), t.Provider)
+		}
+	}
 	// 快过期选号的时长字段：写了但解析不了，静默回落默认值会让人以为配置生效了，
 	// 不如在加载/保存时直接拒绝（与 pool.expiring_soon 的宽容风格不同——那里是
 	// 主配置、这里新引入，fail fast 更不容易踩坑）。
@@ -689,6 +704,17 @@ func (c *Config) validate() error {
 func keyLabel(k APIKey) string {
 	if k.Name != "" {
 		return k.Name
+	}
+	return "未命名"
+}
+
+// taskLabel 给签到任务一个可读标签用于报错。
+func taskLabel(t CheckinTask) string {
+	if t.Name != "" {
+		return t.Name
+	}
+	if t.Type != "" {
+		return t.Type + ":" + t.Provider
 	}
 	return "未命名"
 }

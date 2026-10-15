@@ -245,6 +245,9 @@ type Options struct {
 	GoBase  string
 	// Models 是上游模型目录拉取失败时的兜底清单。
 	Models []string
+	// MetaURL 覆盖模型元数据目录地址（上下文长度 / 价格 / 免费标记，见 metadata.go）；
+	// 空 = DefaultMetaURL。
+	MetaURL string
 }
 
 // Provider 是 OpenCode Zen / Go 的上游适配器。
@@ -253,6 +256,7 @@ type Provider struct {
 	pools  []*pool
 	models []string
 	http   *http.Client
+	meta   metaCache // 模型元数据缓存（见 metadata.go）
 }
 
 // New 构造 provider。只保留「配了密钥」的 tier——没有密钥的 tier 留在轮询里
@@ -274,9 +278,14 @@ func New(o Options) *Provider {
 	if strings.EqualFold(o.Prefer, TierZen) {
 		order = []string{TierZen, TierGo}
 	}
+	metaURL := strings.TrimSpace(o.MetaURL)
+	if metaURL == "" {
+		metaURL = DefaultMetaURL
+	}
 	p := &Provider{
 		name:   o.Name,
 		models: clean(o.Models),
+		meta:   metaCache{url: metaURL},
 		http: &http.Client{
 			Transport: &http.Transport{
 				DialContext:           (&net.Dialer{Timeout: 20 * time.Second}).DialContext,
@@ -374,6 +383,9 @@ func sessionID(in provider.ChatInput) string {
 // 目录是公开的（实测无需密钥即返回 200），两个 tier 的模型集并不相同——zen 86 个、
 // go 37 个——所以逐个 tier 拉、按 prefer 顺序去重合并；全部失败才回落到配置里写死
 // 的模型清单。某个 tier 拉不到不算错误：另一个 tier 还能提供模型。
+//
+// 并集之后用上游元数据目录补齐 /v1/models 不带的字段（上下文长度、输出上限、价格、
+// 免费标记，见 metadata.go）。这一步是纯增益：抓不到就保持 bare，不影响目录本身。
 func (p *Provider) ListModels(ctx context.Context) ([]openai.Model, error) {
 	seen := map[string]bool{}
 	out := make([]openai.Model, 0, 64)
@@ -384,6 +396,7 @@ func (p *Provider) ListModels(ctx context.Context) ([]openai.Model, error) {
 			lastErr = err
 			continue
 		}
+		p.enrich(pl.name, models)
 		for _, m := range models {
 			if seen[m.ID] {
 				continue
@@ -403,6 +416,7 @@ func (p *Provider) ListModels(ctx context.Context) ([]openai.Model, error) {
 		out = append(out, openai.Model{ID: id, Object: "model", OwnedBy: p.name})
 	}
 	if len(out) > 0 {
+		p.enrichMerged(out)
 		return out, nil
 	}
 	if lastErr != nil {

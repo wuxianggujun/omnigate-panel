@@ -257,7 +257,7 @@ func TestListModelsUnionsTiersInPreferOrder(t *testing.T) {
 	zenSrv := mk("shared", "zen-only")
 
 	p := New(Options{Name: "oc", GoKeys: []string{"g"}, ZenKeys: []string{"z"},
-		GoBase: goSrv.URL, ZenBase: zenSrv.URL, Prefer: TierGo})
+		GoBase: goSrv.URL, ZenBase: zenSrv.URL, Prefer: TierGo, MetaURL: emptyMeta(t)})
 	models, err := p.ListModels(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -287,7 +287,7 @@ func TestListModelsToleratesOneTierFailure(t *testing.T) {
 	defer zenSrv.Close()
 
 	p := New(Options{Name: "oc", GoKeys: []string{"g"}, ZenKeys: []string{"z"},
-		GoBase: bad.URL, ZenBase: zenSrv.URL})
+		GoBase: bad.URL, ZenBase: zenSrv.URL, MetaURL: emptyMeta(t)})
 	models, err := p.ListModels(context.Background())
 	if err != nil {
 		t.Fatalf("一个 tier 失败不该让整体报错，得到 %v", err)
@@ -487,7 +487,7 @@ func TestListModelsRetriesWithoutKeyOnBadCredential(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	p := New(Options{Name: "oc", ZenKeys: []string{"bad"}, ZenBase: srv.URL})
+	p := New(Options{Name: "oc", ZenKeys: []string{"bad"}, ZenBase: srv.URL, MetaURL: emptyMeta(t)})
 	models, err := p.ListModels(context.Background())
 	if err != nil {
 		t.Fatalf("密钥无效不该连目录都拿不到，得到 %v", err)
@@ -516,7 +516,7 @@ func TestListModelsUsesKeyWhenValid(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	p := New(Options{Name: "oc", ZenKeys: []string{"good"}, ZenBase: srv.URL})
+	p := New(Options{Name: "oc", ZenKeys: []string{"good"}, ZenBase: srv.URL, MetaURL: emptyMeta(t)})
 	models, err := p.ListModels(context.Background())
 	if err != nil {
 		t.Fatal(err)

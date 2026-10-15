@@ -136,4 +136,12 @@ func TestAppJSProvFormUnifiedTheme(t *testing.T) {
 	if !strings.Contains(css, ".grid2 > label.fld:last-child") {
 		t.Error("theme.css 未处理 .grid2 末位字段的下边距")
 	}
+	// textarea 必须在全局控件基样式里（input, select, textarea）拿到 width:100%。
+	// 这是「供应商弹窗丑」的真正根因：宽度原本只由 .og-fields/.fields 两套局部
+	// 规则补，provFormHtml 从 .og-fields 换成 label.fld 后，多行框掉进空档、
+	// 塌成约 151px（实测一行都显示不全）。只断言「全局选择器里含 textarea」，
+	// 不断言具体写法，避免过度绑定。
+	if !strings.Contains(css, "input, select, textarea {") {
+		t.Error("theme.css 全局控件基样式漏了 textarea（多行框会塌成窄条，供应商弹窗尤其明显）")
+	}
 }

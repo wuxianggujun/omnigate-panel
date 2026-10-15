@@ -182,11 +182,15 @@ button.xs { padding: 3.5px 9px; font-size: 12.5px; border-radius: 6px; white-spa
    header 里若不收窄会把同行 note 挤到换行——收成内容宽并压小外观，与 button.xs 同款。 */
 select.xs { width: auto; padding: 3.5px 9px; font-size: 12.5px; border-radius: 6px; }
 button.icon { padding: 7px 9px; }
-input, select {
+/* 全局控件基样式。textarea 必须一并列出：早先只有 input,select，宽度靠
+   .og-fields/.fields 那两套局部规则补；供应商弹窗改成 label.fld 之后掉进这个
+   空档，多行框塌成约 151px（一行都显示不下）——「丑」的根因。 */
+input, select, textarea {
   font: inherit; color: var(--ink); background: var(--surface-2);
   border: 1px solid var(--line); border-radius: 7px; padding: 7px 11px; width: 100%;
 }
-input:focus, select:focus { outline: none; border-color: var(--accent); }
+input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); }
+textarea { font-family: var(--mono); resize: vertical; line-height: 1.5; }
 input.invalid { border-color: var(--bad); background: var(--bad-soft); }
 input.invalid:focus { border-color: var(--bad); }
 input[type=checkbox] { width: auto; accent-color: var(--accent); }

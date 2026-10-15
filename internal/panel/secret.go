@@ -47,6 +47,18 @@ func urlKey(k string) bool {
 	return false
 }
 
+// secretListKey 字段名是否为「裸串凭证列表」——供应商的上游密钥池。
+// 元素是裸串而不是对象，所以 secretKey（只认单数 api_key）盖不住它们。
+// api_keys 是通用池；zen_keys / go_keys 是 opencode 供应商两个 tier 各自的池，
+// 漏一个就等于把该池的密钥明文回显给只读访问者。
+func secretListKey(k string) bool {
+	switch strings.ToLower(strings.TrimSpace(k)) {
+	case "api_keys", "zen_keys", "go_keys":
+		return true
+	}
+	return false
+}
+
 // isMasked 值是否已是掩码形态。
 func isMasked(s string) bool { return strings.Contains(s, maskMarker) }
 
@@ -184,10 +196,10 @@ func maskWalk(v any, skipTop map[string]bool, top bool) any {
 					continue
 				}
 			}
-			// 供应商级「上游密钥池」：字段名 api_keys 的元素是裸串，secretKey
-			// 只认单数 api_key，需显式遮盖。顶层的同名键是**网关自己的**密钥
-			//（刻意不脱敏），所以只在非顶层生效。
-			if !top && strings.EqualFold(strings.TrimSpace(k), "api_keys") {
+			// 供应商级「上游密钥池」：字段名 api_keys / zen_keys / go_keys 的元素
+			// 是裸串，secretKey 只认单数 api_key，需显式遮盖。顶层的同名键是
+			// **网关自己的**密钥（刻意不脱敏），所以只在非顶层生效。
+			if !top && secretListKey(k) {
 				if arr, ok := val.([]any); ok {
 					out[k] = maskStringList(arr)
 					continue

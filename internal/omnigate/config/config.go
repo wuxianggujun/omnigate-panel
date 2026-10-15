@@ -276,6 +276,20 @@ type ProviderConfig struct {
 	// 401/403/429 就冷却并自动切下一个（只对 api_key 型上游 openai 生效）。
 	// 留空 = 沿用单个 api_key，旧写法完全不变（加法式字段，omitempty）。
 	APIKeys []string `json:"api_keys,omitempty"`
+	// ZenKeys / GoKeys 是 opencode 供应商专属的两个上游密钥池：OpenCode Zen 按量
+	// 付费、OpenCode Go 订阅套餐。两个 tier 的模型集不同（zen 86 个、go 37 个）、
+	// 密钥也不通用，所以分开存；各自池内同样按请求轮询、失败冷却。
+	// 两个都为空 = 这个供应商没有可用凭证，面板按空壳隐藏、签到守卫会挂起它。
+	ZenKeys []string `json:"zen_keys,omitempty"`
+	GoKeys  []string `json:"go_keys,omitempty"`
+	// TierPrefer 决定 opencode 先走哪个 tier（"zen" 或 "go"）。留空 = "go"：
+	// 订阅套餐先跑，用不完再落到按量付费，与上游文档的推荐一致。
+	TierPrefer string `json:"tier_prefer,omitempty"`
+	// GoBaseURL 覆盖 opencode 的 Go 套餐上游地址（base_url 同理覆盖 zen）。
+	// 留空 = https://opencode.ai/zen/go。留这两个口子是因为上游文档给 Go 的地址
+	// 写作 /inference/go/v1/...，而实测 /zen/go 同样可达，将来若只有一个可用，
+	// 改配置即可，不用改代码。
+	GoBaseURL string `json:"go_base_url,omitempty"`
 	// SystemPrompt 是「供应商级系统提示词」：非空时注入发给该上游的每个请求。
 	// 消息型上游（openai/newapi/raccoon/trae）在 messages 头部插一条 system；
 	// 单条 prompt 型上游（runable/geminiweb）拼到 prompt 开头。留空 = 不注入。
@@ -612,23 +626,42 @@ func (c *Config) applyDefaults() {
 			// 没有通用缺省，留空由 provider 自身报错。
 		case "geminiweb":
 			// 无 BaseURL：客户端固定打 gemini.google.com；账号凭证是 Google Cookie。
+		case "opencode":
+			// 两个 tier 的地址由 provider 包提供缺省值（DefaultZenBase /
+			// DefaultGoBase），这里只在用户显式写了 base_url 时把它当作 zen 的
+			// 覆盖（Go 另用 go_base_url）。不填就走缺省，与上游实测一致。
 		}
 		// 上游密钥池：去掉空白项与重复项（前端整份回传容易带出空行），全空 = 没配。
-		if len(p.APIKeys) > 0 {
-			keys := make([]string, 0, len(p.APIKeys))
-			seenKey := map[string]bool{}
-			for _, k := range p.APIKeys {
-				k = strings.TrimSpace(k)
-				if k == "" || seenKey[k] {
-					continue
-				}
-				seenKey[k] = true
-				keys = append(keys, k)
-			}
-			p.APIKeys = keys
-		}
+		// opencode 的两个池（zen/go）走同一套清理规则。
+		p.APIKeys = normalizeKeys(p.APIKeys)
+		p.ZenKeys = normalizeKeys(p.ZenKeys)
+		p.GoKeys = normalizeKeys(p.GoKeys)
+		p.TierPrefer = strings.ToLower(strings.TrimSpace(p.TierPrefer))
+		p.GoBaseURL = strings.TrimRight(strings.TrimSpace(p.GoBaseURL), "/")
 		p.SystemPrompt = strings.TrimSpace(p.SystemPrompt)
 	}
+}
+
+// normalizeKeys 去掉空白项与重复项；全空返回 nil（而不是空切片），好让
+// omitempty 与「有没有配密钥」的判断保持一致。
+func normalizeKeys(keys []string) []string {
+	if len(keys) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(keys))
+	seen := map[string]bool{}
+	for _, k := range keys {
+		k = strings.TrimSpace(k)
+		if k == "" || seen[k] {
+			continue
+		}
+		seen[k] = true
+		out = append(out, k)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func (c *Config) validate() error {
@@ -645,9 +678,27 @@ func (c *Config) validate() error {
 		}
 		seen[p.Name] = true
 		switch p.Type {
-		case "runable", "openai", "raccoon", "trae", "newapi", "geminiweb":
+		case "runable", "openai", "raccoon", "trae", "newapi", "geminiweb", "opencode":
 		default:
 			return fmt.Errorf("provider %q: unknown type %q", p.Name, p.Type)
+		}
+		// tier_prefer 写错只会静默退回默认顺序（go 优先），在面板上很难察觉，
+		// 所以与其它枚举字段同口径：加载/保存时就拒绝。
+		if p.TierPrefer != "" && p.TierPrefer != "go" && p.TierPrefer != "zen" {
+			return fmt.Errorf("provider %q: tier_prefer 只能是 \"go\" 或 \"zen\"，得到 %q", p.Name, p.TierPrefer)
+		}
+		// opencode 的密钥池必须两边分开填：go 订阅 key 打 zen 接口只会拿到
+		// Invalid credential，而两边的问题串一模一样，事后很难查。顺手把
+		// 「同一把 key 同时出现在两个池里」也拦下来——一定有一个池填错了。
+		if p.Type == "opencode" {
+			for _, k := range p.ZenKeys {
+				for _, g := range p.GoKeys {
+					if k == g {
+						return fmt.Errorf("provider %q: 同一把密钥同时出现在 zen_keys 与 go_keys（key %s）；"+
+							"两个 tier 的密钥不通用，请分开填", p.Name, maskKey(k))
+					}
+				}
+			}
 		}
 	}
 	// 密钥的供应商白名单必须指向真实存在的 provider：写错名字等于这把钥匙什么都用不了，
@@ -717,6 +768,15 @@ func taskLabel(t CheckinTask) string {
 		return t.Type + ":" + t.Provider
 	}
 	return "未命名"
+}
+
+// maskKey 给密钥一个「能认出是哪一把、但抄不走」的提示，只用于报错文案。
+// 与面板的 maskSecret 同口径：露前 6 位，其余隐去。绝不回显完整密钥。
+func maskKey(k string) string {
+	if len(k) <= 6 {
+		return "***"
+	}
+	return k[:6] + "…"
 }
 
 // Normalize 套用默认值并校验（导出供面板热重载复用；Load 内部即走这条路径）。

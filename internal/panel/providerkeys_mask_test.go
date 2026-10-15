@@ -45,3 +45,48 @@ func TestMaskProviderKeyPool(t *testing.T) {
 		t.Fatalf("密钥池还原不一致：%v", bpool)
 	}
 }
+
+// TestMaskOpencodeTierPools opencode 供应商的 zen_keys / go_keys 也必须逐个脱敏。
+//
+// 这两个池名不在 secretKey 的单数白名单里（它只认 api_key），元素又是裸串而不是对象，
+// 所以非常容易漏——漏掉就等于把 OpenCode 的付费密钥明文回显给只读访问者。
+func TestMaskOpencodeTierPools(t *testing.T) {
+	cfg := map[string]any{
+		"providers": []any{
+			map[string]any{
+				"name":     "opencode",
+				"type":     "opencode",
+				"zen_keys": []any{"zen-key-aaa-1234567890", ""},
+				"go_keys":  []any{"go-key-bbb-1234567890", "go-key-ccc-1234567890"},
+			},
+		},
+	}
+
+	out := maskSecrets(cfg).(map[string]any)
+	prov := out["providers"].([]any)[0].(map[string]any)
+
+	for _, f := range []string{"zen_keys", "go_keys"} {
+		arr := prov[f].([]any)
+		for i, e := range arr {
+			s, _ := e.(string)
+			if s == "" {
+				continue
+			}
+			if !isMasked(s) {
+				t.Fatalf("%s[%d] 未脱敏：%v", f, i, e)
+			}
+			if s == "zen-key-aaa-1234567890" || s == "go-key-bbb-1234567890" || s == "go-key-ccc-1234567890" {
+				t.Fatalf("%s[%d] 仍是明文：%v", f, i, e)
+			}
+		}
+	}
+
+	// 保存路径：两个池都要按位还原（否则面板保存一次就把密钥写成掩码串）。
+	back := restoreSecrets(out, cfg).(map[string]any)["providers"].([]any)[0].(map[string]any)
+	if z := back["zen_keys"].([]any); z[0] != "zen-key-aaa-1234567890" {
+		t.Fatalf("zen_keys 还原失败：%v", z)
+	}
+	if g := back["go_keys"].([]any); g[0] != "go-key-bbb-1234567890" || g[1] != "go-key-ccc-1234567890" {
+		t.Fatalf("go_keys 还原失败：%v", g)
+	}
+}

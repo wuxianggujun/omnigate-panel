@@ -25,6 +25,7 @@ import (
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/provider/geminiweb"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/provider/geminiweb/fingerprint"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/provider/newapi"
+	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/provider/opencode"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/provider/openaibackend"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/provider/raccoon"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/provider/runable"
@@ -280,6 +281,19 @@ func New(cfg *config.Config, st *state.State, log *logx.Logger, opts ...Option) 
 			prov = runable.NewProvider(p.Name, p.BaseURL, p.DeviceHeader)
 		case "openai":
 			prov = openaibackend.New(p.Name, p.BaseURL, p.APIKey, p.Models)
+		case "opencode":
+			// OpenCode Zen / Go：两个 tier 各一个密钥池，分开轮换。密钥只能走
+			// 构造函数（本 provider 刻意不实现 SetAPIKeys，避免下面那条通用
+			// 注入路径用空切片把 zen 池清掉）。见 provider/opencode 包注释。
+			prov = opencode.New(opencode.Options{
+				Name:    p.Name,
+				ZenKeys: p.ZenKeys,
+				GoKeys:  p.GoKeys,
+				Prefer:  p.TierPrefer,
+				ZenBase: p.BaseURL,
+				GoBase:  p.GoBaseURL,
+				Models:  p.Models,
+			})
 		case "raccoon":
 			prov = raccoon.NewProvider(p.Name, p.MainOrigin, p.LLMBase, p.AuthBase)
 		case "trae":
@@ -1072,9 +1086,10 @@ func (g *Gateway) HandleChat(ctx context.Context, req *openai.ChatRequest, w htt
 
 // supportsEffort reports whether a provider forwards reasoning_effort upstream.
 // raccoon and OpenAI-compatible upstreams accept the OpenAI thinking tier;
-// runable's bespoke protocol has no equivalent.
+// runable's bespoke protocol has no equivalent. opencode 也是 OpenAI 兼容上游，
+// 且它自己的模型元数据带 reasoning_efforts 档位，所以同样转发。
 func supportsEffort(provType string) bool {
-	return provType == "raccoon" || provType == "openai"
+	return provType == "raccoon" || provType == "openai" || provType == "opencode"
 }
 
 // defaultPromptLimit 是各供应商类型「单条 prompt 字符数」的默认上限（上游硬限制）。
@@ -1536,7 +1551,10 @@ func (g *Gateway) openStream(ctx context.Context, provName string, prov provider
 
 	// Stateless upstreams (api-key based) need no account pool.
 	if len(accts) == 0 {
-		if prov.Type() == "openai" {
+		// opencode 与 openai 同属「密钥型」上游：凭证在供应商自己的密钥池里
+		// （opencode 是 zen_keys / go_keys 两套），账号池天然为空。漏掉这个分支
+		// 会让它在运行时直接报「no accounts configured」——配置界面上却完全正常。
+		if prov.Type() == "openai" || prov.Type() == "opencode" {
 			if m := ReqMetaFrom(ctx); m != nil {
 				m.Account = "api-key"
 			}

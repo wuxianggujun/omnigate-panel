@@ -5315,7 +5315,7 @@ function omniModelsText(p) { return Array.isArray(p.models) ? p.models.join('\n'
  * 字段。弹窗里的改动先写进克隆体（draft），点「确定」才回写 omniCfg.providers——
  * 避免边打字边重渲染把光标顶掉。写盘仍走列表下方的「保存并生效」（整份配置一起提交）。
  */
-const PROV_TYPES = ['runable', 'raccoon', 'trae', 'newapi', 'geminiweb', 'openai'];
+const PROV_TYPES = ['runable', 'raccoon', 'trae', 'newapi', 'geminiweb', 'openai', 'opencode'];
 let provEdit = null; // {i, isNew, draft}
 /* provShowIdle 供应商列表是否连「没账号 / 没密钥」的空壳一起列出。
    默认 false —— 用户原话「都没有添加账号的供应商为什么要显示」。折叠时列表只留
@@ -5323,13 +5323,30 @@ let provEdit = null; // {i, isNew, draft}
 let provShowIdle = false;
 try { provShowIdle = localStorage.getItem('wb2api.provShowIdle') === '1'; } catch (e) { /* 隐私模式 */ }
 
-function provTypeHasKey(type) { return type === 'openai' || type === 'newapi'; }
+function provTypeHasKey(type) { return type === 'openai' || type === 'newapi' || type === 'opencode'; }
 function provTypeHasAccounts(type) { return type === 'raccoon' || type === 'runable' || type === 'trae' || type === 'geminiweb'; }
+
+/* provKeyCount 这家供应商手上有几把可用上游密钥。
+   opencode 是两个独立密钥池（zen 按量 / go 订阅，密钥互不通用），且**不认**通用
+   api_key——表单刻意不给它那个输入框。所以这里按类型取字段：把 api_key 也算进去
+   会让「只填了 api_key 的 opencode」看起来可用，实际每次请求都报无密钥。
+   徽标与空壳判定都读它，两处口径永远一致——否则会出现「徽章说正常、列表却把它藏了」。 */
+function provKeyCount(p) {
+  if (!p) return 0;
+  const isOpencode = (p.type || '') === 'opencode';
+  const fields = isOpencode ? ['zen_keys', 'go_keys'] : ['api_keys'];
+  let n = (!isOpencode && (p.api_key || '').trim()) ? 1 : 0;
+  fields.forEach(f => {
+    const arr = Array.isArray(p[f]) ? p[f] : [];
+    n += arr.filter(k => (k || '').trim()).length;
+  });
+  return n;
+}
 
 function provBadgeHtml(p) {
   const type = p.type || 'runable';
-  const hasKey = !!(p.api_key || '').trim() || (Array.isArray(p.api_keys) && p.api_keys.some(k => (k || '').trim()));
-  if (provTypeHasKey(type) && !hasKey) return '<span class="tag bad">缺 api_key</span>';
+  const hasKey = provKeyCount(p) > 0;
+  if (provTypeHasKey(type) && !hasKey) return '<span class="tag bad">' + (type === 'opencode' ? '缺密钥' : '缺 api_key') + '</span>';
   if (provTypeHasAccounts(type) && !(p.accounts || []).length) return '<span class="tag warn">无账号</span>';
   return '<span class="tag ok">正常</span>';
 }
@@ -5341,7 +5358,7 @@ function provBadgeHtml(p) {
 function provIsIdle(p) {
   if (!p) return true;
   const type = p.type || 'runable';
-  const hasKey = !!(p.api_key || '').trim() || (Array.isArray(p.api_keys) && p.api_keys.some(k => (k || '').trim()));
+  const hasKey = provKeyCount(p) > 0;
   if (provTypeHasKey(type) && !hasKey) return true;
   if (provTypeHasAccounts(type) && !(p.accounts || []).length) return true;
   return false;
@@ -5399,8 +5416,14 @@ function provFormHtml(d) {
     '<input data-pf="name" value="' + esc(d.name || '') + '" placeholder="如 my-openai"></label>');
   out.push('<label class="fld"><span class="lb">类型</span>' +
     '<select data-pf="type">' + typeOpts + '</select>' +
-    '<span class="hint">账号型：raccoon / runable / trae / geminiweb；密钥型：openai / newapi</span></label>');
+    '<span class="hint">账号型：raccoon / runable / trae / geminiweb；密钥型：openai / newapi / opencode</span></label>');
   out.push('</div>');
+
+  if (type === 'opencode') {
+    out.push('<div class="hint" style="margin:0 0 14px">OpenCode Zen / Go：两个 tier 各一个密钥池。' +
+      'Go 是订阅套餐（10/40 美元档），zen 是按量付费；<b>免费模型</b>（<code>cat-jam-free</code> / <code>longcat-2.5-preview-free</code> / <code>step-5-preview-free</code>）在 Go 套餐里就是不限量，用你自己的 go key 正常调用，不需要别的通道。' +
+      '本供应商按上游文档要求如实申报自己的 User-Agent，并发送每会话稳定的 <code>x-opencode-session</code>。</div>');
+  }
 
   if (type === 'geminiweb') {
     out.push('<div class="hint" style="margin:0 0 14px">Gemini Web 不需要 base_url / api_key：账号凭证是 <code>gemini.google.com</code> 的 Google Cookie。保存本供应商后，去「账号池 → 添加账号 → 选它 → 粘贴 Cookie」。models 留空 = 用内置的 <code>gemini-pro / gemini-flash / gemini-flash-thinking / gemini-flash-lite</code>。</div>');
@@ -5430,14 +5453,38 @@ function provFormHtml(d) {
     out.push('</div>');
   }
 
-  // 长字段各占整行
-  out.push('<label class="fld wide"><span class="lb">base_url</span>' +
-    '<input data-pf="base_url" value="' + esc(d.base_url || '') + '" placeholder="https://api.example.com/v1"></label>');
-  out.push('<label class="fld wide"><span class="lb">api_key</span>' +
-    '<input data-pf="api_key" value="' + esc(d.api_key || '') + '" placeholder="上游密钥（openai 类用）；已脱敏，不改 = 保持原值"></label>');
-  out.push('<label class="fld wide"><span class="lb">api_keys</span>' +
-    '<span class="hint" style="margin:0 0 5px">上游密钥池：一行一个；多把按请求轮询，401/403/429 自动冷却换下一把</span>' +
-    '<textarea data-pf="api_keys" rows="3" spellcheck="false" placeholder="留空 = 用上面的 api_key；一行一个上游密钥">' + esc((Array.isArray(d.api_keys) ? d.api_keys : []).join('\n')) + '</textarea></label>');
+  // 长字段各占整行。
+  // opencode 的密钥刻意不走通用 api_key/api_keys：它有两个 tier（zen 按量 / go 订阅），
+  // 密钥互不通用，必须分开填。若在这里也渲染通用字段，用户会把 zen key 填进 api_key，
+  // 保存成功、请求却始终 401——「界面允许你配一个不生效的东西」是最难查的坑。
+  const isOpencode = type === 'opencode';
+  out.push('<label class="fld wide"><span class="lb">' + (isOpencode ? 'base_url（zen 上游地址）' : 'base_url') + '</span>' +
+    '<input data-pf="base_url" value="' + esc(d.base_url || '') + '" placeholder="' +
+    (isOpencode ? '留空 = https://opencode.ai/zen' : 'https://api.example.com/v1') + '"></label>');
+  if (isOpencode) {
+    out.push('<div class="grid2">');
+    out.push('<label class="fld"><span class="lb">go_base_url</span>' +
+      '<input data-pf="go_base_url" value="' + esc(d.go_base_url || '') + '" placeholder="留空 = .../zen/go"></label>');
+    out.push('<label class="fld"><span class="lb">tier_prefer</span>' +
+      '<select data-pf="tier_prefer">' +
+      '<option value=""' + (d.tier_prefer ? '' : ' selected') + '>go（默认：订阅优先）</option>' +
+      '<option value="go"' + (d.tier_prefer === 'go' ? ' selected' : '') + '>go</option>' +
+      '<option value="zen"' + (d.tier_prefer === 'zen' ? ' selected' : '') + '>zen</option>' +
+      '</select></label>');
+    out.push('</div>');
+    out.push('<label class="fld wide"><span class="lb">zen_keys</span>' +
+      '<span class="hint" style="margin:0 0 5px">OpenCode Zen（按量付费）密钥池：一行一个；多把按请求轮询，401/403/429 自动冷却换下一把</span>' +
+      '<textarea data-pf="zen_keys" rows="3" spellcheck="false" placeholder="sk-...；留空 = 不启用 zen tier；已脱敏，不改 = 保持原值">' + esc((Array.isArray(d.zen_keys) ? d.zen_keys : []).join('\n')) + '</textarea></label>');
+    out.push('<label class="fld wide"><span class="lb">go_keys</span>' +
+      '<span class="hint" style="margin:0 0 5px">OpenCode Go（订阅套餐）密钥池：一行一个；两个 tier 的密钥不通用，填错只会拿到 Invalid credential</span>' +
+      '<textarea data-pf="go_keys" rows="3" spellcheck="false" placeholder="sk-...；留空 = 不启用 go tier；已脱敏，不改 = 保持原值">' + esc((Array.isArray(d.go_keys) ? d.go_keys : []).join('\n')) + '</textarea></label>');
+  } else {
+    out.push('<label class="fld wide"><span class="lb">api_key</span>' +
+      '<input data-pf="api_key" value="' + esc(d.api_key || '') + '" placeholder="上游密钥（openai 类用）；已脱敏，不改 = 保持原值"></label>');
+    out.push('<label class="fld wide"><span class="lb">api_keys</span>' +
+      '<span class="hint" style="margin:0 0 5px">上游密钥池：一行一个；多把按请求轮询，401/403/429 自动冷却换下一把</span>' +
+      '<textarea data-pf="api_keys" rows="3" spellcheck="false" placeholder="留空 = 用上面的 api_key；一行一个上游密钥">' + esc((Array.isArray(d.api_keys) ? d.api_keys : []).join('\n')) + '</textarea></label>');
+  }
   out.push('<label class="fld wide"><span class="lb">models</span>' +
     '<span class="hint" style="margin:0 0 5px">逗号或换行分隔，留空 = 自动发现</span>' +
     '<textarea data-pf="models" rows="2" spellcheck="false">' + esc(omniModelsText(d)) + '</textarea></label>');
@@ -5473,9 +5520,9 @@ function onProvFormInput(ev) {
   const f = el.dataset && el.dataset.pf;
   if (!f) return;
   if (f === 'type') { provEdit.draft.type = el.value; $('provForm').innerHTML = provFormHtml(provEdit.draft); return; }
-  if (f === 'api_keys') {
+  if (f === 'api_keys' || f === 'zen_keys' || f === 'go_keys') {
     // 一行一个；空行丢弃。掩码行（未改动的旧 key）原样留下，服务端按「掩码 = 未改动」还原。
-    provEdit.draft.api_keys = el.value.split('\n').map(s => s.trim()).filter(Boolean);
+    provEdit.draft[f] = el.value.split('\n').map(s => s.trim()).filter(Boolean);
     return;
   }
   provEdit.draft[f] = el.value;

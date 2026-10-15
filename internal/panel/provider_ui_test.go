@@ -117,6 +117,8 @@ func TestAppJSProvFormUnifiedTheme(t *testing.T) {
 		"name", "type", "base_url", "api_key", "api_keys", "models", "system_prompt",
 		"main_origin", "llm_base", "auth_base", "agent_host", "ug_host", "oauth_host",
 		"device_header",
+		// opencode 专属：两个 tier 的密钥池分开填，外加 tier 顺序与 go 上游覆盖。
+		"zen_keys", "go_keys", "tier_prefer", "go_base_url",
 	}
 	for _, f := range want {
 		if !strings.Contains(js, `data-pf="`+f+`"`) {

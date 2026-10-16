@@ -595,6 +595,9 @@ func main() {
 			defer cancel()
 			return omni.OpencodeQuota(ctx, provider)
 		}
+		// 上游密钥池健康状态（自动禁用 / 连击 / 自动清理倒计时）：面板直接读
+		// 进程内运行时，掩码形态，无明文。
+		pcfg.OmniKeyHealth = omni.KeyHealthReport
 		// runable 登录校验（服务端会话探测 + 取积分）：runable 只支持 Google/Facebook
 		// 登录、会话是 httpOnly Cookie（网页读不到），面板无法自动抓取，只能由用户粘贴。
 		pcfg.OmniLogin = omni.LoginRunable

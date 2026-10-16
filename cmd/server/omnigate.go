@@ -19,6 +19,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -27,6 +28,7 @@ import (
 	omniconfig "github.com/wuxianggujun/omnigate-panel/internal/omnigate/config"
 	omnigateway "github.com/wuxianggujun/omnigate-panel/internal/omnigate/gateway"
 	omnilogx "github.com/wuxianggujun/omnigate-panel/internal/omnigate/logx"
+	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/provider/openaibackend"
 	omnisched "github.com/wuxianggujun/omnigate-panel/internal/omnigate/scheduler"
 	omnisrv "github.com/wuxianggujun/omnigate-panel/internal/omnigate/server"
 	omnistate "github.com/wuxianggujun/omnigate-panel/internal/omnigate/state"
@@ -53,6 +55,9 @@ type omniManager struct {
 	mu  sync.Mutex // 串行化重载
 	st  *omnistate.State
 	cur atomic.Pointer[omniRuntime]
+
+	// autoStop 关闭后台上游密钥自动清理循环（Stop 时 close 一次）。
+	autoStop chan struct{}
 
 	// outbound 面板出站代理路由（config.json 的 outbound 段）。用于把
 	// "omnigate:<provider>" 解析成代理 URL，在 build 时注入各供应商。
@@ -130,6 +135,7 @@ func newOmniManager(cfg *Config, requestLog *reqlog.Recorder, usageRec *usage.Re
 	log.Printf("[omnigate] 已启用：默认 provider=%s，provider 数=%d，数据目录=%s，挂载于 /omni/",
 		ocfg.DefaultProvider, len(ocfg.Providers), ocfg.DataDir)
 	m.logProviders(rt)
+	m.startAutoCleanup()
 	return m
 }
 
@@ -154,6 +160,10 @@ func (m *omniManager) build(cfg *omniconfig.Config) (*omniRuntime, error) {
 		omnigateway.WithModelCacheBackend(m.pg, "omnigate_model_cache"),
 		// 全局模型映射表（glm-5.2 → atria/... 等）同样落库。
 		omnigateway.WithModelMappingBackend(m.pg, "omnigate_model_mapping"),
+		// 上游密钥健康状态（自动禁用 / 连击记账）：落库后热重载与容器重启都不会
+		// 让死 key 复活（omnigate_key_health；文件 key-health.json 兜底）。
+		omnigateway.WithKeyHealthPath(filepath.Join(cfg.DataDir, "key-health.json")),
+		omnigateway.WithKeyHealthBackend(m.pg, "omnigate_key_health"),
 	)
 	if err != nil {
 		return nil, err
@@ -320,10 +330,14 @@ func (m *omniManager) Handler() http.Handler {
 	})
 }
 
-// Stop 停掉当前调度器并落盘状态（进程退出时调用）。
+// Stop 停掉当前调度器与后台清理循环，并落盘状态（进程退出时调用）。
 func (m *omniManager) Stop() {
 	if !m.enabled {
 		return
+	}
+	if m.autoStop != nil {
+		close(m.autoStop)
+		m.autoStop = nil
 	}
 	if rt := m.cur.Load(); rt != nil {
 		rt.sched.Stop()
@@ -346,6 +360,12 @@ func (m *omniManager) Load() (any, error) {
 func (m *omniManager) Save(raw []byte) ([]string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.saveLocked(raw)
+}
+
+// saveLocked 是 Save 的加锁内实现（调用方必须持 m.mu）。后台自动清理同样走
+// 这条路径，保证「校验 → 落盘 → 热重载」全项目只有一条写入路径。
+func (m *omniManager) saveLocked(raw []byte) ([]string, error) {
 	if m.st == nil {
 		return nil, errors.New("omnigate 未启用")
 	}
@@ -380,6 +400,201 @@ func (m *omniManager) Save(raw []byte) ([]string, error) {
 	log.Printf("[omnigate] 供应商配置已热重载：provider 数=%d，默认 provider=%s", len(cfg.Providers), cfg.DefaultProvider)
 	m.logProviders(rt)
 	return nil, nil
+}
+
+// ---------------------------------------------------------------------------
+// 上游密钥池健康：自动清理（额度耗尽的死 key）
+// ---------------------------------------------------------------------------
+
+const (
+	// keyAutoCleanupStrikes / keyAutoCleanupAfter 自动清理阈值：连续额度错误
+	// 达到该次数（任一次成功即清零），且首见时间超出窗口，才摘除。长禁用 24h
+	// 一次试炼——3 次 ≈ 连败三天、首见满七天，稳到不需要人工盯。
+	keyAutoCleanupStrikes = 3
+	keyAutoCleanupAfter   = 7 * 24 * time.Hour
+)
+
+// startAutoCleanup 启动后台上游密钥自动清理循环（进程生命周期）：首次延后
+// 30 分钟错开启动高峰，之后每小时检查一次。无候选时零开销。
+func (m *omniManager) startAutoCleanup() {
+	m.autoStop = make(chan struct{})
+	go func() {
+		select {
+		case <-time.After(30 * time.Minute):
+		case <-m.autoStop:
+			return
+		}
+		t := time.NewTicker(time.Hour)
+		defer t.Stop()
+		for {
+			m.cleanupOnce()
+			select {
+			case <-t.C:
+			case <-m.autoStop:
+				return
+			}
+		}
+	}()
+}
+
+func (m *omniManager) cleanupOnce() {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("WARN: [omnigate] 自动清理 panic: %v", r)
+		}
+	}()
+	removed, err := m.CleanupDeadKeys(time.Now())
+	if err != nil {
+		log.Printf("WARN: [omnigate] 自动清理失败: %v", err)
+		return
+	}
+	for _, line := range removed {
+		log.Printf("[omnigate] 自动清理额度耗尽密钥：%s（已备份为 %s.bak-auto-cleanup-*）", line, m.path)
+	}
+}
+
+// CleanupDeadKeys 自动清理「长期额度耗尽」的池内密钥：连续额度错误达到阈值
+// （keyAutoCleanupStrikes）且首见超出窗口（keyAutoCleanupAfter）的 key 从
+// omnigate.json 摘除并热重载（死 key 立即退出轮换）。摘除前整文件备份；池内若
+// 只剩这类 key 则跳过——摘完这家就没密钥可用了，留给人工。返回被摘除描述行。
+func (m *omniManager) CleanupDeadKeys(now time.Time) ([]string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.st == nil {
+		return nil, nil
+	}
+	rt := m.cur.Load()
+	if rt == nil {
+		return nil, nil
+	}
+	snap := rt.gw.KeyHealthSnapshot()
+	if len(snap) == 0 {
+		return nil, nil
+	}
+	raw0, err := os.ReadFile(m.path)
+	if err != nil {
+		return nil, err
+	}
+	var fileCfg omniconfig.Config
+	if err := json.Unmarshal(raw0, &fileCfg); err != nil {
+		return nil, fmt.Errorf("解析 %s 失败: %w", m.path, err)
+	}
+	var removed []string
+	changed := false
+	for i := range fileCfg.Providers {
+		p := &fileCfg.Providers[i]
+		if len(p.APIKeys) < 2 {
+			continue // 单项池没有轮换取舍；摘掉等于废掉这家
+		}
+		st := snap[p.Name]
+		if len(st) == 0 {
+			continue
+		}
+		keep := make([]string, 0, len(p.APIKeys))
+		var hits []string
+		for _, k := range p.APIKeys {
+			h, ok := st[openaibackend.KeyID(strings.TrimSpace(k))]
+			if ok && h.Strikes >= keyAutoCleanupStrikes && h.FirstSeen > 0 &&
+				now.Sub(time.Unix(h.FirstSeen, 0)) >= keyAutoCleanupAfter {
+				hits = append(hits, fmt.Sprintf("%s 的密钥 %s（连续 %d 次额度错误，首见 %s）",
+					p.Name, openaibackend.MaskKey(k), h.Strikes,
+					time.Unix(h.FirstSeen, 0).Format("2006-01-02")))
+				continue
+			}
+			keep = append(keep, k)
+		}
+		if len(hits) == 0 {
+			continue
+		}
+		if len(keep) == 0 {
+			log.Printf("[omnigate] 自动清理跳过 provider %s：池内密钥全部达到清理阈值，保留到人工处理", p.Name)
+			continue
+		}
+		p.APIKeys = keep
+		removed = append(removed, hits...)
+		changed = true
+	}
+	if !changed {
+		return nil, nil
+	}
+	// 备份原文件（整文件、含所有密钥字段）——出问题用 .bak-auto-cleanup-* 回滚。
+	bak := fmt.Sprintf("%s.bak-auto-cleanup-%s", m.path, now.Format("20060102-150405"))
+	if err := os.WriteFile(bak, raw0, 0o600); err != nil {
+		return nil, fmt.Errorf("备份 %s 失败，取消本次清理: %w", bak, err)
+	}
+	pretty, err := json.MarshalIndent(&fileCfg, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	if _, err := m.saveLocked(pretty); err != nil {
+		return nil, err
+	}
+	return removed, nil
+}
+
+// KeyHealthReport 面板「密钥健康」视图数据：逐 provider 给出池内每把密钥的
+// 掩码与状态（谁被自动禁用了、连败几次、预计何时会被自动清理）。不落明文。
+func (m *omniManager) KeyHealthReport() (any, error) {
+	// 与 Save / 自动清理共用同一把锁：配置文件的写是「整文件覆盖」，读侧不串行
+	// 就可能读到写了一半的 JSON。
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	rt := m.cur.Load()
+	if rt == nil {
+		return nil, errors.New("omnigate 未启用")
+	}
+	snap := rt.gw.KeyHealthSnapshot()
+	raw0, err := os.ReadFile(m.path)
+	if err != nil {
+		return nil, err
+	}
+	var fileCfg omniconfig.Config
+	if err := json.Unmarshal(raw0, &fileCfg); err != nil {
+		return nil, fmt.Errorf("解析 %s 失败: %w", m.path, err)
+	}
+	type keyRow struct {
+		Key       string `json:"key"` // 掩码形态
+		Disabled  bool   `json:"disabled,omitempty"`
+		Reason    string `json:"reason,omitempty"`
+		Strikes   int    `json:"strikes,omitempty"`
+		Until     int64  `json:"until,omitempty"`
+		FirstSeen int64  `json:"first_seen,omitempty"`
+		CleanupAt int64  `json:"cleanup_at,omitempty"` // 预计自动清理时间（连败达阈值后）
+		LastError string `json:"last_error,omitempty"`
+	}
+	type provRow struct {
+		Name string   `json:"name"`
+		Keys []keyRow `json:"keys"`
+	}
+	out := make([]provRow, 0, len(fileCfg.Providers))
+	for i := range fileCfg.Providers {
+		p := &fileCfg.Providers[i]
+		if len(p.APIKeys) == 0 {
+			continue
+		}
+		rows := make([]keyRow, 0, len(p.APIKeys))
+		for _, k := range p.APIKeys {
+			row := keyRow{Key: openaibackend.MaskKey(k)}
+			if h, ok := snap[p.Name][openaibackend.KeyID(strings.TrimSpace(k))]; ok {
+				row.Disabled = h.Disabled
+				row.Reason = h.Reason
+				row.Strikes = h.Strikes
+				row.Until = h.Until
+				row.FirstSeen = h.FirstSeen
+				row.LastError = h.LastError
+				if h.Strikes >= keyAutoCleanupStrikes && h.FirstSeen > 0 {
+					row.CleanupAt = time.Unix(h.FirstSeen, 0).Add(keyAutoCleanupAfter).Unix()
+				}
+			}
+			rows = append(rows, row)
+		}
+		out = append(out, provRow{Name: p.Name, Keys: rows})
+	}
+	return map[string]any{
+		"providers":       out,
+		"cleanup_strikes": keyAutoCleanupStrikes,
+		"cleanup_days":    int(keyAutoCleanupAfter / (24 * time.Hour)),
+	}, nil
 }
 
 // ExportAccountsRaw 导出运行时添加的账号（state.json 的 dyn_accounts 段），按

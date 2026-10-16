@@ -4713,9 +4713,21 @@ async function fetchOmniCfg() {
   return omniCfg;
 }
 
+/* fetchOmniKeyHealth 拉取上游密钥池健康状态（自动禁用 / 连击 / 自动清理倒计时）。
+   best-effort：OmniGate 未启用 / 旧服务端没有这个端点 / 网络失败都静默置空——
+   供应商列表照常渲染，只是没有健康角标。 */
+async function fetchOmniKeyHealth() {
+  try {
+    omniKeyHealth = await api('omni/key-health');
+  } catch (e) {
+    omniKeyHealth = null;
+  }
+}
+
 async function loadOmniConfig() {
   try {
     await fetchOmniCfg();
+    await fetchOmniKeyHealth();
     if ($('ogCfgPath')) $('ogCfgPath').textContent = omniCfgPath;
     if ($('cfgDefaultModel')) $('cfgDefaultModel').value = omniCfg.default_model || '';
     if ($('cfgMode')) $('cfgMode').value = omniCfg.mode || 'text';
@@ -5353,6 +5365,59 @@ function provKeyCount(p) {
   return n;
 }
 
+/* omniKeyHealth 上游密钥池健康状态（GET /panel/api/omni/key-health，随供应商
+   配置一起拉）：{ providers: [{name, keys: [{key(掩码), disabled, reason,
+   strikes, until, first_seen, cleanup_at, last_error}]}], cleanup_strikes,
+   cleanup_days }。null = 没拉到（OmniGate 未启用 / 老服务端）——一切照常渲染，
+   只是没有健康标记。 */
+let omniKeyHealth = null;
+
+/* provHealthKeys 某供应商的密钥健康行（无数据时空数组）。 */
+function provHealthKeys(name) {
+  const provs = (omniKeyHealth && omniKeyHealth.providers) || [];
+  for (const p of provs) {
+    if (p && p.name === name) return Array.isArray(p.keys) ? p.keys : [];
+  }
+  return [];
+}
+
+/* provHealthBadgeHtml 供应商行的密钥健康角标：有密钥被自动禁用（额度耗尽）
+   才出现；明细在编辑弹窗的「密钥健康」块里看（provHealthLinesHtml）。 */
+function provHealthBadgeHtml(p) {
+  const n = provHealthKeys(p.name || '').filter(k => k && k.disabled).length;
+  if (!n) return '';
+  const strikes = (omniKeyHealth && omniKeyHealth.cleanup_strikes) || 3;
+  const days = (omniKeyHealth && omniKeyHealth.cleanup_days) || 7;
+  return '<span class="tag bad" title="上游密钥因额度耗尽被自动禁用；连续失败满 ' + strikes +
+    ' 次且首见超过 ' + days + ' 天会自动从配置清理">' + n + ' 把禁用</span>';
+}
+
+/* healthTimeStr 健康状态的 unix 秒时间 → 本地短日期（yyyy-mm-dd）。 */
+function healthTimeStr(unix) {
+  if (!unix) return '';
+  const d = new Date(unix * 1000);
+  return isNaN(d.getTime()) ? '' : d.toLocaleDateString('zh-CN', {
+    timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).replace(/\//g, '-');
+}
+
+/* provHealthLinesHtml 编辑弹窗里「密钥健康」明细块（只有异常的行才显示）：
+   掩码 + 禁用 / 连败 / 自动重试 / 自动清理倒计时。正常密钥不占地方。 */
+function provHealthLinesHtml(name) {
+  const rows = provHealthKeys(name).filter(k => k && (k.disabled || k.strikes));
+  if (!rows.length) return '';
+  const lines = rows.map(k => {
+    const bits = [];
+    if (k.disabled) bits.push('已自动禁用（额度耗尽）');
+    else if (k.reason === 'quota') bits.push('额度错误');
+    if (k.strikes) bits.push('连续 ' + k.strikes + ' 次');
+    if (k.disabled && k.until) bits.push('最早 ' + healthTimeStr(k.until) + ' 自动重试');
+    if (k.cleanup_at) bits.push('预计 ' + healthTimeStr(k.cleanup_at) + ' 自动清理');
+    return '<div>' + esc(k.key || '') + ' · ' + esc(bits.join(' · ')) + '</div>';
+  }).join('');
+  return '<div class="hint" style="margin:0 0 10px">密钥健康：' + lines + '</div>';
+}
+
 function provBadgeHtml(p) {
   const type = p.type || 'runable';
   const hasKey = provKeyCount(p) > 0;
@@ -5413,7 +5478,7 @@ function provRowHtml(p, i) {
     : '';
   return '<tr data-i="' + i + '">' +
     '<td><div class="og-t">' + esc(p.name || '(未命名)') +
-      ' <span class="tag mute">' + esc(p.type || 'runable') + '</span> ' + provBadgeHtml(p) + '</div>' +
+      ' <span class="tag mute">' + esc(p.type || 'runable') + '</span> ' + provBadgeHtml(p) + ' ' + provHealthBadgeHtml(p) + '</div>' +
       '<div class="og-s">' + esc(provByline(p)) + '</div></td>' +
     '<td class="c-acts">' +
       '<button class="xs" data-act="editProv" data-i="' + i + '">编辑</button> ' +
@@ -5523,8 +5588,9 @@ function provFormHtml(d) {
     out.push('<label class="fld wide">' + provKeyLabel('api_key', 'api_key', !!d.api_key) +
       '<input data-pf="api_key" value="' + esc(d.api_key || '') + '" placeholder="上游密钥（openai 类用）；已脱敏，不改 = 保持原值"></label>');
     out.push('<label class="fld wide">' + provKeyLabel('api_keys', 'api_keys', Array.isArray(d.api_keys) && d.api_keys.length > 0) +
-      '<span class="hint" style="margin:0 0 5px">上游密钥池：一行一个；多把按请求轮询，401/403/429 自动冷却换下一把</span>' +
+      '<span class="hint" style="margin:0 0 5px">上游密钥池：一行一个；多把按请求轮询，401/403/429 自动冷却换下一把；额度耗尽的自动禁用，长期复败（连续 3 次以上、首见超过 7 天）会自动从配置清理</span>' +
       '<textarea data-pf="api_keys" rows="3" spellcheck="false" placeholder="留空 = 用上面的 api_key；一行一个上游密钥">' + esc((Array.isArray(d.api_keys) ? d.api_keys : []).join('\n')) + '</textarea></label>');
+    out.push(provHealthLinesHtml(d.name || ''));
   }
   out.push('<label class="fld wide"><span class="lb">models</span>' +
     '<span class="hint" style="margin:0 0 5px">逗号或换行分隔，留空 = 自动发现</span>' +

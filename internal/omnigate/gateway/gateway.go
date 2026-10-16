@@ -70,6 +70,13 @@ type Gateway struct {
 	// inert (no mapping). Populated from the data dir by New.
 	modelMap *ModelMappingStore
 
+	// keyHealth 上游密钥池健康状态（自动禁用 / 连击记账，见 keyhealth.go）。
+	// Nil = 不持久化（纯内存）。Populated from the data dir by New.
+	keyHealth *keyHealthStore
+	// keyHealthBackend / keyHealthKey 健康状态的 KV 后端。见 WithKeyHealthBackend。
+	keyHealthBackend kv.Backend
+	keyHealthKey     string
+
 	convMu sync.Mutex
 	convs  map[string]*conv
 
@@ -218,6 +225,22 @@ func WithModelMappingBackend(b kv.Backend, key string) Option {
 	}
 }
 
+// WithKeyHealthPath 让网关把上游密钥池的健康状态（自动禁用 / 连击记账）持久化到
+// path：热重载重建 provider、容器重启后，被禁用的死 key 不会「复活」重新进轮换。
+// 空路径 = 纯内存。
+func WithKeyHealthPath(path string) Option {
+	return func(g *Gateway) { g.keyHealth = newKeyHealthStore(path) }
+}
+
+// WithKeyHealthBackend 让密钥健康状态落 KV 后端（PostgreSQL）。非空时库为权威：
+// 优先读库，写只写库（文件路径退化为首次导入源 + 断库兜底）。见 keyhealth.go。
+func WithKeyHealthBackend(b kv.Backend, key string) Option {
+	return func(g *Gateway) {
+		g.keyHealthBackend = b
+		g.keyHealthKey = key
+	}
+}
+
 // 编译期断言：每个可代理的 Provider 都必须在 Provider 本身上实现 SetProxySelector
 // （而不只是它的 Client）。历史上 runable/raccoon 只把该方法实现在 Client 上，导致
 // 网关的类型断言静默失败、代理池从未生效（请求悄悄走了直连）。这里用编译期断言把
@@ -271,6 +294,14 @@ func New(cfg *config.Config, st *state.State, log *logx.Logger, opts ...Option) 
 	if g.modelMap != nil {
 		if err := g.modelMap.SetBackend(g.modelMapBackend, g.modelMapKey); err != nil {
 			g.log.Warn("模型映射启用 PostgreSQL 后端失败，回落文件: %v", err)
+		}
+	}
+	if g.keyHealth == nil && cfg.DataDir != "" {
+		g.keyHealth = newKeyHealthStore(filepath.Join(cfg.DataDir, "key-health.json"))
+	}
+	if g.keyHealth != nil {
+		if err := g.keyHealth.SetBackend(g.keyHealthBackend, g.keyHealthKey); err != nil {
+			g.log.Warn("密钥健康状态启用 PostgreSQL 后端失败，回落文件: %v", err)
 		}
 	}
 	for i := range cfg.Providers {
@@ -361,6 +392,21 @@ func New(cfg *config.Config, st *state.State, log *logx.Logger, opts ...Option) 
 				ks.SetAPIKeys(p.APIKeys)
 			}
 		}
+		// 上游密钥健康状态（自动禁用 / 连击记账）：落库持久化 + 日志留痕。
+		// SetHealthStore 是 openai 类上游专属，用它做类型断言；logger 挂在同一
+		// 分支内（避免误配到其它也有 SetLogger 的 provider，如 geminiweb 用 Warn）。
+		if g.keyHealth != nil {
+			if hs, ok := prov.(interface {
+				SetHealthStore(openaibackend.HealthStore)
+			}); ok {
+				hs.SetHealthStore(g.keyHealth)
+				if ls, ok := prov.(interface {
+					SetLogger(func(string, ...any))
+				}); ok {
+					ls.SetLogger(g.log.Info)
+				}
+			}
+		}
 		// Per-provider outbound proxy (panel config outbound.routes). A proxy
 		// pool takes precedence over a single proxy when both resolve.
 		if g.poolFor != nil {
@@ -439,6 +485,15 @@ func (g *Gateway) Config() *config.Config { return g.cfg }
 func (g *Gateway) Logger() *logx.Logger { return g.log }
 
 // ProviderNames returns configured provider names in order.
+// KeyHealthSnapshot 上游密钥健康状态快照（provider → KeyID → 状态），供面板
+// 「密钥健康」展示与后台自动清理判定用。
+func (g *Gateway) KeyHealthSnapshot() map[string]map[string]openaibackend.Health {
+	if g == nil || g.keyHealth == nil {
+		return nil
+	}
+	return g.keyHealth.Snapshot()
+}
+
 func (g *Gateway) ProviderNames() []string { return g.order }
 
 // ProviderType returns the type of a provider.

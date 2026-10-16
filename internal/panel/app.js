@@ -2504,17 +2504,96 @@ function addTabsForSource(src) {
   if (t === 'newapi') return [['ognewapi', '浏览器登录']];
   if (t === 'geminiweb') return [['oggemini', '粘贴 Cookie']];
   if (t === 'runable') return [['ogcreds', '浏览器登录']];
+  if (t === 'opencode') return [['oclogin', '登录配置'], ['ocanon', '免登录通道']];
   return [['ognone', '说明']];
 }
 const ADD_PANELS = {
   login: 'addTabLogin', import: 'addTabImport', bundle: 'addTabBundle',
   ogauth: 'addTabOgAuth', ogtoken: 'addTabOgToken', ogcreds: 'addTabOgCreds',
   ognewapi: 'addTabOgNewAPI', oggemini: 'addTabOgGemini', ognone: 'addTabOgNone',
+  oclogin: 'addTabOcLogin', ocanon: 'addTabOcAnon',
 };
+
+/* ── opencode：登录配置 / 免登录通道（「添加账号 → 来源 opencode」的两个页签） ──
+ *
+ * opencode 没有「账号」这种凭证形态：凭证就是登录 opencode.ai 后拿到的 zen（按量）/
+ * go（订阅）API 密钥，存在供应商配置里而不是账号池里。2026-10 用户三次指出
+ * opencode 必须以「登录配置」形态进入「账号池 → 添加账号 → 来源」，据此把两个入口
+ * 搬进本弹窗：
+ *   - 登录配置：zen / go 密钥池（写 omnigate.json；掩码回显，不改 = 保持原值）；
+ *   - 免登录通道：匿名免费层开关（默认开启，零密钥即可用免费模型）。
+ * 两个页签共用 ocSourceProvider / saveOcProviderPatch：补丁写回 omniCfg 后走
+ * saveOmniConfig 的统一口径（校验 → 落盘 → 热重载），保存逻辑只有这一处。 */
+
+// ocSourceProvider 取当前「添加账号」来源对应的 opencode 供应商配置（不是 opencode
+// 来源 / 配置未加载时返回 null，调用方自行降级）。
+function ocSourceProvider() {
+  if (addSourceType(addSource) !== 'opencode') return null;
+  return ((omniCfg && omniCfg.providers) || []).find(x => x && x.name === addSource) || null;
+}
+
+// ocFilledFor 记录「最近一次成功预填」的来源@配置世代（见 ocFillTag）。保存前校验它：
+// 页签没预填成功（配置没加载出来）时文本框看着是空的，直接保存会把空值当「清空密钥池」
+// 写上去——宁可拒绝保存，也不静默清掉用户已有的密钥。
+let ocFilledFor = '';
+function ocFillTag() { return addSource + '@' + (omniCfgPath || ''); }
+
+// fillOcTabs 用最新配置预填「登录配置 / 免登录通道」页签（切页与保存后调用）。
+// 密钥按掩码回显（与供应商表单同口径）：不改 = 保存时后端按「掩码未改动」还原原值。
+function fillOcTabs() {
+  const p = ocSourceProvider();
+  if (!p) { ocFilledFor = ''; return; }
+  const zen = Array.isArray(p.zen_keys) ? p.zen_keys : [];
+  const go = Array.isArray(p.go_keys) ? p.go_keys : [];
+  const z = $('ocZenKeys'), g = $('ocGoKeys'), a = $('ocAnonOn'), cur = $('ocCurrent');
+  if (z) z.value = zen.join('\n');
+  if (g) g.value = go.join('\n');
+  if (a) a.checked = !(p.anonymous === false);
+  if (cur) cur.textContent = '当前登录状态：zen ' + (zen.length ? zen.length + ' 把密钥' : '未配置') +
+    ' · go ' + (go.length ? go.length + ' 把密钥' : '未配置') +
+    ' · 免登录通道' + (p.anonymous === false ? '已关闭' : '已开启（默认）');
+  ocFilledFor = ocFillTag();
+}
+
+// saveOcProviderPatch 把补丁合并进 omniCfg 的 opencode 供应商，再走统一保存
+// （校验 → 落盘 → 热重载）。密钥字段「掩码原样回传 = 保持原值」由服务端掩码还原
+// 兜底（secret.go）；把文本框清空 = 清空该密钥池。保存成功后才改写提示语。
+async function saveOcProviderPatch(msgId, patch, okText) {
+  if (addSourceType(addSource) !== 'opencode') { ogMsg(msgId, '当前来源不是 opencode 供应商', 'err'); return; }
+  const p = ocSourceProvider();
+  if (!p) { ogMsg(msgId, '找不到供应商「' + addSource + '」，请关闭弹窗后重新打开', 'err'); return; }
+  if (ocFilledFor !== ocFillTag()) { ogMsg(msgId, '登录配置尚未加载完成：请关闭弹窗后重新打开再保存', 'err'); return; }
+  Object.assign(p, patch);
+  if (await saveOmniConfig(msgId)) { ogMsg(msgId, okText, 'ok'); fillOcTabs(); }
+}
+
+// saveOcLoginKeys 保存 zen / go 密钥池（「登录配置」页签）。
+async function saveOcLoginKeys() {
+  const val = id => { const el = $(id); return el ? el.value : ''; };
+  const pick = v => String(v || '').split('\n').map(s => s.trim()).filter(Boolean);
+  await saveOcProviderPatch('ocMsg', {
+    zen_keys: pick(val('ocZenKeys')),
+    go_keys: pick(val('ocGoKeys')),
+  }, '登录配置已保存并热生效');
+}
+
+// saveOcAnon 保存「免登录通道」开关（匿名免费层，零密钥可用免费模型）。
+async function saveOcAnon() {
+  const on = !!($('ocAnonOn') && $('ocAnonOn').checked);
+  await saveOcProviderPatch('ocAnonMsg', { anonymous: on },
+    on ? '免登录通道已开启并热生效' : '免登录通道已关闭并热生效（只走 zen / go 密钥池）');
+}
+
 async function openAdd() {
   // 来源列表依赖 OmniGate 账号聚合；首次打开若尚未加载则先取一次。
   if (!lastOmni || !lastOmni.length) {
     try { lastOmni = await loadOmniAccounts(); } catch (e) { /* 无 OmniGate 时忽略 */ }
+  }
+  // opencode 来源的「登录配置 / 免登录通道」页签要预填 zen / go 密钥（掩码）与匿名
+  // 开关，依赖 omniCfg；从没进过「上游供应商」页时先拉一次。必须在重建页签前完成，
+  // 否则文本框可能是空的，用户一保存就把空值当「清空密钥池」写上去。
+  if (!omniCfg) {
+    try { await loadOmniConfig(); } catch (e) { /* OmniGate 未启用时忽略 */ }
   }
   $('addVeil').classList.add('on');
   const sel = $('addSource');
@@ -2560,7 +2639,9 @@ function switchAddTab(tab) {
   if (tab === 'ogcreds' && $('ogAcctLabel')) $('ogAcctLabel').value = ogNextLabel();
   if (tab === 'ognewapi' && $('naLabel')) { $('naLabel').value = ogNextLabel(); resetNaAuthPanel(); }
   if (tab === 'oggemini' && $('gwLabel')) { $('gwLabel').value = ogNextLabel(); resetOgGeminiPanel(); }
+  if (tab === 'oclogin' || tab === 'ocanon') fillOcTabs();
   ogMsg('authMsg', ''); ogMsg('tokenMsg', ''); ogMsg('ogCredsMsg', ''); ogMsg('naMsg', ''); ogMsg('gwMsg', '');
+  ogMsg('ocMsg', ''); ogMsg('ocAnonMsg', '');
 }
 
 // resetOgGeminiPanel 把 Gemini Web 粘贴面板复位到「未开始」态。
@@ -6361,7 +6442,7 @@ async function saveOmniConfig(msgId) {
     // 只有进过「上游供应商」页才会加载 omniCfg。从「配置」页的网关密钥卡触发保存时
     // 可能还没加载过，先拉一次再存（否则会把空配置写上去，把 providers 全清掉）。
     await loadOmniConfig();
-    if (!omniCfg) { ogMsg(mid, '配置尚未加载', 'err'); return; }
+    if (!omniCfg) { ogMsg(mid, '配置尚未加载', 'err'); return false; }
   }
   collectCreditRouting();
   collectReliability();
@@ -6385,8 +6466,10 @@ async function saveOmniConfig(msgId) {
     ogMsg(mid, '已保存并热生效', 'ok');
     await loadOverview(true);
     if (view === 'outbound') loadOutbound();
+    return true; // 调用方（opencode 登录配置等）据此决定要不要改写提示语
   } catch (e) {
     ogMsg(mid, '保存失败：' + e.message, 'err');
+    return false;
   }
 }
 
@@ -7255,6 +7338,9 @@ async function saveOutbound() {
   on('btnTokenSave', saveOmniToken);
   on('btnOgOpenLogin', openRunableLogin);
   on('btnOgCredsSave', loginOgCreds);
+  // opencode：登录配置（zen / go 密钥池 = 登录凭证）/ 免登录通道（匿名免费层）
+  on('btnOcSaveKeys', saveOcLoginKeys);
+  on('btnOcSaveAnon', saveOcAnon);
   // New API（justwoker 等）：浏览器登录抓取 + 统一刷新
   on('btnStartNaAuth', startNewAPIAuth);
   on('btnOpenNaSignin', openNaSignin);

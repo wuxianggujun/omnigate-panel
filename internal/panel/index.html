@@ -1274,7 +1274,7 @@
     <div class="body">
       <label class="fld" style="margin-bottom:14px"><span class="lb">来源</span>
         <select id="addSource"></select>
-        <span class="hint">WorkBuddy 走浏览器登录；OmniGate 供应商按类型给出对应流程（raccoon=浏览器登录 / runable=浏览器登录（复制 Cookie） / openai 无需账号）。</span>
+        <span class="hint">WorkBuddy 走浏览器登录；OmniGate 供应商按类型给出对应流程（raccoon=浏览器登录 / runable=浏览器登录（复制 Cookie） / opencode=登录配置（密钥即登录凭证） / openai=在「上游供应商」配密钥）。</span>
       </label>
 
       <!-- WorkBuddy：浏览器登录 -->
@@ -1422,8 +1422,36 @@
         </div>
       </div>
 
-      <!-- OmniGate · openai 等：无需账号 -->
-      <div id="addTabOgNone" class="tab-panel" hidden>        <div class="og-hint" style="margin-top:0">该供应商类型（openai / newapi / opencode）不使用「账号」——在「上游供应商」页配置即可：opencode <b>零密钥即可用免费模型</b>（匿名通道默认开启），付费模型再填 zen / go 密钥池。</div>
+      <!-- OmniGate · opencode：登录配置（zen / go 密钥池 = 登录凭证） -->
+      <div id="addTabOcLogin" class="tab-panel" hidden>
+        <div class="og-hint" style="margin-top:0">opencode 的「账号」就是登录后的 API 密钥：在 <code>opencode.ai</code> 后台生成的 <b>Zen（按量付费）</b> 或 <b>Go（订阅套餐）</b> 密钥，一行一个粘到下面即完成「登录」。两个 tier 的密钥不通用，分开填；密钥只落盘在网关本地（omnigate.json）。</div>
+        <div class="og-hint" style="margin-top:6px">还没有密钥？登录 opencode.ai 控制台 → API Keys 页新建。<b>不填也能用</b>——「免登录通道」页签零密钥即可调用免费模型。</div>
+        <div class="og-fields" style="margin-top:10px">
+          <label class="og-full">Zen 密钥池（按量付费；一行一个）<textarea id="ocZenKeys" rows="3" spellcheck="false" style="width:100%;height:76px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;resize:vertical" placeholder="sk-...；留空 = 不启用 zen tier；已脱敏，不改 = 保持原值"></textarea></label>
+          <label class="og-full">Go 密钥池（订阅套餐；一行一个）<textarea id="ocGoKeys" rows="3" spellcheck="false" style="width:100%;height:76px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;resize:vertical" placeholder="sk-...；留空 = 不启用 go tier；已脱敏，不改 = 保持原值"></textarea></label>
+        </div>
+        <div class="og-row" style="margin-top:10px">
+          <button class="primary" id="btnOcSaveKeys">保存登录配置</button>
+          <span class="og-msg" id="ocMsg"></span>
+        </div>
+        <div class="og-hint" id="ocCurrent" style="margin-top:8px"></div>
+      </div>
+
+      <!-- OmniGate · opencode：免登录通道（匿名免费层，零密钥） -->
+      <div id="addTabOcAnon" class="tab-panel" hidden>
+        <div class="og-hint" style="margin-top:0">免登录通道按官方客户端形态直连 opencode.ai 的公共免费层：<b>零密钥即可用免费模型</b>（longcat-2.5-preview-free、step-5-preview-free、big-pickle 等），不需要任何登录。默认开启；关闭后只走「登录配置」页签的 zen / go 密钥池。</div>
+        <div class="og-row" style="margin-top:10px">
+          <label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" id="ocAnonOn"> 启用免登录通道（推荐，默认开启）</label>
+        </div>
+        <div class="og-row" style="margin-top:10px">
+          <button class="primary" id="btnOcSaveAnon">保存</button>
+          <span class="og-msg" id="ocAnonMsg"></span>
+        </div>
+      </div>
+
+      <!-- OmniGate · openai 类：无「账号」，密钥在供应商页配置 -->
+      <div id="addTabOgNone" class="tab-panel" hidden>
+        <div class="og-hint" style="margin-top:0">openai 类供应商不使用「账号」——密钥在「上游供应商」页的 <code>api_key</code> / <code>api_keys</code> 配置：支持多把轮询、额度耗尽自动禁用（供应商行的健康角标可看明细）。</div>
         <div class="og-row" style="margin-top:10px">
           <button id="btnOgGoProv">去「上游供应商」配置</button>
         </div>

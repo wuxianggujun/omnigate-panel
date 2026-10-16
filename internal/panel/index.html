@@ -1425,7 +1425,7 @@
       <!-- OmniGate · opencode：登录配置（zen / go 密钥池 = 登录凭证） -->
       <div id="addTabOcLogin" class="tab-panel" hidden>
         <div class="og-hint" style="margin-top:0">opencode 的「账号」就是登录后的 API 密钥：在 <code>opencode.ai</code> 后台生成的 <b>Zen（按量付费）</b> 或 <b>Go（订阅套餐）</b> 密钥，一行一个粘到下面即完成「登录」。两个 tier 的密钥不通用，分开填；密钥只落盘在网关本地（omnigate.json）。</div>
-        <div class="og-hint" style="margin-top:6px">还没有密钥？登录 opencode.ai 控制台 → API Keys 页新建。<b>不填也能用</b>——「免登录通道」页签零密钥即可调用免费模型。</div>
+        <div class="og-hint" style="margin-top:6px">还没有密钥？登录 opencode.ai 控制台 → API Keys 页新建。<b>不填也能用</b>——「免费模型·无需账号」页签零密钥即可调用免费模型。</div>
         <div class="og-fields" style="margin-top:10px">
           <label class="og-full">Zen 密钥池（按量付费；一行一个）<textarea id="ocZenKeys" rows="3" spellcheck="false" style="width:100%;height:76px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;resize:vertical" placeholder="sk-...；留空 = 不启用 zen tier；已脱敏，不改 = 保持原值"></textarea></label>
           <label class="og-full">Go 密钥池（订阅套餐；一行一个）<textarea id="ocGoKeys" rows="3" spellcheck="false" style="width:100%;height:76px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;resize:vertical" placeholder="sk-...；留空 = 不启用 go tier；已脱敏，不改 = 保持原值"></textarea></label>
@@ -1437,11 +1437,11 @@
         <div class="og-hint" id="ocCurrent" style="margin-top:8px"></div>
       </div>
 
-      <!-- OmniGate · opencode：免登录通道（匿名免费层，零密钥） -->
+      <!-- OmniGate · opencode：免费模型·无需账号（匿名免费层，零密钥） -->
       <div id="addTabOcAnon" class="tab-panel" hidden>
-        <div class="og-hint" style="margin-top:0">免登录通道按官方客户端形态直连 opencode.ai 的公共免费层：<b>零密钥即可用免费模型</b>（longcat-2.5-preview-free、step-5-preview-free、big-pickle 等），不需要任何登录。默认开启；关闭后只走「登录配置」页签的 zen / go 密钥池。</div>
+        <div class="og-hint" style="margin-top:0">本通道按官方客户端形态直连 opencode.ai 的公共免费层：<b>零密钥、无需任何账号即可用免费模型</b>（longcat-2.5-preview-free、step-5-preview-free、big-pickle 等）。默认开启；关闭后只走「登录配置」页签的 zen / go 密钥池。</div>
         <div class="og-row" style="margin-top:10px">
-          <label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" id="ocAnonOn"> 启用免登录通道（推荐，默认开启）</label>
+          <label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" id="ocAnonOn"> 启用「免费模型·无需账号」（推荐，默认开启）</label>
         </div>
         <div class="og-row" style="margin-top:10px">
           <button class="primary" id="btnOcSaveAnon">保存</button>

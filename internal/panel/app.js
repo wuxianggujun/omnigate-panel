@@ -2504,7 +2504,7 @@ function addTabsForSource(src) {
   if (t === 'newapi') return [['ognewapi', '浏览器登录']];
   if (t === 'geminiweb') return [['oggemini', '粘贴 Cookie']];
   if (t === 'runable') return [['ogcreds', '浏览器登录']];
-  if (t === 'opencode') return [['oclogin', '登录配置'], ['ocanon', '免登录通道']];
+  if (t === 'opencode') return [['oclogin', '登录配置'], ['ocanon', '免费模型·无需账号']];
   return [['ognone', '说明']];
 }
 const ADD_PANELS = {
@@ -2514,14 +2514,14 @@ const ADD_PANELS = {
   oclogin: 'addTabOcLogin', ocanon: 'addTabOcAnon',
 };
 
-/* ── opencode：登录配置 / 免登录通道（「添加账号 → 来源 opencode」的两个页签） ──
+/* ── opencode：登录配置 / 免费模型·无需账号（「添加账号 → 来源 opencode」的两个页签） ──
  *
  * opencode 没有「账号」这种凭证形态：凭证就是登录 opencode.ai 后拿到的 zen（按量）/
  * go（订阅）API 密钥，存在供应商配置里而不是账号池里。2026-10 用户三次指出
  * opencode 必须以「登录配置」形态进入「账号池 → 添加账号 → 来源」，据此把两个入口
  * 搬进本弹窗：
  *   - 登录配置：zen / go 密钥池（写 omnigate.json；掩码回显，不改 = 保持原值）；
- *   - 免登录通道：匿名免费层开关（默认开启，零密钥即可用免费模型）。
+ *   - 免费模型·无需账号：匿名免费层开关（默认开启，零密钥即可用免费模型）。
  * 两个页签共用 ocSourceProvider / saveOcProviderPatch：补丁写回 omniCfg 后走
  * saveOmniConfig 的统一口径（校验 → 落盘 → 热重载），保存逻辑只有这一处。 */
 
@@ -2538,7 +2538,7 @@ function ocSourceProvider() {
 let ocFilledFor = '';
 function ocFillTag() { return addSource + '@' + (omniCfgPath || ''); }
 
-// fillOcTabs 用最新配置预填「登录配置 / 免登录通道」页签（切页与保存后调用）。
+// fillOcTabs 用最新配置预填「登录配置 / 免费模型·无需账号」页签（切页与保存后调用）。
 // 密钥按掩码回显（与供应商表单同口径）：不改 = 保存时后端按「掩码未改动」还原原值。
 function fillOcTabs() {
   const p = ocSourceProvider();
@@ -2551,7 +2551,7 @@ function fillOcTabs() {
   if (a) a.checked = !(p.anonymous === false);
   if (cur) cur.textContent = '当前登录状态：zen ' + (zen.length ? zen.length + ' 把密钥' : '未配置') +
     ' · go ' + (go.length ? go.length + ' 把密钥' : '未配置') +
-    ' · 免登录通道' + (p.anonymous === false ? '已关闭' : '已开启（默认）');
+    ' · 「免费模型·无需账号」' + (p.anonymous === false ? '已关闭' : '已开启（默认）');
   ocFilledFor = ocFillTag();
 }
 
@@ -2577,11 +2577,11 @@ async function saveOcLoginKeys() {
   }, '登录配置已保存并热生效');
 }
 
-// saveOcAnon 保存「免登录通道」开关（匿名免费层，零密钥可用免费模型）。
+// saveOcAnon 保存「免费模型·无需账号」开关（匿名免费层，零密钥可用免费模型）。
 async function saveOcAnon() {
   const on = !!($('ocAnonOn') && $('ocAnonOn').checked);
   await saveOcProviderPatch('ocAnonMsg', { anonymous: on },
-    on ? '免登录通道已开启并热生效' : '免登录通道已关闭并热生效（只走 zen / go 密钥池）');
+    on ? '「免费模型·无需账号」已开启并热生效' : '「免费模型·无需账号」已关闭并热生效（只走 zen / go 密钥池）');
 }
 
 async function openAdd() {
@@ -2589,7 +2589,7 @@ async function openAdd() {
   if (!lastOmni || !lastOmni.length) {
     try { lastOmni = await loadOmniAccounts(); } catch (e) { /* 无 OmniGate 时忽略 */ }
   }
-  // opencode 来源的「登录配置 / 免登录通道」页签要预填 zen / go 密钥（掩码）与匿名
+  // opencode 来源的「登录配置 / 免费模型·无需账号」页签要预填 zen / go 密钥（掩码）与匿名
   // 开关，依赖 omniCfg；从没进过「上游供应商」页时先拉一次。必须在重建页签前完成，
   // 否则文本框可能是空的，用户一保存就把空值当「清空密钥池」写上去。
   if (!omniCfg) {
@@ -7338,7 +7338,7 @@ async function saveOutbound() {
   on('btnTokenSave', saveOmniToken);
   on('btnOgOpenLogin', openRunableLogin);
   on('btnOgCredsSave', loginOgCreds);
-  // opencode：登录配置（zen / go 密钥池 = 登录凭证）/ 免登录通道（匿名免费层）
+  // opencode：登录配置（zen / go 密钥池 = 登录凭证）/ 免费模型·无需账号（匿名免费层）
   on('btnOcSaveKeys', saveOcLoginKeys);
   on('btnOcSaveAnon', saveOcAnon);
   // New API（justwoker 等）：浏览器登录抓取 + 统一刷新

@@ -7,13 +7,13 @@ import (
 	"testing"
 )
 
-// TestAppJSOpencodeLoginUI 钉住 opencode 的「登录配置 / 免登录通道」页签（添加账号流）。
+// TestAppJSOpencodeLoginUI 钉住 opencode 的「登录配置 / 免费模型·无需账号」页签（添加账号流）。
 //
 // 背景：用户三次指出 opencode 必须以「登录配置」的形态进入「账号池 → 添加账号 → 来源」，
 // 而不是一句「该供应商类型不使用『账号』」把入口写死。落地方案：
 //
 //   - 来源 opencode → 两个页签：「登录配置」（zen / go 密钥池，掩码回显，不改 = 保持原值）
-//     与「免登录通道」（匿名免费层开关，默认开启）；
+//     与「免费模型·无需账号」（匿名免费层开关，默认开启）；
 //   - 保存复用 saveOmniConfig 的统一口径（校验 → 落盘 → 热重载）；密钥掩码还原由服务端
 //     兜底（secret.go 的 providerSecretFields 覆盖 zen_keys / go_keys）；
 //   - 防呆：页签没预填成功（配置没加载出来）时拒绝保存——空表单绝不能被当成
@@ -30,7 +30,7 @@ func TestAppJSOpencodeLoginUI(t *testing.T) {
 	js := string(jsBytes)
 
 	static := map[string]string{
-		"来源映射存在":       "if (t === 'opencode') return [['oclogin', '登录配置'], ['ocanon', '免登录通道']];",
+		"来源映射存在":       "if (t === 'opencode') return [['oclogin', '登录配置'], ['ocanon', '免费模型·无需账号']];",
 		"面板映射存在":       "oclogin: 'addTabOcLogin', ocanon: 'addTabOcAnon',",
 		"供应商查找函数":      "function ocSourceProvider() {",
 		"预填世代标记":       "function ocFillTag() {",
@@ -64,7 +64,7 @@ func TestAppJSOpencodeLoginUI(t *testing.T) {
 		`id="btnOcSaveKeys"`, `id="btnOcSaveAnon"`, `id="ocMsg"`, `id="ocAnonMsg"`,
 		"opencode=登录配置（密钥即登录凭证）",
 		"openai 类供应商不使用「账号」",
-		"启用免登录通道（推荐，默认开启）",
+		"启用「免费模型·无需账号」（推荐，默认开启）",
 	} {
 		if !strings.Contains(html, needle) {
 			t.Errorf("index.html 缺少 %q", needle)
@@ -73,6 +73,7 @@ func TestAppJSOpencodeLoginUI(t *testing.T) {
 	for _, stale := range []string{
 		"该供应商类型（openai / newapi / opencode）不使用「账号」",
 		"opencode <b>零密钥即可用免费模型</b>（匿名通道默认开启）",
+		"免登录通道", // 2026-10 改名「免费模型·无需账号」：旧页签名不得回归（用户看不懂「免登录」的概念）
 	} {
 		if strings.Contains(html, stale) {
 			t.Errorf("index.html 仍有旧文案（用户三次质问的落点）: %q", stale)
@@ -123,7 +124,7 @@ vm.runInContext(src.slice(start, end) +
   const tabsUnknown = ctx.addTabsForSource('ghost');
   const panels = ctx.ADD_PANELS.oclogin + ',' + ctx.ADD_PANELS.ocanon;
 
-  // —— 正常链路：预填 → 保存 zen 密钥池 → 保存免登录开关 ——
+  // —— 正常链路：预填 → 保存 zen 密钥池 → 保存免费模型开关 ——
   ctx.setAddSource('opencode');
   ctx.setOmniCfg({ providers: [
     { name: 'opencode', type: 'opencode', zen_keys: ['sk-zen…abcd'], go_keys: [], anonymous: false },
@@ -204,7 +205,7 @@ vm.runInContext(src.slice(start, end) +
 	}
 	got := strings.TrimSpace(string(out))
 	for why, want := range map[string]string{
-		"opencode 得到两个页签":  `"tabsOc":[["oclogin","登录配置"],["ocanon","免登录通道"]]`,
+		"opencode 得到两个页签":  `"tabsOc":[["oclogin","登录配置"],["ocanon","免费模型·无需账号"]]`,
 		"openai 仍走说明页":    `"tabsOpenai":[["ognone","说明"]]`,
 		"raccoon 页签不受影响":  `"tabsRaccoon":[["ogauth","浏览器登录"],["ogtoken","粘贴 Token"]]`,
 		"未知来源兜底不变":      `"tabsUnknown":[["ognone","说明"]]`,
@@ -217,7 +218,7 @@ vm.runInContext(src.slice(start, end) +
 		"zen 追加新密钥":      `"zen":["sk-zen…abcd","sk-new-123"]`,
 		"go 清空提交":        `"go":[]`,
 		"其它供应商未被波及":     `"atriaKeys":["sk-a"]`,
-		"开关保存提示改写":      `"anonMsg":"免登录通道已开启并热生效|ok"`,
+		"开关保存提示改写":      `"anonMsg":"「免费模型·无需账号」已开启并热生效|ok"`,
 		"开关写回 true":      `"anon":true`,
 		"非 opencode 来源拒绝": `"rejectMsg":"当前来源不是 opencode 供应商|err"`,
 		"供应商列表未被增删":     `"provCount":2`,

@@ -1237,6 +1237,33 @@
   </div>
 </div>
 
+<!-- OpenCode Go 套餐额度（供应商行的「额度」按钮；仅 opencode 供应商）。
+     额度用配置的 go 密钥查官方 /v1/usage：密钥列只有掩码，明文不出服务端。 -->
+<div class="veil" id="quotaVeil">
+  <div class="dlg" style="width:760px">
+    <header>
+      <h3>Go 套餐额度 <span class="hint" id="quotaWho"></span></h3>
+      <div class="hint">OpenCode Go 订阅套餐的共享窗口额度（官方 /v1/usage 接口）：5 小时 / 每周 / 每月的剩余百分比与重置时间。zen 按量付费与匿名免费通道不走套餐额度，不在本表。</div>
+      <button class="dlg-x" id="btnQuotaX" title="关闭（也可以点空白处或按 Esc）" aria-label="关闭">✕</button>
+    </header>
+    <div class="body">
+      <div class="state" id="quotaState"></div>
+      <div class="tbl-wrap">
+        <table class="acc md" id="quotaTable">
+          <thead><tr><th>密钥</th><th>5 小时</th><th>每周</th><th>每月</th><th>结论</th></tr></thead>
+          <tbody id="quotaBody"></tbody>
+        </table>
+      </div>
+    </div>
+    <footer>
+      <span class="hint" id="quotaNote"></span>
+      <span class="grow"></span>
+      <button class="xs ghost" id="btnQuotaRefresh">刷新</button>
+      <button class="xs primary" id="btnQuotaClose">关闭</button>
+    </footer>
+  </div>
+</div>
+
 <!-- 添加账号（统一入口：WorkBuddy 浏览器登录/导入；OmniGate 供应商按类型给出对应流程） -->
 <div class="veil" id="addVeil">
   <div class="dlg">

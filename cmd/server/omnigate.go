@@ -220,6 +220,17 @@ func (m *omniManager) Models(ctx context.Context) (any, error) {
 	return rt.gw.ListModels(ctx), nil
 }
 
+// OpencodeQuota 查询某 opencode 供应商全部 go 密钥的套餐额度（面板供应商行的
+//「额度」按钮）。进程内直取当前运行时——出站代理路由与热重载后的密钥池都
+// 由网关持有，面板侧不感知。明文密钥不出 provider 层。
+func (m *omniManager) OpencodeQuota(ctx context.Context, provider string) (any, error) {
+	rt := m.cur.Load()
+	if rt == nil {
+		return nil, errors.New("omnigate 未就绪")
+	}
+	return rt.gw.OpencodeQuota(ctx, provider)
+}
+
 // SetAPIKey 更新 OmniGate 复用的网关 api_key 并热重载（面板「重新生成」密钥后
 // 调用，使 /omni/* 与网关 api_key 保持同一把）。未启用时仅记住新值，供后续
 // build 回填。返回错误不致命——调用方记日志，重启后自然对齐。

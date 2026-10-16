@@ -137,6 +137,10 @@ type Config struct {
 	// 面板侧只读代理：匿名也能看模型与价格，但不需要、也不暴露网关 api_key。
 	// nil 时 /panel/api/omni/models 返回 501。
 	OmniModels func(ctx context.Context) (any, error)
+	// OmniQuota 查询某 OmniGate 供应商的 Go 套餐额度（opencode 专属，「额度」按钮）：
+	// 用配置的 go 密钥查官方 /v1/usage，返回掩码密钥 + 三个窗口的剩余百分比与重置
+	// 时间。明文密钥不出 provider 层。nil 时对应接口返回 501。
+	OmniQuota func(provider string) (any, error)
 	// OmniLogin 校验 runable 类账号（服务端会话探测），返回账号身份与当前积分。
 	// 面板「浏览器登录」调用：runable 只支持 Google/Facebook 登录，会话是 httpOnly
 	// Cookie（网页读不到），只能由用户粘贴 session_token；nil 时对应接口返回 501。
@@ -293,6 +297,9 @@ func (p *Panel) routes() {
 	// 弹窗里的「查看完整」按钮专用。独立于上面的常驻脱敏 GET——明文只在管理员
 	// 显式点击时按供应商出门一次，不进入任何常驻回显。
 	p.mux.HandleFunc("GET /panel/api/omni/provider-secret", p.admin(p.providerSecret))
+	// OpenCode Go 套餐额度（供应商行的「额度」按钮）：admin/viewer 只读，每次点击
+	// 触发真实上游查询（no-store），结果由 provider 层 60s 缓存兜底防连点。
+	p.mux.HandleFunc("GET /panel/api/omni/provider-quota", p.privileged(p.omniProviderQuota))
 	p.mux.HandleFunc("GET /panel/api/omni/outbound", p.privileged(p.getOutbound))
 	p.mux.HandleFunc("GET /panel/api/realm_routing", p.privileged(p.getRealmRouting))
 	p.mux.HandleFunc("GET /panel/api/config", p.privileged(p.getConfig))

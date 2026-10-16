@@ -5406,12 +5406,18 @@ function provByline(p) {
 }
 
 function provRowHtml(p, i) {
+  // opencode 行多一个「额度」按钮：Go 订阅套餐的共享窗口额度（/v1/usage），
+  // 是这一类型唯一能拉到的上游账号信息。其它类型没有这个按钮。
+  const quotaBtn = (p.type || '') === 'opencode'
+    ? '<button class="xs ghost" data-act="provQuota" data-i="' + i + '" title="查看 Go 套餐剩余额度与重置时间">额度</button> '
+    : '';
   return '<tr data-i="' + i + '">' +
     '<td><div class="og-t">' + esc(p.name || '(未命名)') +
       ' <span class="tag mute">' + esc(p.type || 'runable') + '</span> ' + provBadgeHtml(p) + '</div>' +
       '<div class="og-s">' + esc(provByline(p)) + '</div></td>' +
     '<td class="c-acts">' +
-      '<button class="xs" data-act="editProv" data-i="' + i + '">编辑</button>' +
+      '<button class="xs" data-act="editProv" data-i="' + i + '">编辑</button> ' +
+      quotaBtn +
       '<button class="xs ghost" data-act="goPool" data-i="' + i + '">账号池</button>' +
     '</td></tr>';
 }
@@ -5688,6 +5694,7 @@ function onProvClick(ev) {
   const i = +(btn ? btn.dataset.i : row.dataset.i);
   if (act === 'editProv') { openProvEdit(i); return; }
   if (act === 'toggleIdle') { togProvIdle(); return; }
+  if (act === 'provQuota') { openProvQuota(i); return; }
   if (act === 'goPool') {
     // 跳「账号池」并打开「添加账号」，来源预选为该供应商。
     const name = omniCfg.providers[i] && omniCfg.providers[i].name;
@@ -5704,6 +5711,118 @@ function onProvClick(ev) {
 }
 
 function addProvider() { openProvEdit(-1); }
+
+/* ── OpenCode Go 套餐额度弹窗（供应商行的「额度」按钮） ────────────────
+ *
+ * 只读展示：用配置的 go 密钥查官方 /v1/usage（GET /panel/api/omni/provider-quota），
+ * 每把密钥一行——掩码（明文不出服务端）+ 三个窗口的剩余百分比与重置时间 + 结论。
+ * 一把密钥失效不影响其它密钥的行（服务端逐把独立报错）；本次失败但上次成功过的
+ * 显示「历史数据」角标并注明历史时点。剩余 <20% 标红「快用完」。
+ * 服务端缓存 60 秒且刷新在实例级锁下合并；弹窗打开期间每 60s 自动刷新
+ * （隐藏页签暂停，关闭即停），面板请求失败保留旧表只标错误。
+ */
+let quotaProv = null;    // 「额度」弹窗当前针对的供应商名
+let quotaTimer = null;   // 弹窗打开期间的 60s 自动刷新（对齐 opencode2api 的 model-quotas 页）
+let quotaLoaded = false; // 本次弹窗会话是否成功拉到过数据：失败时据此保留旧表
+
+/* quotaTimeStr 额度窗口重置时间的本地化渲染（与 pkExpiryDateTime 同口径：
+   RFC3339 → zh-CN 完整时间戳）。 */
+function quotaTimeStr(ts) {
+  if (!ts) return '';
+  const d = new Date(ts);
+  return isNaN(d.getTime()) ? '' : d.toLocaleString('zh-CN', {
+    timeZone: 'Asia/Shanghai', hour12: false,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+  });
+}
+
+function openProvQuota(i) {
+  const p = (omniCfg.providers || [])[i];
+  if (!p || (p.type || '') !== 'opencode') return;
+  quotaProv = p.name || '';
+  quotaLoaded = false;
+  if ($('quotaWho')) $('quotaWho').textContent = '· ' + quotaProv;
+  if ($('quotaState')) { $('quotaState').hidden = false; $('quotaState').className = 'state'; $('quotaState').innerHTML = '<span class="dots">查询中</span>'; }
+  if ($('quotaTable')) $('quotaTable').hidden = true;
+  if ($('quotaNote')) $('quotaNote').textContent = '';
+  if ($('quotaVeil')) $('quotaVeil').classList.add('on');
+  // 弹窗打开期间每 60s 自动刷新：服务端缓存 60s，多数 tick 只读缓存；浏览器
+  // 隐藏页签时跳过，关闭弹窗即停（clearInterval）。
+  if (quotaTimer) clearInterval(quotaTimer);
+  quotaTimer = setInterval(() => { if (!document.hidden) loadProvQuota(); }, 60000);
+  loadProvQuota();
+}
+
+function closeProvQuota() {
+  if (quotaTimer) { clearInterval(quotaTimer); quotaTimer = null; }
+  if ($('quotaVeil')) $('quotaVeil').classList.remove('on');
+  quotaProv = null;
+}
+
+async function loadProvQuota() {
+  if (!quotaProv) return;
+  const btn = $('btnQuotaRefresh');
+  if (btn) { btn.disabled = true; btn.textContent = '查询中…'; }
+  try {
+    const d = await api('omni/provider-quota?name=' + encodeURIComponent(quotaProv));
+    quotaLoaded = true;
+    renderProvQuota(d);
+  } catch (e) {
+    const msg = (e && e.message ? e.message : '查询失败');
+    if (quotaLoaded) {
+      // 已有上次成功的数据：保留旧表不清空，错误写进状态行——
+      // 「已有显示仅为上次查询结果」（对齐 opencode2api 的失败 UX）。
+      if ($('quotaState')) { $('quotaState').hidden = false; $('quotaState').className = 'state err'; $('quotaState').innerHTML = esc(msg) + '。已有显示仅为上次查询结果。'; }
+    } else {
+      // 从未成功过：错误态，没有旧表可保。
+      if ($('quotaState')) { $('quotaState').hidden = false; $('quotaState').className = 'state err'; $('quotaState').innerHTML = esc(msg); }
+      if ($('quotaTable')) $('quotaTable').hidden = true;
+    }
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '刷新'; }
+  }
+}
+
+/* renderProvQuota 渲染额度表。每把 go 密钥一行；窗口列显示剩余百分比 + 重置
+   时间，rate-limited 窗口标「已限速」。结论列：正常 / 历史数据 / 不可用，
+   失败原因直接写在行里（掩码密钥旁边），不弹 toast。 */
+function renderProvQuota(d) {
+  const st = $('quotaState'), tb = $('quotaBody'), table = $('quotaTable');
+  if (!tb) return;
+  const keys = (d && d.keys) || [];
+  if (st) st.hidden = true;
+  if (!keys.length) {
+    if (table) table.hidden = true;
+    if (st) { st.hidden = false; st.className = 'state'; st.innerHTML = '该供应商没有配置 go 密钥：额度看板只覆盖 Go 订阅套餐（/v1/usage）。zen 按量付费没有套餐额度可查，匿名免费通道的用量同样不走套餐额度。'; }
+    if ($('quotaNote')) $('quotaNote').textContent = '';
+    return;
+  }
+  const WIN_NAMES = { rolling: '5 小时', weekly: '每周', monthly: '每月' };
+  tb.innerHTML = keys.map(k => {
+    const tag = k.status === 'ok' ? '<span class="tag ok">正常</span>'
+      : k.status === 'stale' ? '<span class="tag warn">历史数据</span>'
+      : '<span class="tag bad">不可用</span>';
+    let head = '<td><div class="og-t"><code>' + esc(k.masked || k.fingerprint || '(未知密钥)') + '</code></div>';
+    if (k.error) head += '<div class="og-s" style="color:var(--bad,#c0392b)">' + esc(k.error) + '</div>';
+    head += '</td>';
+    const wins = ['rolling', 'weekly', 'monthly'].map(n => {
+      const w = (k.windows || {})[n];
+      if (!w) return '<td class="num" style="color:var(--ink-3)">—</td>';
+      const limited = w.status === 'rate-limited' ? ' <span class="tag bad">限速</span>' : '';
+      // 低额度预警：剩余 <20% 标红 +「快用完」角标（对齐 opencode2api 的 quota-low）。
+      const low = w.remaining_percent < 20;
+      const lowTag = low ? '<span class="tag bad">快用完</span> ' : '';
+      const reset = quotaTimeStr(w.resets_at);
+      return '<td>' + lowTag + '<b' + (low ? ' style="color:var(--bad,#c0392b)"' : '') + '>' + w.remaining_percent.toFixed(1) + '%</b> 剩余' + limited +
+        '<div class="og-s" style="color:var(--ink-3)">' + (reset ? reset + ' 重置' : '') + '</div></td>';
+    }).join('');
+    return '<tr>' + head + wins + '<td>' + tag + '</td></tr>';
+  }).join('');
+  if (table) table.hidden = false;
+  // 共享口径说明：多把 go 密钥可能属于同一套餐，剩余百分比不能相加。
+  if ($('quotaNote')) $('quotaNote').textContent = '窗口额度是 OpenCode 套餐的共享口径：多把 go 密钥可能属于同一套餐，剩余百分比不能相加。';
+}
 
 function normalizeOmniForSave(cfg) {
   const out = JSON.parse(JSON.stringify(cfg || {}));
@@ -7000,6 +7119,13 @@ async function saveOutbound() {
   const pf = $('provForm');
   if (pf) { pf.addEventListener('input', onProvFormInput); pf.addEventListener('change', onProvFormInput); pf.addEventListener('click', onProvFormClick); }
   document.addEventListener('keydown', e => { if (e.key === 'Escape' && $('provVeil') && $('provVeil').classList.contains('on')) closeProvEdit(); });
+  // OpenCode Go 套餐额度弹窗（供应商行的「额度」按钮）
+  on('btnQuotaClose', closeProvQuota);
+  on('btnQuotaX', closeProvQuota);
+  on('btnQuotaRefresh', loadProvQuota);
+  const qv = $('quotaVeil');
+  if (qv) qv.addEventListener('click', e => { if (e.target === qv) closeProvQuota(); });
+  document.addEventListener('keydown', e => { if (e.key === 'Escape' && $('quotaVeil') && $('quotaVeil').classList.contains('on')) closeProvQuota(); });
   // 网关密钥卡（按供应商收窄的客户端密钥）
   on('btnAddKey', addKey);
   on('btnSaveCfgKeys', () => saveOmniConfig('keyMsg'));

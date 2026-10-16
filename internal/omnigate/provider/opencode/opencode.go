@@ -278,6 +278,13 @@ type Provider struct {
 	http    *http.Client
 	meta    metaCache   // 模型元数据缓存（见 metadata.go）
 	anonCat anonCatalog // 匿名免费目录缓存（见 anonymous.go）
+
+	// quotaMu/quotaCache 是 Go 套餐额度查询的结果缓存（见 quota.go）。挂在实例上：
+	// 改配置会重建 Provider，旧密钥的条目随旧实例一起消失，不会串到新密钥上。
+	// quotaRefreshMu 串行化整个刷新（并发合并，见 GoQuota 的注释）。
+	quotaMu        sync.Mutex
+	quotaCache     map[string]quotaCacheEntry
+	quotaRefreshMu sync.Mutex
 }
 
 // New 构造 provider。只保留「配了密钥」的 tier 进轮询——没有密钥的 tier 留在

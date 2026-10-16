@@ -587,6 +587,14 @@ func main() {
 		// 模型目录只读代理：面板「模型与档位」页匿名也能看 OmniGate 模型与积分价，
 		// 但不经过需要 api_key 的 /omni/* HTTP。
 		pcfg.OmniModels = omni.Models
+		// OpenCode Go 套餐额度查询（供应商行的「额度」按钮）：用配置的 go 密钥查
+		// /v1/usage，明文密钥不出 provider 层。单账号数个密钥、单次轻量 GET，
+		// 超时 45s 覆盖每把密钥 15s 的逐个查询。
+		pcfg.OmniQuota = func(provider string) (any, error) {
+			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+			defer cancel()
+			return omni.OpencodeQuota(ctx, provider)
+		}
 		// runable 登录校验（服务端会话探测 + 取积分）：runable 只支持 Google/Facebook
 		// 登录、会话是 httpOnly Cookie（网页读不到），面板无法自动抓取，只能由用户粘贴。
 		pcfg.OmniLogin = omni.LoginRunable

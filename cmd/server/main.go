@@ -265,7 +265,7 @@ func main() {
 		pcfg.OmniNewAPICapture = omni.NewAPICapture
 		pcfg.OmniNewAPICaptureStatus = omni.NewAPICaptureStatus
 		pcfg.OmniNewAPISetKey = omni.NewAPISetKey
-		pcfg.OmniRefresh = omni.NewAPIRefresh
+		pcfg.OmniRefresh = omni.Refresh
 		pcfg.OmniAdmin = omni.Handler()
 		pcfg.OmniProviderTypes = func() any { return catalog.All() }
 	}

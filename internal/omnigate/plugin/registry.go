@@ -149,6 +149,11 @@ func (p Plugin) clone() Plugin {
 	out.Actions = cloneActions(p.Actions)
 	out.Tasks = cloneTasks(p.Tasks)
 	out.Capabilities = cloneCapabilities(p.Capabilities)
+	if p.Login != nil {
+		login := *p.Login
+		login.Fields = cloneFields(p.Login.Fields)
+		out.Login = &login
+	}
 	return out
 }
 

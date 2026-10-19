@@ -24,6 +24,13 @@ export const ACCOUNT_MODE_LABELS = Object.freeze({
   mixed: '混合',
 });
 
+export const LOGIN_KIND_LABELS = Object.freeze({
+  oauth: '浏览器授权',
+  snippet: '浏览器脚本捕获',
+  paste: '粘贴凭证',
+  manual: '手动填写',
+});
+
 export const CAPABILITY_LABELS = Object.freeze({
   chat: '对话',
   stream: '流式',
@@ -65,6 +72,10 @@ export function roleLabel(role) {
 
 export function outcomeLabel(outcome) {
   return OUTCOME_LABELS[outcome] || outcome || '未知';
+}
+
+export function loginKindLabel(kind) {
+  return LOGIN_KIND_LABELS[kind] || kind || '登录';
 }
 
 export function fmtInt(value) {
@@ -421,6 +432,16 @@ export const BUILTIN_PROVIDER_TYPES = Object.freeze([
       { name: 'email', label: '邮箱', type: 'text', advanced: true },
       { name: 'password', label: '密码', type: 'secret', advanced: true },
     ],
+    login: {
+      kind: 'oauth',
+      transport: 'admin',
+      label: '浏览器授权登录',
+      help: '在浏览器完成小浣熊登录后，把回调地址或授权码粘贴回来即可添加账号。',
+      fields: [
+        { name: 'label', label: '账号标签', type: 'text', help: '留空 = 自动命名（如「账号 1」）。' },
+        { name: 'redirect_base', label: '回调地址前缀', type: 'url', advanced: true, help: '可选：留空用桌面自定义协议（需手动粘贴回调）；填写时授权页会回跳到该地址，面板自动抓取授权码。' },
+      ],
+    },
   },
   {
     type: 'runable',
@@ -445,6 +466,18 @@ export const BUILTIN_PROVIDER_TYPES = Object.freeze([
       { name: 'email', label: '邮箱', type: 'text', advanced: true },
       { name: 'password', label: '密码', type: 'secret', advanced: true, help: '上游已关闭邮箱密码登录时仅留作备注' },
     ],
+    login: {
+      kind: 'paste',
+      transport: 'account',
+      label: '粘贴会话 Cookie',
+      help: 'runable 只支持 Google / Facebook 登录，会话是 httpOnly Cookie，网页脚本读不到；请从浏览器开发者工具复制 session_token 粘贴进来。',
+      fields: [
+        { name: 'label', label: '账号标签', type: 'text', help: '留空 = 自动命名（如「账号 1」）。' },
+        { name: 'email', label: '邮箱', type: 'text', help: '可选：填了邮箱/密码则用服务端登录校验，替代 Cookie。' },
+        { name: 'password', label: '密码', type: 'secret', help: '可选：与邮箱配对使用。' },
+        { name: 'cookie', label: 'Session Cookie', type: 'secret', help: 'runable.com 的 session_token Cookie 值。' },
+      ],
+    },
   },
   {
     type: 'openai',
@@ -508,6 +541,15 @@ export const BUILTIN_PROVIDER_TYPES = Object.freeze([
       { name: 'device_id', label: 'Device ID', type: 'text', advanced: true },
       { name: 'api_host', label: 'API Host', type: 'url', advanced: true },
     ],
+    login: {
+      kind: 'oauth',
+      transport: 'admin',
+      label: '浏览器授权登录',
+      help: '在浏览器完成 TRAE 登录后，把回调地址粘贴回来即可添加账号；设备指纹在登录时生成并随账号保存。',
+      fields: [
+        { name: 'label', label: '账号标签', type: 'text', help: '留空 = 自动命名（如「TRAE 账号 1」）。' },
+      ],
+    },
   },
   {
     type: 'newapi',
@@ -535,6 +577,16 @@ export const BUILTIN_PROVIDER_TYPES = Object.freeze([
       { name: 'refresh_token', label: 'Refresh Token', type: 'secret', advanced: true },
       { name: 'session_cookie', label: 'Session Cookie', type: 'secret', advanced: true },
     ],
+    login: {
+      kind: 'snippet',
+      transport: 'newapi',
+      label: '浏览器会话捕获',
+      help: '在站点登录后，把面板生成的脚本粘贴进浏览器控制台运行；脚本会把 access_token 与会话回传给面板并自动建号。',
+      fields: [
+        { name: 'label', label: '账号标签', type: 'text', help: '留空 = 自动命名（用站点用户名当账号名）。' },
+        { name: 'api_key', label: 'Chat API Key', type: 'secret', help: '可选：站点里的 sk- 密钥，用于聊天与模型目录；也可稍后在账号里补填。' },
+      ],
+    },
   },
   {
     type: 'geminiweb',
@@ -556,6 +608,16 @@ export const BUILTIN_PROVIDER_TYPES = Object.freeze([
       { name: 'label', label: '账号标签', type: 'text', required: true },
       { name: 'cookie', label: 'Cookie', type: 'secret', required: true, help: '包含 __Secure-1PSID 等 Gemini 网页端 Cookie' },
     ],
+    login: {
+      kind: 'paste',
+      transport: 'admin',
+      label: '粘贴 Google Cookie',
+      help: '从浏览器复制 gemini.google.com 的完整 Cookie（需含 __Secure-1PSID 与 __Secure-1PSIDTS），粘贴后服务端会立即验活。',
+      fields: [
+        { name: 'label', label: '账号标签', type: 'text', help: '留空 = 自动命名（如「账号 1」）。' },
+        { name: 'cookie', label: 'Google Cookie', type: 'secret', required: true, help: 'gemini.google.com 的完整 Cookie。' },
+      ],
+    },
   },
 ]);
 
@@ -596,7 +658,23 @@ export function normalizeProviderTypes(payload) {
         .map(normalizeSchemaField).filter(Boolean),
       account_schema: (Array.isArray(item.account_schema) ? item.account_schema : (Array.isArray(item.accountSchema) ? item.accountSchema : []))
         .map(normalizeSchemaField).filter(Boolean),
+      login: normalizeLoginSpec(item.login),
     });
   }
   return out.length ? out : null;
+}
+
+function normalizeLoginSpec(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const kind = String(raw.kind || '').toLowerCase();
+  const transport = String(raw.transport || '').toLowerCase();
+  if (!['oauth', 'snippet', 'paste', 'manual'].includes(kind)) return null;
+  if (!['admin', 'account', 'newapi'].includes(transport)) return null;
+  return {
+    kind,
+    transport,
+    label: String(raw.label || ''),
+    help: String(raw.help || ''),
+    fields: (Array.isArray(raw.fields) ? raw.fields : []).map(normalizeSchemaField).filter(Boolean),
+  };
 }

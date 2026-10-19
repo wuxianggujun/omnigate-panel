@@ -212,6 +212,73 @@ type Task struct {
 	Description string `json:"description,omitempty"`
 }
 
+// LoginKind names the interaction a type's login uses. It tells the panel which
+// wizard to render; the transport (endpoints, polling) stays a panel concern so
+// this package never depends on panel routes.
+type LoginKind string
+
+const (
+	// LoginKindOAuth: open an upstream authorize URL in the browser, then capture
+	// the callback (paste or automatic redirect back to the panel).
+	LoginKindOAuth LoginKind = "oauth"
+	// LoginKindSnippet: the user pastes a generated snippet into the upstream
+	// site's console; the snippet posts the captured session back to the panel.
+	LoginKindSnippet LoginKind = "snippet"
+	// LoginKindPaste: the user pastes a credential (cookie / token) directly.
+	LoginKindPaste LoginKind = "paste"
+	// LoginKindManual: no guided flow; the operator fills account_schema by hand.
+	LoginKindManual LoginKind = "manual"
+)
+
+// Valid reports whether k is a known login kind.
+func (k LoginKind) Valid() bool {
+	switch k {
+	case LoginKindOAuth, LoginKindSnippet, LoginKindPaste, LoginKindManual:
+		return true
+	}
+	return false
+}
+
+// LoginTransport names the panel endpoint family that drives a login flow. It is
+// what keeps the panel from switching on the provider type: the wizard reads Kind
+// (what the user does) and Transport (where the panel talks) from the descriptor.
+type LoginTransport string
+
+const (
+	// LoginTransportAdmin routes through the panel's /omni/admin/<type>/* proxy to
+	// the in-process gateway admin endpoints (authorize / callback / token).
+	LoginTransportAdmin LoginTransport = "admin"
+	// LoginTransportAccount uses the panel's neutral /omni/account/login endpoint,
+	// which verifies the pasted credential server-side and saves the account.
+	LoginTransportAccount LoginTransport = "account"
+	// LoginTransportNewAPI uses the dedicated /omni/newapi/* capture endpoints
+	// (authorize → console snippet → status poll).
+	LoginTransportNewAPI LoginTransport = "newapi"
+)
+
+// Valid reports whether t is a known transport.
+func (t LoginTransport) Valid() bool {
+	switch t {
+	case LoginTransportAdmin, LoginTransportAccount, LoginTransportNewAPI:
+		return true
+	}
+	return false
+}
+
+// LoginSpec declares how accounts of a type are created interactively. It is
+// panel-facing metadata: the wizard collects Fields (a subset of the account
+// schema plus flow-specific inputs), then drives the flow identified by Kind
+// over the endpoint family named by Transport.
+type LoginSpec struct {
+	Kind      LoginKind      `json:"kind"`
+	Transport LoginTransport `json:"transport"`
+	Label     string         `json:"label,omitempty"`
+	Help      string         `json:"help,omitempty"`
+	// Fields are the inputs the wizard collects before starting the flow. They
+	// reuse the Field contract so the panel renders them with the same controls.
+	Fields []Field `json:"fields,omitempty"`
+}
+
 // Plugin is the declarative half of a provider plugin. The runtime half is the
 // Provider plus optional interfaces, created by Factory.
 type Plugin struct {
@@ -229,6 +296,12 @@ type Plugin struct {
 	Actions      []Action     `json:"actions"`
 	Tasks        []Task       `json:"tasks"`
 	Capabilities []Capability `json:"capabilities"`
+
+	// Login declares the interactive account-creation flow, if any. Nil means
+	// accounts are hand-written (account_schema only). Kept separate from
+	// Actions: an action is a repeatable operation on an existing account,
+	// whereas Login creates one.
+	Login *LoginSpec `json:"login,omitempty"`
 
 	// Factory builds the runtime provider. It is deliberately excluded from
 	// JSON: the panel only consumes metadata, never constructors.
@@ -348,6 +421,21 @@ func (p Plugin) validate() error {
 		}
 		tasks[task.Type] = struct{}{}
 	}
+
+	if p.Login != nil {
+		if !p.Login.Kind.Valid() {
+			return fmt.Errorf("type %q: 未知 login.kind %q", p.Type, p.Login.Kind)
+		}
+		if !p.Login.Transport.Valid() {
+			return fmt.Errorf("type %q: 未知 login.transport %q", p.Type, p.Login.Transport)
+		}
+		if p.AccountMode == AccountModeNone {
+			return fmt.Errorf("type %q: account_mode=none 不应声明 login", p.Type)
+		}
+		if err := validateFields("login.fields", p.Login.Fields); err != nil {
+			return fmt.Errorf("type %q: %w", p.Type, err)
+		}
+	}
 	return nil
 }
 
@@ -430,6 +518,19 @@ type AccountStatus struct {
 	ExpiresAt int64    `json:"expires_at,omitempty"`
 	Message   string   `json:"message,omitempty"`
 	Models    []string `json:"models,omitempty"`
+}
+
+// AccountOutcome is one account's result from a batch operation (check-in,
+// credential refresh). It is provider-neutral so the panel renders every type
+// with one component; the JSON shape is stable and shared by all providers.
+type AccountOutcome struct {
+	Label   string `json:"label"`
+	Success bool   `json:"success"`
+	Message string `json:"msg,omitempty"`
+	Error   string `json:"error,omitempty"`
+	// AlreadyClaimed marks "nothing to do" (already checked in today) as a
+	// neutral outcome rather than a failure.
+	AlreadyClaimed bool `json:"already_claimed,omitempty"`
 }
 
 // AccountOps is an optional capability for account-scoped maintenance that is

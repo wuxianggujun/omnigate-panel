@@ -24,6 +24,7 @@ import { createTabs } from '../components/tabs.js';
 import { createTable } from '../components/table.js';
 import { createSchemaForm } from '../components/schema-form.js';
 import { openModal, confirmDialog } from '../components/modal.js';
+import { openLoginWizard } from '../components/login-wizard.js';
 import { toast, toastError, toastSuccess, toastWarn } from '../components/toast.js';
 
 let pageSignal = null;
@@ -238,6 +239,11 @@ function typeMeta(type) {
 
 function actionIds(meta) {
   return new Set((meta.actions || []).map((a) => (typeof a === 'string' ? a : a.id)));
+}
+
+/** 类型声明的登录向导元数据（kind + transport + fields），无则返回 null。 */
+function loginSpec(meta) {
+  return meta && meta.login && meta.login.kind ? meta.login : null;
 }
 
 function routeRank(provider) {
@@ -637,9 +643,12 @@ function accountsTab(provider, meta, current) {
       (isAdmin() && actions.has('checkin') && provider.accounts.length) ? el('button', {
         class: 'btn btn-ghost btn-sm', type: 'button', dataset: { action: 'checkin-all', provider: provider.name },
       }, icon('check', 14), '全部签到') : null,
+      (canOperate && loginSpec(meta)) ? el('button', {
+        class: 'btn btn-primary btn-sm', type: 'button', dataset: { action: 'login-wizard', provider: provider.name },
+      }, icon('login', 14), '登录向导') : null,
       (canOperate && schema.length) ? el('button', {
-        class: 'btn btn-primary btn-sm', type: 'button', dataset: { action: 'toggle-add-account', provider: provider.name },
-      }, icon('plus', 14), ui.addOpen ? '收起表单' : '添加账号') : null,
+        class: 'btn btn-ghost btn-sm', type: 'button', dataset: { action: 'toggle-add-account', provider: provider.name },
+      }, icon('plus', 14), ui.addOpen ? '收起表单' : '手动添加') : null,
     ),
   );
   wrap.appendChild(toolbar);
@@ -660,15 +669,20 @@ function accountsTab(provider, meta, current) {
   }
 
   if (!provider.accounts.length) {
+    const spec = loginSpec(meta);
     wrap.appendChild(card({
       body: emptyState(
         current.authenticated ? '没有可见账号' : '登录后查看账号',
         current.authenticated
-          ? (schema.length ? '添加账号后即可签到、查看额度与最近错误。' : '请在上游密钥中配置密钥。')
+          ? (schema.length ? '用登录向导或手动添加账号后，即可签到、查看额度与最近错误。' : '请在上游密钥中配置密钥。')
           : '账号按 provider/label 归属过滤，普通用户只能看到自己的账号。',
-        (canOperate && schema.length) ? el('button', {
-          class: 'btn btn-primary btn-sm', type: 'button', dataset: { action: 'toggle-add-account', provider: provider.name },
-        }, '添加账号') : null,
+        canOperate && spec
+          ? el('button', {
+            class: 'btn btn-primary btn-sm', type: 'button', dataset: { action: 'login-wizard', provider: provider.name },
+          }, icon('login', 14), '登录向导')
+          : ((canOperate && schema.length) ? el('button', {
+            class: 'btn btn-primary btn-sm', type: 'button', dataset: { action: 'toggle-add-account', provider: provider.name },
+          }, '添加账号') : null),
       ),
     }));
     return wrap;
@@ -714,7 +728,7 @@ function accountCard(provider, account, meta, actions, current) {
   if (canLogin && (account.auth_invalid || account.has_token === false)) {
     actionButtons.push(el('button', {
       class: 'btn btn-ghost btn-sm', type: 'button',
-      dataset: { action: 'account-relogin', provider: provider.name, label: account.label },
+      dataset: { action: 'login-wizard', provider: provider.name, label: account.label },
     }, icon('key', 14), '重新登录'));
   }
   if (current.authenticated) {
@@ -784,7 +798,6 @@ function metric(label, value, className = '') {
 
 function addAccountPanel(provider, meta, current) {
   const fields = Array.isArray(meta.account_schema) ? meta.account_schema : [];
-  const actions = actionIds(meta);
   const form = createSchemaForm({
     fields,
     values: ui.addValues || {},
@@ -793,10 +806,9 @@ function addAccountPanel(provider, meta, current) {
   });
   const errorBox = el('p', { class: 'form-error', attrs: { role: 'alert' } });
   const addBtn = el('button', { class: 'btn btn-primary btn-sm', type: 'button' }, '添加账号');
-  const loginBtn = actions.has('login') ? el('button', { class: 'btn btn-ghost btn-sm', type: 'button' }, '登录校验并添加') : null;
   const cancelBtn = el('button', { class: 'btn btn-ghost btn-sm', type: 'button' }, '取消');
 
-  async function submit(kind) {
+  async function submit() {
     errorBox.textContent = '';
     const validation = form.validate();
     if (!validation.valid) return;
@@ -807,12 +819,9 @@ function addAccountPanel(provider, meta, current) {
     }
     if (!(await requireAccountOperator())) return;
     addBtn.disabled = true;
-    if (loginBtn) loginBtn.disabled = true;
     try {
-      const payload = { provider: provider.name, ...values };
-      if (kind === 'login') await api.account.login(payload);
-      else await api.account.add(payload);
-      toastSuccess(kind === 'login' ? '登录校验通过，账号已保存' : '账号已添加');
+      await api.account.add({ provider: provider.name, ...values });
+      toastSuccess('账号已添加');
       ui.addOpen = false;
       ui.addValues = null;
       await reloadAfterMutation();
@@ -821,23 +830,26 @@ function addAccountPanel(provider, meta, current) {
       toastError(error);
     } finally {
       addBtn.disabled = false;
-      if (loginBtn) loginBtn.disabled = false;
     }
   }
 
-  addBtn.addEventListener('click', () => submit('add'));
-  if (loginBtn) loginBtn.addEventListener('click', () => submit('login'));
+  addBtn.addEventListener('click', () => submit());
   cancelBtn.addEventListener('click', () => { ui.addOpen = false; ui.addValues = null; render(); });
 
+  const spec = loginSpec(meta);
   return card({
     class: 'inline-form-card',
-    title: '添加账号',
+    title: '手动添加账号',
     subtitle: '凭证只提交给本地服务端；页面不会把明文写入 URL 或 localStorage',
-    actions: badge(meta.account_mode === 'cookie' ? 'Cookie 账号' : (meta.account_mode === 'oauth' ? 'OAuth 账号' : '登录账号'), 'info'),
+    actions: spec
+      ? el('button', {
+        class: 'btn btn-ghost btn-sm', type: 'button', dataset: { action: 'login-wizard', provider: provider.name },
+      }, icon('login', 14), '改用登录向导')
+      : badge(meta.account_mode === 'cookie' ? 'Cookie 账号' : (meta.account_mode === 'oauth' ? 'OAuth 账号' : '登录账号'), 'info'),
     body: el('div', {},
       form.el,
       errorBox,
-      el('div', { class: 'form-actions' }, addBtn, loginBtn, cancelBtn),
+      el('div', { class: 'form-actions' }, addBtn, cancelBtn),
     ),
   });
 }
@@ -1216,10 +1228,8 @@ function onClick(event) {
     case 'account-remove':
       removeAccount(target.dataset.provider, target.dataset.label);
       break;
-    case 'account-relogin':
-      ui.addOpen = true;
-      ui.addValues = { label: target.dataset.label };
-      render();
+    case 'login-wizard':
+      openWizardFor(target.dataset.provider, target.dataset.label || '');
       break;
     case 'checkin-all':
       checkinAll(target.dataset.provider, target);
@@ -1237,6 +1247,24 @@ function onClick(event) {
     default:
       break;
   }
+}
+
+/** 打开某供应商的登录向导（label 非空 = 重新登录某个账号，预填标签）。 */
+function openWizardFor(providerName, label = '') {
+  const provider = providerList().find((p) => p.name === providerName);
+  if (!provider) return;
+  const meta = typeMeta(provider.type);
+  const spec = loginSpec(meta);
+  if (!spec) {
+    toastWarn('该供应商没有声明登录向导，请使用「手动添加」。');
+    return;
+  }
+  openLoginWizard({
+    provider,
+    meta,
+    values: label ? { label } : {},
+    onDone: () => reloadAfterMutation(),
+  });
 }
 
 async function accountAction(kind, providerName, label, button) {

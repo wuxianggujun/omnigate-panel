@@ -653,6 +653,69 @@ async function handleApi(url, init) {
     return ok({ account: { label, name: account.name || label } });
   }
 
+  // ---- 登录向导：面板代理到网关的管理端点 ----
+  if (path.startsWith('/omni/admin/') && method === 'GET' && path.endsWith('/authorize')) {
+    const auth = requireTenant();
+    if (auth.error) return auth.error;
+    const kind = path.slice('/omni/admin/'.length, -'/authorize'.length);
+    const providerName = String(url.searchParams.get('provider') || '');
+    const label = String(url.searchParams.get('label') || '').trim() || `账号 ${(state.config.providers.find((p) => p.name === providerName)?.accounts?.length || 0) + 1}`;
+    const base = `${location.origin}/panel/api/omni/admin/${kind}/callback`;
+    return ok({
+      provider: providerName,
+      label,
+      state: `mock-state-${Date.now()}`,
+      mode: url.searchParams.get('redirect_base') ? 'auto' : 'manual',
+      authorize_url: `https://example.com/oauth/authorize?client_id=mock&state=mock-state`,
+      redirect_url: url.searchParams.get('redirect_base') || '',
+      callback_hint: kind === 'trae'
+        ? 'http://redirect.local/authorize?refreshToken=..&userInfo=..'
+        : 'raccoon://callback?code=..&state=..',
+    });
+  }
+  if (path.startsWith('/omni/admin/') && method === 'POST' && path.endsWith('/callback')) {
+    const auth = requireTenant();
+    if (auth.error) return auth.error;
+    const providerName = String(body.provider || '').trim();
+    const label = String(body.label || '').trim() || `账号 ${(state.config.providers.find((p) => p.name === providerName)?.accounts?.length || 0) + 1}`;
+    if (!String(body.callback_url || body.callback || '').trim()) return fail(400, '回调地址不能为空');
+    return ok({ account: { label, name: label } });
+  }
+  if (path.startsWith('/omni/admin/') && method === 'POST' && path.endsWith('/token')) {
+    const auth = requireTenant();
+    if (auth.error) return auth.error;
+    const providerName = String(body.provider || '').trim();
+    const label = String(body.label || '').trim();
+    if (!label) return fail(400, '账号标签不能为空');
+    if (!String(body.cookie || body.token || '').trim()) return fail(400, 'Cookie 不能为空');
+    return ok({ account: { label, name: label, valid: true } });
+  }
+
+  // ---- New API 浏览器会话捕获 ----
+  if (path === '/omni/newapi/authorize' && method === 'POST') {
+    const auth = requireTenant();
+    if (auth.error) return auth.error;
+    const providerName = String(body.provider || '').trim();
+    if (!providerName) return fail(400, 'provider 不能为空');
+    const stateID = `mock-capture-${Date.now()}`;
+    return ok({
+      state: stateID,
+      label: String(body.label || ''),
+      signin_url: 'https://example.com/signin',
+      snippet: `(async () => {\n  // mock 抓取脚本（真实环境由服务端生成）\n  await fetch('${location.origin}/panel/api/omni/newapi/capture?state=${stateID}', { method: 'POST', body: '{}' });\n})();`,
+    });
+  }
+  if (path === '/omni/newapi/status' && method === 'GET') {
+    const auth = requireTenant();
+    if (auth.error) return auth.error;
+    const sid = String(url.searchParams.get('state') || '');
+    if (!sid) return fail(400, '缺少 state');
+    // 首次轮询仍等待，第二次起报告完成——让向导的轮询分支可被看到。
+    state.__newapiPolls = state.__newapiPolls || {};
+    state.__newapiPolls[sid] = (state.__newapiPolls[sid] || 0) + 1;
+    return ok({ pending: state.__newapiPolls[sid] < 2 });
+  }
+
   // ---- 供应商密钥 / 额度 / 健康 ----
   if (path === '/omni/provider-secret' && method === 'GET') {
     const auth = requireAdmin();

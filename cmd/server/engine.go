@@ -24,6 +24,7 @@ import (
 	omniconfig "github.com/wuxianggujun/omnigate-panel/internal/omnigate/config"
 	omnigateway "github.com/wuxianggujun/omnigate-panel/internal/omnigate/gateway"
 	omnilogx "github.com/wuxianggujun/omnigate-panel/internal/omnigate/logx"
+	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/plugin"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/provider/openaibackend"
 	omnisched "github.com/wuxianggujun/omnigate-panel/internal/omnigate/scheduler"
 	omnisrv "github.com/wuxianggujun/omnigate-panel/internal/omnigate/server"
@@ -703,6 +704,7 @@ type omniProviderAccounts struct {
 // Accounts 汇总全部 provider 的账号（归一化），供面板统一账号池展示。
 // withBalance=true 时对支持余额的 provider（raccoon）实时查上游；否则仅内存视图
 // （快，适合每次概览轮询）。账号名/用户 ID 等元数据取自运行时 DynAccount。
+// 分派由网关的 ProviderOps 完成——本层不再按类型 switch。
 func (m *omniManager) Accounts(ctx context.Context, withBalance bool) (any, error) {
 	rt := m.cur.Load()
 	if rt == nil {
@@ -719,66 +721,14 @@ func (m *omniManager) Accounts(ctx context.Context, withBalance bool) (any, erro
 			}
 		}
 		pa := omniProviderAccounts{Name: name, Type: typ, Accounts: []map[string]any{}}
-		switch {
-		case withBalance && typ == "raccoon":
-			rows, err := rt.gw.RaccoonAccounts(ctx, name)
-			if err != nil {
-				return nil, err
-			}
-			for _, r := range rows {
-				enrichOmniAccount(r, meta)
-			}
-			pa.Accounts = rows
-		case withBalance && typ == "runable":
-			// runable 是积分（credits）制：withBalance 时实时查上游余额，
-			// 与 raccoon 对齐——账号池的「积分」列由此填充。
-			rows, err := rt.gw.RunableAccounts(ctx, name)
-			if err != nil {
-				return nil, err
-			}
-			for _, r := range rows {
-				enrichOmniAccount(r, meta)
-			}
-			pa.Accounts = rows
-		case withBalance && typ == "trae":
-			// TRAE SOLO 是积分（credits）制：withBalance 时实时查上游权益包余额。
-			rows, err := rt.gw.TraeAccounts(ctx, name)
-			if err != nil {
-				return nil, err
-			}
-			for _, r := range rows {
-				enrichOmniAccount(r, meta)
-			}
-			pa.Accounts = rows
-		case typ == "newapi":
-			// New API（justwoker 等）：withBalance 时查上游额度（/api/user/self），
-			// 否则只回内存视图（快，供概览轮询）。
-			rows, err := rt.gw.NewAPIAccounts(ctx, name, withBalance)
-			if err != nil {
-				return nil, err
-			}
-			for _, r := range rows {
-				enrichOmniAccount(r, meta)
-			}
-			pa.Accounts = rows
-		case withBalance && typ == "geminiweb":
-			// Gemini Web：withBalance 时跑一次会话探测（Cookie 是否仍有效 + 该账号
-			// 实际可用的模型），否则回内存视图（快，供概览轮询）。
-			rows, err := rt.gw.GeminiWebAccounts(ctx, name)
-			if err != nil {
-				return nil, err
-			}
-			for _, r := range rows {
-				enrichOmniAccount(r, meta)
-			}
-			pa.Accounts = rows
-		default:
-			for _, a := range rt.gw.Accounts(name) {
-				item := map[string]any{"label": a.Label, "has_token": a.Cookie != ""}
-				enrichOmniAccount(item, meta)
-				pa.Accounts = append(pa.Accounts, item)
-			}
+		rows, err := rt.gw.Ops(name).ListAccounts(ctx, name, withBalance)
+		if err != nil {
+			return nil, err
 		}
+		for _, r := range rows {
+			enrichOmniAccount(r, meta)
+		}
+		pa.Accounts = rows
 		// 限流冷却：把当前冷却截止时刻并入账号行，面板据此显示「冷却」角标。
 		for _, r := range pa.Accounts {
 			label, _ := r["label"].(string)
@@ -834,46 +784,24 @@ func enrichOmniAccount(item map[string]any, meta map[string]omnistate.DynAccount
 }
 
 // Checkin 触发某 provider 单账号（label 为空 = 该 provider 全账号）签到。
-// 按 provider 类型分派：raccoon=桌面登录奖励，runable=会话验活 + 积分刷新。
+// 分派交给网关的 ProviderOps：声明了 checkin 动作的类型才会执行。
 func (m *omniManager) Checkin(ctx context.Context, provider, label string) (any, error) {
 	rt := m.cur.Load()
 	if rt == nil {
 		return nil, errors.New("omnigate 未启用")
 	}
-	switch rt.gw.ProviderType(provider) {
-	case "raccoon":
-		res, err := rt.gw.RaccoonCheckin(ctx, provider, label)
-		if err != nil {
-			return nil, err
-		}
-		return map[string]any{"results": res}, nil
-	case "runable":
-		res, err := rt.gw.RunableCheckin(ctx, provider, label)
-		if err != nil {
-			return nil, err
-		}
-		return map[string]any{"results": res}, nil
-	case "trae":
-		res, err := rt.gw.TraeCheckin(ctx, provider, label)
-		if err != nil {
-			return nil, err
-		}
-		return map[string]any{"results": res}, nil
-	case "newapi":
-		res, err := rt.gw.NewAPICheckin(ctx, provider, label)
-		if err != nil {
-			return nil, err
-		}
-		return map[string]any{"results": res}, nil
-	case "geminiweb":
-		res, err := rt.gw.GeminiWebCheckin(ctx, provider, label)
-		if err != nil {
-			return nil, err
-		}
-		return map[string]any{"results": res}, nil
-	default:
+	ops := rt.gw.Ops(provider)
+	if !ops.Supports(plugin.ActionCheckin) {
 		return nil, fmt.Errorf("provider %q 不支持签到", provider)
 	}
+	res, err := ops.HandleAction(ctx, provider, plugin.ActionRequest{
+		Action: plugin.ActionCheckin,
+		Params: map[string]string{"label": label},
+	})
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"results": res.Data}, nil
 }
 
 // Remove 移除某 provider 的运行时账号（含 tokens）。
@@ -885,18 +813,12 @@ func (m *omniManager) Remove(provider, label string) (any, error) {
 	if label == "" {
 		return nil, errors.New("label 不能为空")
 	}
-	removed := false
-	switch rt.gw.ProviderType(provider) {
-	case "geminiweb":
-		removed = rt.gw.GeminiWebRemoveAccount(provider, label)
-	default:
-		removed = rt.gw.RaccoonRemoveAccount(provider, label)
-	}
+	removed := rt.gw.Ops(provider).RemoveAccount(provider, label)
 	return map[string]any{"ok": true, "removed": removed}, nil
 }
 
 // CheckinAll 对全部支持签到的 provider 触发全账号签到（面板「全部签到」覆盖 OmniGate）。
-// raccoon 走桌面登录奖励，runable 走会话验活 + 积分刷新。
+// 是否支持由插件描述符声明的 checkin 动作决定。
 func (m *omniManager) CheckinAll(ctx context.Context) (any, error) {
 	rt := m.cur.Load()
 	if rt == nil {
@@ -904,40 +826,19 @@ func (m *omniManager) CheckinAll(ctx context.Context) (any, error) {
 	}
 	out := []map[string]any{}
 	for _, name := range rt.gw.ProviderNames() {
-		item := map[string]any{"provider": name}
-		switch rt.gw.ProviderType(name) {
-		case "raccoon":
-			if res, err := rt.gw.RaccoonCheckin(ctx, name, ""); err != nil {
-				item["error"] = err.Error()
-			} else {
-				item["results"] = res
-			}
-		case "runable":
-			if res, err := rt.gw.RunableCheckin(ctx, name, ""); err != nil {
-				item["error"] = err.Error()
-			} else {
-				item["results"] = res
-			}
-		case "trae":
-			if res, err := rt.gw.TraeCheckin(ctx, name, ""); err != nil {
-				item["error"] = err.Error()
-			} else {
-				item["results"] = res
-			}
-		case "newapi":
-			if res, err := rt.gw.NewAPICheckin(ctx, name, ""); err != nil {
-				item["error"] = err.Error()
-			} else {
-				item["results"] = res
-			}
-		case "geminiweb":
-			if res, err := rt.gw.GeminiWebCheckin(ctx, name, ""); err != nil {
-				item["error"] = err.Error()
-			} else {
-				item["results"] = res
-			}
-		default:
+		ops := rt.gw.Ops(name)
+		if !ops.Supports(plugin.ActionCheckin) {
 			continue
+		}
+		item := map[string]any{"provider": name}
+		res, err := ops.HandleAction(ctx, name, plugin.ActionRequest{
+			Action: plugin.ActionCheckin,
+			Params: map[string]string{"label": ""},
+		})
+		if err != nil {
+			item["error"] = err.Error()
+		} else {
+			item["results"] = res.Data
 		}
 		out = append(out, item)
 	}
@@ -995,28 +896,30 @@ func (m *omniManager) NewAPICaptureStatus(stateID string) (bool, error) {
 	return rt.gw.NewAPIPending(stateID), nil
 }
 
-// NewAPIRefresh 统一刷新：轮换某 New API provider / 账号的会话 access_token。
-func (m *omniManager) NewAPIRefresh(provider, label string) (any, error) {
+// Refresh 统一刷新：轮换某 provider / 账号的会话 access_token。
+// 是否支持由插件描述符声明的 refresh 动作决定（当前为 newapi）。
+func (m *omniManager) Refresh(provider, label string) (any, error) {
 	rt := m.cur.Load()
 	if rt == nil {
 		return nil, errors.New("omnigate 未启用")
 	}
-	if rt.gw.ProviderType(provider) != "newapi" {
+	ops := rt.gw.Ops(provider)
+	if !ops.Supports(plugin.ActionRefresh) {
 		return nil, fmt.Errorf("provider %q 不支持统一刷新", provider)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
-	if label != "" {
-		if err := rt.gw.NewAPIRefreshAccount(ctx, provider, label); err != nil {
-			return nil, err
-		}
-		return map[string]any{"ok": true, "refreshed": 1}, nil
-	}
-	res, err := rt.gw.NewAPIRefreshAll(ctx, provider)
+	res, err := ops.HandleAction(ctx, provider, plugin.ActionRequest{
+		Action: plugin.ActionRefresh,
+		Params: map[string]string{"label": label},
+	})
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"results": res}, nil
+	if label != "" {
+		return res.Data, nil
+	}
+	return map[string]any{"results": res.Data}, nil
 }
 
 // NewAPISetKey 更新某 New API 账号的聊天 API Key（sk-）。

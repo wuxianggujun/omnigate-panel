@@ -1370,6 +1370,26 @@ code, pre, .mono { font-family: var(--mono); font-variant-ligatures: none; }
 .login-hint:empty { display: none; }
 .login-form .btn-block { margin-top: 2px; height: 36px; }
 
+/* ------------------------------------------------------------ 登录向导 */
+
+.login-wizard { display: flex; flex-direction: column; gap: 14px; }
+.wizard-head { display: flex; flex-direction: column; gap: 7px; }
+.wizard-kind { display: flex; align-items: center; gap: 8px; }
+.wizard-help { font-size: 11.5px; color: var(--text-2); line-height: 1.6; }
+.wizard-step { display: flex; flex-direction: column; gap: 12px; }
+.wizard-steps { display: flex; flex-direction: column; gap: 7px; margin: 0; padding-left: 20px; }
+.wizard-steps li { font-size: 11.5px; color: var(--text-2); line-height: 1.6; }
+.wizard-actions-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.wizard-foot { display: flex; justify-content: flex-end; gap: 8px; padding-top: 2px; }
+.snippet-block { border: 1px solid var(--border); border-radius: 9px; overflow: hidden; }
+.snippet-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 8px 10px; background: var(--panel-2); border-bottom: 1px solid var(--border);
+  font-size: 11px; color: var(--text-2);
+}
+.snippet-code { margin: 0; max-height: 260px; border: 0; border-radius: 0; }
+.login-wizard .spinner { display: inline-block; vertical-align: -2px; }
+
 /* ---------------------------------------------------------------- toast */
 
 .toast-root {

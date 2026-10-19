@@ -175,6 +175,54 @@ func TestRegistryReturnsCopies(t *testing.T) {
 	}
 }
 
+func TestLoginSpecClonedAndValidated(t *testing.T) {
+	r := NewRegistry()
+	p := samplePlugin("loginable", "Loginable")
+	p.Login = &LoginSpec{
+		Kind:      LoginKindOAuth,
+		Transport: LoginTransportAdmin,
+		Label:     "浏览器授权",
+		Fields: []Field{
+			{Key: "label", Label: "Label", Kind: KindText},
+		},
+	}
+	r.MustRegister(p)
+
+	got, err := r.Get("loginable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Mutating the returned copy must not touch the stored descriptor.
+	got.Login.Fields[0].Label = "HACKED"
+	again, _ := r.Get("loginable")
+	if again.Login.Fields[0].Label != "Label" {
+		t.Fatalf("stored login fields mutated through Get: %q", again.Login.Fields[0].Label)
+	}
+
+	// An unknown login kind is rejected at registration.
+	bad := samplePlugin("badlogin", "Bad Login")
+	bad.Login = &LoginSpec{Kind: "telepathy", Transport: LoginTransportAdmin}
+	if err := r.Register(bad); !errors.Is(err, ErrInvalidPlugin) {
+		t.Fatalf("Register with bad login kind: %v", err)
+	}
+
+	// An unknown login transport is rejected at registration.
+	badTransport := samplePlugin("badtransport", "Bad Transport")
+	badTransport.Login = &LoginSpec{Kind: LoginKindPaste, Transport: "carrier-pigeon"}
+	if err := r.Register(badTransport); !errors.Is(err, ErrInvalidPlugin) {
+		t.Fatalf("Register with bad login transport: %v", err)
+	}
+
+	// account_mode=none must not declare a login flow.
+	none := samplePlugin("nol", "No Login")
+	none.AccountMode = AccountModeNone
+	none.AccountFields = nil
+	none.Login = &LoginSpec{Kind: LoginKindPaste, Transport: LoginTransportAccount}
+	if err := r.Register(none); !errors.Is(err, ErrInvalidPlugin) {
+		t.Fatalf("Register account_mode=none with login: %v", err)
+	}
+}
+
 func TestRegistryNormalizesNilSlices(t *testing.T) {
 	r := NewRegistry()
 	p := samplePlugin("plain", "Plain")

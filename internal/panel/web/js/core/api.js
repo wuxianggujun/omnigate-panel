@@ -209,6 +209,20 @@ export const api = {
     login: (payload, opts = {}) => request('/omni/account/login', { method: 'POST', body: payload, ...opts }),
   },
 
+  // 登录向导：raccoon / TRAE / geminiweb 走面板代理到进程内网关的管理端点。
+  loginFlow: {
+    authorize: (kind, query = {}, opts = {}) => request(`/omni/admin/${kind}/authorize`, { query, ...opts }),
+    callback: (kind, payload, opts = {}) => request(`/omni/admin/${kind}/callback`, { method: 'POST', body: payload, dedupe: false, ...opts }),
+    token: (kind, payload, opts = {}) => request(`/omni/admin/${kind}/token`, { method: 'POST', body: payload, dedupe: false, ...opts }),
+  },
+
+  // New API 浏览器会话捕获：发起 → 脚本回传 → 轮询。
+  newapi: {
+    authorize: (payload, opts = {}) => request('/omni/newapi/authorize', { method: 'POST', body: payload, dedupe: false, ...opts }),
+    status: (state, opts = {}) => request('/omni/newapi/status', { query: { state }, ...opts }),
+    setKey: (payload, opts = {}) => request('/omni/newapi/setkey', { method: 'POST', body: payload, dedupe: false, ...opts }),
+  },
+
   providerSecret: {
     get: (provider, opts = {}) => request('/omni/provider-secret', { query: { provider }, ...opts }),
   },

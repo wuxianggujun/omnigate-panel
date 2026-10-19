@@ -98,6 +98,18 @@ func raccoonSpec() plugin.Plugin {
 		Tasks: []plugin.Task{
 			{Type: "raccoon", Label: "小浣熊签到", Description: "定时领取登录积分。"},
 		},
+		Login: &plugin.LoginSpec{
+			Kind:      plugin.LoginKindOAuth,
+			Transport: plugin.LoginTransportAdmin,
+			Label:     "浏览器授权登录",
+			Help:      "在浏览器完成小浣熊登录后，把回调地址或授权码粘贴回来即可添加账号。",
+			Fields: []plugin.Field{
+				loginLabelField(),
+				field("redirect_base", "回调地址前缀", plugin.GroupAdvanced, plugin.KindURL,
+					advanced(),
+					help("可选：留空用桌面自定义协议（需手动粘贴回调）；填写时授权页会回跳到该地址，面板自动抓取授权码。")),
+			},
+		},
 		Capabilities: []plugin.Capability{
 			plugin.CapAccounts,
 			plugin.CapBalance,
@@ -153,6 +165,20 @@ func runableSpec() plugin.Plugin {
 		},
 		Tasks: []plugin.Task{
 			{Type: "runable", Label: "Runable 会话巡检", Description: "检查账号 Cookie 是否仍有效。"},
+		},
+		Login: &plugin.LoginSpec{
+			Kind:      plugin.LoginKindPaste,
+			Transport: plugin.LoginTransportAccount,
+			Label:     "粘贴会话 Cookie",
+			Help:      "runable 只支持 Google / Facebook 登录，会话是 httpOnly Cookie，网页脚本读不到；请从浏览器开发者工具复制 session_token 粘贴进来。",
+			Fields: []plugin.Field{
+				loginLabelField(),
+				field("email", "邮箱", plugin.GroupCredentials, plugin.KindText,
+					help("可选：填了邮箱/密码则用服务端登录校验，替代 Cookie。")),
+				field("password", "密码", plugin.GroupCredentials, plugin.KindSecret,
+					help("可选：与邮箱配对使用。")),
+				accessTokenField("Session Cookie", "runable.com 的 session_token Cookie 值。", false),
+			},
 		},
 		Capabilities: []plugin.Capability{
 			plugin.CapAccounts,
@@ -267,6 +293,17 @@ func newAPISpec() plugin.Plugin {
 			{Type: "newapi", Label: "New API 签到", Description: "定时领取站点每日额度。"},
 			{Type: "newapi-refresh", Label: "New API 刷新令牌", Description: "定时轮换即将过期的 access_token。"},
 		},
+		Login: &plugin.LoginSpec{
+			Kind:      plugin.LoginKindSnippet,
+			Transport: plugin.LoginTransportNewAPI,
+			Label:     "浏览器会话捕获",
+			Help:      "在站点登录后，把面板生成的脚本粘贴进浏览器控制台运行；脚本会把 access_token 与会话回传给面板并自动建号。",
+			Fields: []plugin.Field{
+				loginLabelField(),
+				field("api_key", "Chat API Key", plugin.GroupCredentials, plugin.KindSecret,
+					help("可选：站点里的 sk- 密钥，用于聊天与模型目录；也可稍后在账号里补填。")),
+			},
+		},
 		Capabilities: []plugin.Capability{
 			plugin.CapAccounts,
 			plugin.CapBalance,
@@ -341,14 +378,26 @@ func geminiWebSpec() plugin.Plugin {
 		Actions: []plugin.Action{
 			action(plugin.ActionCheckin, "验活", plugin.ActionScopeAccount, "重建会话并验证 Cookie 是否仍有效。", false),
 			action(plugin.ActionRefresh, "重建会话", plugin.ActionScopeAccount, "轮换 Cookie 并重建网页会话。", false),
+			action(plugin.ActionLogin, "登录 / 添加账号", plugin.ActionScopeAccount, "粘贴 Google Cookie 并添加账号。", false),
 			action(plugin.ActionRemove, "移除账号", plugin.ActionScopeAccount, "从账号池移除该账号。", true),
 		},
 		Tasks: []plugin.Task{
 			{Type: "geminiweb", Label: "Gemini Web 验活", Description: "定时探测会话并持久化轮换后的 Cookie。"},
 		},
+		Login: &plugin.LoginSpec{
+			Kind:      plugin.LoginKindPaste,
+			Transport: plugin.LoginTransportAdmin,
+			Label:     "粘贴 Google Cookie",
+			Help:      "从浏览器复制 gemini.google.com 的完整 Cookie（需含 __Secure-1PSID 与 __Secure-1PSIDTS），粘贴后服务端会立即验活。",
+			Fields: []plugin.Field{
+				loginLabelField(),
+				accessTokenField("Google Cookie", "gemini.google.com 的完整 Cookie。", true),
+			},
+		},
 		Capabilities: []plugin.Capability{
 			plugin.CapAccounts,
 			plugin.CapCheckin,
+			plugin.CapLogin,
 			plugin.CapModels,
 			plugin.CapRefresh,
 			plugin.CapAttachments,
@@ -414,6 +463,15 @@ func traeSpec() plugin.Plugin {
 		},
 		Tasks: []plugin.Task{
 			{Type: "trae", Label: "TRAE 签到", Description: "定时领取每日签到积分。"},
+		},
+		Login: &plugin.LoginSpec{
+			Kind:      plugin.LoginKindOAuth,
+			Transport: plugin.LoginTransportAdmin,
+			Label:     "浏览器授权登录",
+			Help:      "在浏览器完成 TRAE 登录后，把回调地址粘贴回来即可添加账号；设备指纹在登录时生成并随账号保存。",
+			Fields: []plugin.Field{
+				loginLabelField(),
+			},
 		},
 		Capabilities: []plugin.Capability{
 			plugin.CapAccounts,
@@ -500,6 +558,13 @@ func accountLabelField() plugin.Field {
 	return field("label", "账号标签", plugin.GroupBasic, plugin.KindText,
 		required(),
 		help("同一供应商内唯一，面板与状态文件用它定位账号。"))
+}
+
+// loginLabelField is the wizard's optional label input: interactive flows
+// auto-assign a free label when it is left blank.
+func loginLabelField() plugin.Field {
+	return field("label", "账号标签", plugin.GroupBasic, plugin.KindText,
+		help("留空 = 自动命名（如「账号 1」）。"))
 }
 
 func accessTokenField(label, helpText string, requiredFlag bool) plugin.Field {

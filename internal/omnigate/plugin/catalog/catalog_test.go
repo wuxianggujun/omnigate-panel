@@ -166,7 +166,7 @@ func TestCapabilities(t *testing.T) {
 		"newapi":   {plugin.CapAccounts, plugin.CapBalance, plugin.CapCheckin, plugin.CapLogin, plugin.CapModels, plugin.CapRefresh},
 		"openai":   {plugin.CapUpstreamKeys, plugin.CapModels},
 		"geminiweb": {
-			plugin.CapAccounts, plugin.CapCheckin, plugin.CapModels, plugin.CapRefresh,
+			plugin.CapAccounts, plugin.CapCheckin, plugin.CapLogin, plugin.CapModels, plugin.CapRefresh,
 			plugin.CapAttachments, plugin.CapCookieRotation, plugin.CapFingerprint,
 		},
 		"trae": {plugin.CapAccounts, plugin.CapBalance, plugin.CapCheckin, plugin.CapLogin, plugin.CapModels, plugin.CapRefresh, plugin.CapFingerprint},
@@ -195,7 +195,7 @@ func TestActions(t *testing.T) {
 		"opencode":  {plugin.ActionQuota},
 		"newapi":    {plugin.ActionCheckin, plugin.ActionRefresh, plugin.ActionLogin, plugin.ActionRemove},
 		"openai":    {},
-		"geminiweb": {plugin.ActionCheckin, plugin.ActionRefresh, plugin.ActionRemove},
+		"geminiweb": {plugin.ActionCheckin, plugin.ActionRefresh, plugin.ActionLogin, plugin.ActionRemove},
 		"trae":      {plugin.ActionCheckin, plugin.ActionRefresh, plugin.ActionLogin, plugin.ActionRemove},
 	}
 	for _, p := range catalog.All() {
@@ -211,6 +211,48 @@ func TestActions(t *testing.T) {
 			if !got[name] {
 				t.Fatalf("%s: missing action %q (got %v)", p.Type, name, p.Actions)
 			}
+		}
+	}
+}
+
+func TestLoginSpecs(t *testing.T) {
+	byType := pluginMap(t)
+	wantKind := map[string]plugin.LoginKind{
+		"raccoon":   plugin.LoginKindOAuth,
+		"runable":   plugin.LoginKindPaste,
+		"newapi":    plugin.LoginKindSnippet,
+		"geminiweb": plugin.LoginKindPaste,
+		"trae":      plugin.LoginKindOAuth,
+	}
+	wantTransport := map[string]plugin.LoginTransport{
+		"raccoon":   plugin.LoginTransportAdmin,
+		"runable":   plugin.LoginTransportAccount,
+		"newapi":    plugin.LoginTransportNewAPI,
+		"geminiweb": plugin.LoginTransportAdmin,
+		"trae":      plugin.LoginTransportAdmin,
+	}
+	for typ, kind := range wantKind {
+		spec := byType[typ].Login
+		if spec == nil {
+			t.Fatalf("%s: missing login spec", typ)
+		}
+		if spec.Kind != kind {
+			t.Fatalf("%s: login kind = %q, want %q", typ, spec.Kind, kind)
+		}
+		if spec.Transport != wantTransport[typ] {
+			t.Fatalf("%s: login transport = %q, want %q", typ, spec.Transport, wantTransport[typ])
+		}
+		if !byType[typ].HasCapability(plugin.CapLogin) {
+			t.Fatalf("%s: declares login spec but not the login capability", typ)
+		}
+	}
+	// Types without an interactive flow must not declare login or the capability.
+	for _, typ := range []string{"opencode", "openai"} {
+		if byType[typ].Login != nil {
+			t.Fatalf("%s: unexpected login spec", typ)
+		}
+		if byType[typ].HasCapability(plugin.CapLogin) {
+			t.Fatalf("%s: unexpected login capability", typ)
 		}
 	}
 }

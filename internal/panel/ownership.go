@@ -25,9 +25,6 @@ import (
 // ownershipVersion 归属表文件版本（未来格式变更时用于迁移）。
 const ownershipVersion = 1
 
-// wbOwnerKey WorkBuddy 账号归属键。
-func wbOwnerKey(uid string) string { return "wb:" + uid }
-
 // omniOwnerKey OmniGate 账号归属键。
 func omniOwnerKey(provider, label string) string { return "omni:" + provider + "/" + label }
 
@@ -119,6 +116,22 @@ func (s *ownershipStore) Set(key, owner string) {
 		s.m[key] = owner
 	}
 	s.saveLocked()
+}
+
+// Claim 原子认领：键无主或已属于 owner 时写入并返回 true；已被别人占用返回 false。
+// 先查后写的非原子实现会让并发添加同名 label 的两个用户都通过检查。
+func (s *ownershipStore) Claim(key, owner string) bool {
+	if key == "" || owner == "" {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if cur := s.m[key]; cur != "" && cur != owner {
+		return false
+	}
+	s.m[key] = owner
+	s.saveLocked()
+	return true
 }
 
 // Remove 删除一条归属记录（账号被移除时调用）。

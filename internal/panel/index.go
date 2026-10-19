@@ -1,79 +1,62 @@
 // index.go 面板静态资源与安全响应头。
 //
-// 资源经 go:embed 打进二进制（随服务部署，无外部构建步骤）：
-//   - index.html  页面骨架
-//   - app.js      全部前端逻辑（独立文件而非内联，为了启用无需 unsafe-inline 的严格 CSP）
-//
-// 安全头对"面板页面与全部 /panel/api/* 响应"统一生效：CSP 限制脚本只能来自本服务，
-// 禁止被 iframe 嵌套（防点击劫持），禁 MIME 嗅探，并声明不泄露 Referer 出去。
+// 新前端是 web/ 下的原生 ES Module SPA，经 go:embed 打进二进制；无 npm、无外部
+// 构建步骤。静态资源全部同源，配合严格 CSP。
 package panel
 
 import (
 	"crypto/sha256"
-	_ "embed"
+	"embed"
 	"encoding/hex"
+	"io/fs"
 	"net/http"
 )
 
-//go:embed index.html
-var indexHTML []byte
+//go:embed web
+var webFS embed.FS
 
-//go:embed app.js
-var appJS []byte
+var webRoot = func() fs.FS {
+	sub, err := fs.Sub(webFS, "web")
+	if err != nil {
+		panic("panel: embed web: " + err.Error())
+	}
+	return sub
+}()
 
-// theme.css 是面板统一设计系统（设计令牌 + 全部通用组件 + OmniGate 并入后的
-// .og-* 专用类），由主面板 <link rel="stylesheet" href="/panel/theme.css"> 引入。
-//
-//go:embed theme.css
-var themeCSS []byte
-
-// panelBuild 前端资源指纹（三个资源内容的 sha256 前 12 位）。页面每次加载时随
-// /panel/api/session 带回，前端定时比对：不一致说明服务端已发布新版本，提示用户
-// 刷新。解决的是「已经打开的标签页」——SPA 不会自己刷新，用户会在旧 JS 上排查新
-// 功能（曾把「找不到注册入口」误当成功能缺失）。
+// panelBuild 前端资源指纹：web/ 下所有文件内容按路径排序后取 sha256 前 12 位。
 var panelBuild = func() string {
 	h := sha256.New()
-	h.Write(indexHTML)
-	h.Write(appJS)
-	h.Write(themeCSS)
+	_ = fs.WalkDir(webRoot, ".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		b, err := fs.ReadFile(webRoot, path)
+		if err != nil {
+			return nil
+		}
+		h.Write([]byte(path))
+		h.Write(b)
+		return nil
+	})
 	return hex.EncodeToString(h.Sum(nil))[:12]
 }()
 
-// OmniGate 子页面（多上游网关）已并入主面板：供应商配置、出站代理、账号池都成为
-// 主面板内的视图，不再有独立页面；旧 URL 由 panel.go 的 omniRedirect 兜底跳转。
-
-// csp 内容安全策略（严格版，无需 unsafe-inline）：
-//   - default-src 'none'        默认全禁，逐个开口
-//   - script-src 'self'         只跑同源脚本（app.js）；页面无内联事件处理器/内联脚本
-//   - style-src 'self' 'unsafe-inline'
-//     style 的内联是设计取舍：页面有少量 style="..." 属性（进度条宽度、表格列宽），
-//     允许内联样式不会导致脚本执行；仍禁止外部样式域与 @import 外链。
-//   - connect-src 'self'        前端 fetch 只能打本服务
-//   - img-src 'self' data:      图标/内联图
-//   - form-action 'none'        页面无表单提交目标（配置页是 JS 提交）
-//   - frame-ancestors 'none'    禁止被任何站点 iframe 嵌套（点击劫持）
-//   - base-uri 'none'          禁止注入 <base> 改写相对路径
+// csp 内容安全策略（严格版，无需 unsafe-inline）。
 const csp = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
-	"connect-src 'self'; img-src 'self' data:; form-action 'none'; " +
+	"connect-src 'self'; img-src 'self' data:; font-src 'self' data:; form-action 'none'; " +
 	"frame-ancestors 'none'; base-uri 'none'"
 
-// setSecurityHeaders 写入面板统一安全响应头（页面与 API 都要，API 也含 JSON 数据）。
+// setSecurityHeaders 写入面板统一安全响应头（页面与 API 都要）。
 func setSecurityHeaders(w http.ResponseWriter) {
 	w.Header().Set("Content-Security-Policy", csp)
-	w.Header().Set("X-Content-Type-Options", "nosniff") // 禁 MIME 嗅探
-	w.Header().Set("X-Frame-Options", "DENY")           // 老浏览器兜底（CSP frame-ancestors 的等价项）
-	w.Header().Set("Referrer-Policy", "no-referrer")    // 不外泄面板地址给外部站点
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("X-Frame-Options", "DENY")
+	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
 	w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
 }
 
 // setNoCache 页面与静态资源必须每次回源校验。
-//
-// 为什么需要：index.html / app.js / theme.css 都随二进制同体部署，但没有任何
-// 校验头（ETag/Last-Modified），浏览器会按启发式规则长期复用旧副本——表现为
-// 服务端已更新、用户却一直跑旧 app.js（旧版按 cn:/global: 前缀过滤、无域徽标，
-// 于是「模型与档位」页筛选失效、看不到国内版/国际版）。no-cache 强制每次
-// 回源校验，无校验头时等价于每次重新拉取，彻底消除这类陈旧缓存。
 func setNoCache(w http.ResponseWriter) {
 	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 }
@@ -82,32 +65,33 @@ func setNoCache(w http.ResponseWriter) {
 func (p *Panel) index(w http.ResponseWriter, r *http.Request) {
 	setSecurityHeaders(w)
 	setNoCache(w)
+	raw, err := fs.ReadFile(webRoot, "index.html")
+	if err != nil {
+		http.Error(w, "panel asset missing", http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(indexHTML)
+	_, _ = w.Write(raw)
 }
 
-// appScript 输出前端逻辑（同源脚本，供 CSP script-src 'self' 加载）。
-func (p *Panel) appScript(w http.ResponseWriter, r *http.Request) {
-	setSecurityHeaders(w)
-	setNoCache(w)
-	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(appJS)
-}
-
-// themeStyle 输出统一设计系统样式表（同源样式表，CSP style-src 'self' 放行）。
+// themeStyle 输出设计系统样式表。
 func (p *Panel) themeStyle(w http.ResponseWriter, r *http.Request) {
 	setSecurityHeaders(w)
 	setNoCache(w)
+	raw, err := fs.ReadFile(webRoot, "theme.css")
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
 	w.Header().Set("Content-Type", "text/css; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(themeCSS)
+	_, _ = w.Write(raw)
 }
 
-// omniRedirect 旧的 OmniGate 独立子页已并入主面板（供应商 / 出站代理 / 账号池统一
-// 视图）；302 到统一账号池，避免旧书签/外链失效。
-func (p *Panel) omniRedirect(w http.ResponseWriter, r *http.Request) {
+// assets 输出 /panel/js/ 下的 ES Module 文件。
+func (p *Panel) assets(w http.ResponseWriter, r *http.Request) {
 	setSecurityHeaders(w)
-	http.Redirect(w, r, "/panel/#accounts", http.StatusFound)
+	setNoCache(w)
+	http.StripPrefix("/panel/", http.FileServerFS(webRoot)).ServeHTTP(w, r)
 }

@@ -1,7 +1,6 @@
-// omni_accounts.go 统一账号池接口：把内置 OmniGate 各供应商的账号归一化后透出
-// 给面板「账号池」视图（与 WorkBuddy 池同一张表展示，加「来源」列区分），并提供
-// 单账号签到 / 移除。所有重活都在 main 注入的闭包里（进程内直连 OmniGate 运行时，
-// 不经过 /omni/* HTTP 往返）。
+// omni_accounts.go 统一账号池接口：把各供应商的账号归一化后透出给面板
+// 「供应商」视图，并提供单账号添加 / 签到 / 移除。所有重活都在 main 注入的
+// 闭包里（进程内直连引擎运行时，不经过 HTTP 往返）。
 //
 // 分工与 omniconfig.go / outbound.go 一致：面板只做 HTTP 编排。
 package panel
@@ -13,6 +12,8 @@ import (
 	"log"
 	"net/http"
 	"strings"
+
+	"github.com/wuxianggujun/omnigate-panel/internal/panelauth"
 )
 
 // omniAccounts 返回归一化的 OmniGate 账号（?balance=1 时实时查上游余额）。
@@ -38,11 +39,12 @@ func (p *Panel) omniAccounts(w http.ResponseWriter, r *http.Request) {
 }
 
 // filterOmniAccountList 按归属过滤 OmniAccounts 的返回值（providers[].accounts[]）。
-// 未知结构原样返回（宁可多给也不崩）。
+// 解析失败时 fail-closed：返回空 providers，绝不把未过滤的全量数据交给普通用户。
 func filterOmniAccountList(d any, owned map[string]bool) any {
+	empty := map[string]any{"providers": []any{}}
 	raw, err := json.Marshal(d)
 	if err != nil {
-		return d
+		return empty
 	}
 	var m struct {
 		Providers []struct {
@@ -52,7 +54,7 @@ func filterOmniAccountList(d any, owned map[string]bool) any {
 		} `json:"providers"`
 	}
 	if err := json.Unmarshal(raw, &m); err != nil {
-		return d
+		return empty
 	}
 	for i := range m.Providers {
 		prov := m.Providers[i].Name
@@ -167,50 +169,96 @@ func jsonBoolField(v any, field string) bool {
 	return b
 }
 
-// omniAccountAddReq 面板侧「添加配置型 OmniGate 账号」请求体（runable 类：粘贴
-// session_token Cookie 后落进 omnigate.json 的 providers[].accounts[]）。
-type omniAccountAddReq struct {
-	Provider string `json:"provider"`
-	Label    string `json:"label"`
-	Cookie   string `json:"cookie"`
-}
+// 账号归属冲突的两种可区分错误（HTTP 409）。
+var (
+	errAccountTaken  = errors.New("账号名已被其他用户占用，请换一个")
+	errAccountShared = errors.New("账号名由管理员维护，普通用户不能覆盖")
+)
 
 // omniAccountAdd 服务端把账号写进 omnigate.json 并热生效。
 //
-// 为什么需要：配置型账号（runable）原先由前端整份保存 omnigate.json —— 那是管理员
-// 级操作（会看到/覆盖别人的账号）。多租户下改为服务端定向追加，普通 user 只提供
-// provider/label/cookie，看不到也改不动其它账号。
+// 请求体是插件 account_schema 生成的任意字段集合：provider / label 之外
+// （access_token / refresh_token / cookie / api_key / uid / machine_id ...）
+// 原样写入 providers[].accounts[]，不再只支持 cookie 一个字段。
 func (p *Panel) omniAccountAdd(w http.ResponseWriter, r *http.Request) {
 	if p.cfg.LoadOmniConfig == nil || p.cfg.SaveOmniConfig == nil {
 		writeErr(w, http.StatusNotImplemented, "omnigate not enabled")
 		return
 	}
-	var req omniAccountAddReq
-	raw, err := io.ReadAll(io.LimitReader(r.Body, 1<<16))
+	body, err := decodeAccountBody(r)
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, "read body: "+err.Error())
-		return
-	}
-	if err := json.Unmarshal(raw, &req); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid body: "+err.Error())
-		return
-	}
-	req.Provider = strings.TrimSpace(req.Provider)
-	req.Label = strings.TrimSpace(req.Label)
-	if req.Provider == "" || req.Label == "" {
-		writeErr(w, http.StatusBadRequest, "provider/label 不能为空")
-		return
-	}
-	if !p.claimOmniLabel(r, req.Provider, req.Label) {
-		writeErr(w, http.StatusConflict, "账号名「"+req.Label+"」已被其他用户占用，请换一个")
-		return
-	}
-	if err := p.omniCfgAddAccount(req.Provider, req.Label, req.Cookie); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	log.Printf("panel: OmniGate 添加配置账号 %s/%s", req.Provider, req.Label)
+	provider := strings.TrimSpace(stringValue(body, "provider"))
+	label := strings.TrimSpace(stringValue(body, "label"))
+	if provider == "" || label == "" {
+		writeErr(w, http.StatusBadRequest, "provider/label 不能为空")
+		return
+	}
+	entry := accountEntry(body, label)
+	if err := p.saveAccountForRequest(r, provider, entry); err != nil {
+		if errors.Is(err, errAccountTaken) || errors.Is(err, errAccountShared) {
+			writeErr(w, http.StatusConflict, err.Error())
+			return
+		}
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	log.Printf("panel: 添加配置账号 %s/%s", provider, label)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// decodeAccountBody 读取账号请求体（限制 64KiB）。
+func decodeAccountBody(r *http.Request) (map[string]any, error) {
+	raw, err := io.ReadAll(io.LimitReader(r.Body, 1<<16))
+	if err != nil {
+		return nil, errors.New("read body: " + err.Error())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(raw, &body); err != nil {
+		return nil, errors.New("invalid body: " + err.Error())
+	}
+	return body, nil
+}
+
+func stringValue(m map[string]any, key string) string {
+	s, _ := m[key].(string)
+	return s
+}
+
+// accountEntry 把请求体归一化成配置账号条目：label 固定，其余非空字符串保留，
+// provider 不进入账号对象。
+func accountEntry(body map[string]any, label string) map[string]any {
+	entry := map[string]any{"label": label}
+	for k, v := range body {
+		if k == "provider" || k == "label" {
+			continue
+		}
+		if s, ok := v.(string); ok && strings.TrimSpace(s) == "" {
+			continue
+		}
+		entry[k] = v
+	}
+	return entry
+}
+
+// saveAccountForRequest 统一「归属校验 → 认领 → 写入配置」路径。
+func (p *Panel) saveAccountForRequest(r *http.Request, provider string, entry map[string]any) error {
+	label, _ := entry["label"].(string)
+	if strings.TrimSpace(label) == "" {
+		return errors.New("label 不能为空")
+	}
+	if roleOf(r) == panelauth.RoleUser {
+		key := omniOwnerKey(provider, label)
+		if p.omniCfgHasAccount(provider, label) && p.ownership.Owner(key) == "" {
+			return errAccountShared
+		}
+	}
+	if !p.claimOmniLabel(r, provider, label) {
+		return errAccountTaken
+	}
+	return p.omniCfgAddAccount(provider, entry)
 }
 
 // omniCfgEditAccount 读 omnigate.json → 回调改写 providers[].accounts[] → 保存热生效。
@@ -261,13 +309,10 @@ func (p *Panel) omniCfgEditAccount(provider string, edit func(accounts []any) ([
 	return nil
 }
 
-// omniCfgAddAccount 定向追加/替换一个配置账号。
-func (p *Panel) omniCfgAddAccount(provider, label, cookie string) error {
+// omniCfgAddAccount 定向追加/替换一个配置账号（entry 由 account_schema 字段组成）。
+func (p *Panel) omniCfgAddAccount(provider string, entry map[string]any) error {
+	label, _ := entry["label"].(string)
 	return p.omniCfgEditAccount(provider, func(accounts []any) ([]any, bool) {
-		entry := map[string]any{"label": label}
-		if cookie != "" {
-			entry["cookie"] = cookie
-		}
 		for i, a := range accounts {
 			am, _ := a.(map[string]any)
 			if am == nil {
@@ -280,6 +325,44 @@ func (p *Panel) omniCfgAddAccount(provider, label, cookie string) error {
 		}
 		return append(accounts, entry), true
 	})
+}
+
+// omniCfgHasAccount 报告配置里是否已存在同 label 的账号（用于阻止普通用户
+// 覆盖管理员维护的无主账号）。
+func (p *Panel) omniCfgHasAccount(provider, label string) bool {
+	if p.cfg.LoadOmniConfig == nil {
+		return false
+	}
+	cfg, err := p.cfg.LoadOmniConfig()
+	if err != nil {
+		return false
+	}
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		return false
+	}
+	var m struct {
+		Providers []struct {
+			Name     string `json:"name"`
+			Accounts []struct {
+				Label string `json:"label"`
+			} `json:"accounts"`
+		} `json:"providers"`
+	}
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return false
+	}
+	for _, pv := range m.Providers {
+		if pv.Name != provider {
+			continue
+		}
+		for _, a := range pv.Accounts {
+			if a.Label == label {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // omniCfgRemoveAccount 定向删除一个配置账号。
@@ -304,42 +387,43 @@ func (p *Panel) omniCfgRemoveAccount(provider, label string) error {
 	})
 }
 
-// omniAccountLoginReq 一键登录请求体（runable：服务端会话校验）。
-type omniAccountLoginReq struct {
-	Provider string `json:"provider"`
-	Email    string `json:"email"`
-	Password string `json:"password"`
-	Cookie   string `json:"cookie"`
-}
-
-// omniAccountLogin 校验 runable 类账号：服务端会话探测（get-session）+ 取积分，返回
-// 身份与积分。面板「浏览器登录」调用；成功后由前端把 session_token 写入 omnigate.json
-// 并热生效。runable 只支持 Google/Facebook 登录、会话是 httpOnly Cookie（网页读不到），
-// 所以只能由用户粘贴 session_token——面板无法自动抓取。
+// omniAccountLogin 校验账号并（label 非空时）直接落盘：服务端探测会话 +
+// 取积分，成功后把同一份字段写进 omnigate.json 并热生效。面板的
+// 「登录校验并添加」按钮因此是一条原子路径，不再依赖前端二次保存。
 func (p *Panel) omniAccountLogin(w http.ResponseWriter, r *http.Request) {
 	if p.cfg.OmniLogin == nil {
 		writeErr(w, http.StatusNotImplemented, "omnigate not enabled")
 		return
 	}
-	var req omniAccountLoginReq
-	raw, err := io.ReadAll(io.LimitReader(r.Body, 1<<16))
+	body, err := decodeAccountBody(r)
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, "read body: "+err.Error())
+		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if err := json.Unmarshal(raw, &req); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid body: "+err.Error())
-		return
-	}
-	if req.Provider == "" {
+	provider := strings.TrimSpace(stringValue(body, "provider"))
+	if provider == "" {
 		writeErr(w, http.StatusBadRequest, "provider 不能为空")
 		return
 	}
-	d, err := p.cfg.OmniLogin(req.Provider, req.Email, req.Password, req.Cookie)
+	label := strings.TrimSpace(stringValue(body, "label"))
+	d, err := p.cfg.OmniLogin(provider,
+		stringValue(body, "email"), stringValue(body, "password"), stringValue(body, "cookie"))
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	log.Printf("panel: OmniGate 登录校验 %s（%s）", req.Provider, req.Email)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "account": d})
+	saved := false
+	if label != "" && p.cfg.LoadOmniConfig != nil && p.cfg.SaveOmniConfig != nil {
+		if err := p.saveAccountForRequest(r, provider, accountEntry(body, label)); err != nil {
+			if errors.Is(err, errAccountTaken) || errors.Is(err, errAccountShared) {
+				writeErr(w, http.StatusConflict, err.Error())
+				return
+			}
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		saved = true
+	}
+	log.Printf("panel: 登录校验 %s（%s），已保存=%v", provider, stringValue(body, "email"), saved)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "account": d, "saved": saved})
 }

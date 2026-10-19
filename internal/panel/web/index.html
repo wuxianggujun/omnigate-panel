@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="zh-CN" data-theme-mode="auto">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="dark light">
+  <meta name="referrer" content="same-origin">
+  <title>总览 · OmniGate</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230d8f78'/%3E%3Ctext x='16' y='21' font-size='13' text-anchor='middle' fill='white' font-family='monospace'%3EOG%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/panel/theme.css">
+  <script type="module" src="/panel/js/main.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#view">跳到主要内容</a>
+
+  <div class="app-shell">
+    <aside class="sidebar" id="sidebar" aria-label="侧边导航">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">OG</span>
+        <span class="brand-text">
+          <span class="brand-name">OmniGate</span>
+          <span class="brand-sub">CONTROL PANEL</span>
+        </span>
+      </div>
+      <nav class="nav" id="nav" aria-label="主导航"></nav>
+      <div class="sidebar-foot" id="sidebar-session"></div>
+    </aside>
+
+    <div class="scrim" id="mobile-scrim" hidden></div>
+
+    <div class="main-col">
+      <header class="topbar">
+        <button class="menu-btn mobile-only" id="menu-btn" type="button" aria-label="打开导航" aria-expanded="false" aria-controls="sidebar">
+          <span class="menu-lines" aria-hidden="true"><span></span><span></span><span></span></span>
+        </button>
+        <div class="topbar-title">
+          <h1 id="page-title">总览</h1>
+          <span id="page-subtitle">引擎健康与近期活动</span>
+        </div>
+        <div class="topbar-actions">
+          <span id="mock-badge" class="mock-badge" hidden>MOCK</span>
+          <span id="build-note" class="build-note mono"></span>
+          <button class="icon-btn" id="theme-btn" type="button" aria-label="切换主题" title="切换主题"></button>
+          <div class="session-chip" id="session-chip"></div>
+        </div>
+      </header>
+
+      <main id="view" class="view" tabindex="-1"></main>
+
+      <nav class="bottomnav" id="bottomnav" aria-label="移动端导航"></nav>
+    </div>
+  </div>
+
+  <div id="toast-root" class="toast-root" aria-live="polite" aria-atomic="false"></div>
+  <div id="modal-root"></div>
+  <div id="drawer-root"></div>
+
+  <noscript>
+    <div class="noscript">OmniGate 控制台需要启用 JavaScript。</div>
+  </noscript>
+</body>
+</html>

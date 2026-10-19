@@ -103,7 +103,12 @@ func TestStoreSweepDropsOldFiles(t *testing.T) {
 	if _, _, err := s.Open(stale); err == nil {
 		t.Fatal("stale image still readable")
 	}
-	if _, _, err := s.Open(fresh); err != nil {
+	rc, _, err := s.Open(fresh)
+	if err != nil {
 		t.Fatalf("fresh image gone: %v", err)
+	}
+	// Windows 下未关闭的句柄会让 t.TempDir 的 RemoveAll 失败：测试也必须归还句柄。
+	if rc != nil {
+		_ = rc.Close()
 	}
 }

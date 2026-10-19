@@ -505,62 +505,83 @@ func (s *Store) UsersView() []UserView {
 // Login 校验凭据并发会话。clientKey 用于失败限流（通常取客户端 IP）。
 // 失败一律返回 ErrInvalidCredentials（不区分用户不存在/密码错），超限返回 ErrLockedOut。
 func (s *Store) Login(username, password, clientKey string) (Session, string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	now := s.now()
-	s.purgeLocked(now)
-	u, err := s.verifyLocked(username, password, clientKey, now)
+	u, err := s.verifyCredentials(username, password, clientKey)
 	if err != nil {
 		return Session{}, "", err
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// 验证期间账号可能被删除/改密：以当前集合为准，避免为一个刚被移除的账号发会话。
+	cur, ok := s.users[u.Username]
+	if !ok || cur.PasswordHash != u.PasswordHash {
+		return Session{}, "", ErrInvalidCredentials
+	}
+	now := s.now()
 	token, err := newToken()
 	if err != nil {
 		return Session{}, "", err
 	}
 	exp := now.Add(s.ttl)
-	s.sessions[token] = sessionRec{username: u.Username, role: u.Role, expires: exp}
+	s.sessions[token] = sessionRec{username: cur.Username, role: cur.Role, expires: exp}
 	s.saveSessionsLocked(true)
-	return Session{Username: u.Username, Role: u.Role, Expires: exp}, token, nil
+	return Session{Username: cur.Username, Role: cur.Role, Expires: exp}, token, nil
 }
 
 // Verify 仅校验凭据（与 Login 同限流口径），不创建会话。用于"改自己密码前
 // 校验当前密码"——避免每次改密都在会话表里留下一个用不上的令牌，也让失败
 // 计数语义与登录完全一致（不能借改密接口绕过登录限流）。
 func (s *Store) Verify(username, password, clientKey string) (User, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	now := s.now()
-	s.purgeLocked(now)
-	return s.verifyLocked(username, password, clientKey, now)
+	return s.verifyCredentials(username, password, clientKey)
 }
 
-// verifyLocked 在持锁状态下校验凭据并做失败计数（Login/Verify 共用）。
-// 成功返回账号并清零该用户/来源的失败计数；失败按限流策略记账。
-func (s *Store) verifyLocked(username, password, clientKey string, now time.Time) (User, error) {
-	uk := "u:" + username
-	ik := "ip:" + clientKey
+// verifyCredentials 校验凭据与失败限流。PBKDF2 计算（约 10 万轮）刻意放在锁外：
+// 旧实现持全局锁跑哈希，几个并发错误密码就能把全部面板请求串行化。
+func (s *Store) verifyCredentials(username, password, clientKey string) (User, error) {
+	now := s.now()
+	uk, ik := "u:"+username, "ip:"+clientKey
+
+	s.mu.Lock()
+	s.purgeLocked(now)
 	if wait, locked := s.lockedFor(uk, now); locked {
+		s.mu.Unlock()
 		return User{}, &LockedError{RetryAfter: wait}
 	}
 	if wait, locked := s.lockedFor(ik, now); locked {
+		s.mu.Unlock()
 		return User{}, &LockedError{RetryAfter: wait}
 	}
-
 	u, ok := s.users[username]
+	s.mu.Unlock()
+
 	if !ok {
 		dummyVerify(password)
-		s.recordFailure(uk, now)
-		s.recordFailure(ik, now)
+		s.recordFailurePair(uk, ik)
 		return User{}, ErrInvalidCredentials
 	}
 	if !VerifyPassword(u.PasswordHash, password) {
-		s.recordFailure(uk, now)
-		s.recordFailure(ik, now)
+		s.recordFailurePair(uk, ik)
+		return User{}, ErrInvalidCredentials
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cur, ok := s.users[username]
+	if !ok || cur.PasswordHash != u.PasswordHash {
 		return User{}, ErrInvalidCredentials
 	}
 	delete(s.attempts, uk)
 	delete(s.attempts, ik)
-	return u, nil
+	return cur, nil
+}
+
+// recordFailurePair 在锁内记录一次失败（用户 + 来源两个维度）。
+func (s *Store) recordFailurePair(userKey, ipKey string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := s.now()
+	s.purgeLocked(now)
+	s.recordFailure(userKey, now)
+	s.recordFailure(ipKey, now)
 }
 
 // Authenticate 校验会话令牌并在有效时滑动续期（expires = now + ttl）。

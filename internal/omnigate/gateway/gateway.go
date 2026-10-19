@@ -21,11 +21,12 @@ import (
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/imagegen"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/logx"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/openai"
+	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/plugin"
+	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/plugin/catalog"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/provider"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/provider/geminiweb"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/provider/geminiweb/fingerprint"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/provider/newapi"
-	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/provider/opencode"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/provider/openaibackend"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/provider/raccoon"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/provider/runable"
@@ -304,49 +305,46 @@ func New(cfg *config.Config, st *state.State, log *logx.Logger, opts ...Option) 
 			g.log.Warn("密钥健康状态启用 PostgreSQL 后端失败，回落文件: %v", err)
 		}
 	}
+	// 插件注册表：内置类型在网关启动时显式注册一次（无 init 副作用）；
+	// 外部插件可在调用 New 之前先 Register 自己的描述符。
+	catalog.Register()
 	for i := range cfg.Providers {
 		p := &cfg.Providers[i]
-		var prov provider.Provider
-		switch p.Type {
-		case "runable":
-			prov = runable.NewProvider(p.Name, p.BaseURL, p.DeviceHeader)
-		case "openai":
-			prov = openaibackend.New(p.Name, p.BaseURL, p.APIKey, p.Models)
-		case "opencode":
-			// OpenCode Zen / Go + 匿名免费通道：两个 tier 各一个密钥池，分开轮换；
-			// 匿名通道默认开启（零密钥即用，见 config.ProviderConfig.AnonymousEnabled），
-			// 显式关闭才只看密钥。密钥只能走构造函数（本 provider 刻意不实现
-			// SetAPIKeys，避免下面那条通用注入路径用空切片把 zen 池清掉）。
-			// 见 provider/opencode 包注释。
-			prov = opencode.New(opencode.Options{
-				Name:      p.Name,
-				ZenKeys:   p.ZenKeys,
-				GoKeys:    p.GoKeys,
-				Prefer:    p.TierPrefer,
-				ZenBase:   p.BaseURL,
-				GoBase:    p.GoBaseURL,
-				Models:    p.Models,
-				Anonymous: p.AnonymousEnabled(),
-			})
-		case "raccoon":
-			prov = raccoon.NewProvider(p.Name, p.MainOrigin, p.LLMBase, p.AuthBase)
-		case "trae":
-			prov = trae.NewProvider(p.Name, p.AgentHost, p.UgHost, p.OAuthHost)
-		case "newapi":
-			prov = newapi.NewProvider(p.Name, p.BaseURL, p.Models)
-		case "geminiweb":
-			gw := geminiweb.NewProvider(p.Name, p.Models)
-			// Generated images are stored under the data dir (a bind mount) so
-			// the /images/{id} route can serve them across restarts.
+		desc, err := plugin.Get(p.Type)
+		if err != nil {
+			return nil, fmt.Errorf("provider %q: %w", p.Name, err)
+		}
+		if desc.Factory == nil {
+			return nil, fmt.Errorf("provider %q: 插件 %q 未提供 Factory", p.Name, p.Type)
+		}
+		prov, err := desc.Factory(plugin.ProviderSpec{
+			Name:         p.Name,
+			BaseURL:      p.BaseURL,
+			DeviceHeader: p.DeviceHeader,
+			APIKey:       p.APIKey,
+			APIKeys:      p.APIKeys,
+			Models:       p.Models,
+			ZenKeys:      p.ZenKeys,
+			GoKeys:       p.GoKeys,
+			TierPrefer:   p.TierPrefer,
+			GoBaseURL:    p.GoBaseURL,
+			Anonymous:    p.AnonymousEnabled(),
+			MainOrigin:   p.MainOrigin,
+			LLMBase:      p.LLMBase,
+			AuthBase:     p.AuthBase,
+			AgentHost:    p.AgentHost,
+			UgHost:       p.UgHost,
+			OAuthHost:    p.OAuthHost,
+		}, plugin.Deps{DataDir: cfg.DataDir, Logger: g.log.Warn})
+		if err != nil {
+			return nil, fmt.Errorf("provider %q: 构建失败: %w", p.Name, err)
+		}
+		// Gemini Web 的进程级附属设施（图片存储 / Gem 映射 / 指纹 / 后台维护）
+		// 不属于 provider 协议本身，统一由核心在构造后注入。
+		if gw, ok := prov.(*geminiweb.Provider); ok {
 			gw.SetImageStore(imagegen.NewStore(filepath.Join(cfg.DataDir, "generated_images")))
-			// Custom Gems exposed as callable model names (issue #2): a mapping
-			// persists model → {gem_id, base_model, account}.
 			gw.SetGemMappingStore(geminiweb.NewGemMappingStore(filepath.Join(cfg.DataDir, "gem-mapping.json")))
-			// An attachment that fails to upload must not disappear silently.
 			gw.SetLogger(g.log.Warn)
-			// Anti-detection / protocol-masquerade layer (ported from gemini2api):
-			// dynamic Chrome headers, TLS ClientHello impersonation, request jitter,
-			// a persistent cookie store, and background version sync.
 			if fp := cfg.Fingerprint; fp != nil {
 				rt := fingerprint.NewRuntime(fingerprint.Options{
 					ConfigPath:          fp.ConfigPath,
@@ -360,19 +358,12 @@ func New(cfg *config.Config, st *state.State, log *logx.Logger, opts ...Option) 
 				gw.SetFingerprint(rt)
 				gw.StartFingerprintSync(context.Background())
 			}
-			// Opt-in background keep-alive (gclient.py's _auto_refresh_loop):
-			// rotate each account's cookie and rebuild its session so an idle
-			// pool stays warm. Off by default — on-demand refresh already covers
-			// an active gateway.
 			if m := cfg.Maintenance; m != nil && m.KeepaliveEnabled {
 				provName := p.Name
 				gw.StartKeepAlive(context.Background(),
 					time.Duration(m.KeepaliveIntervalMinutes)*time.Minute,
 					func() []*provider.Account { return g.Accounts(provName) })
 			}
-			// Opt-in background web-chat cleanup (main.py's web_chat_cleanup_loop):
-			// periodically delete each account's stale Gemini web chats. Off by
-			// default — it deletes upstream data.
 			if m := cfg.Maintenance; m != nil && m.ChatCleanupEnabled {
 				provName := p.Name
 				gw.StartChatCleanup(context.Background(),
@@ -381,9 +372,6 @@ func New(cfg *config.Config, st *state.State, log *logx.Logger, opts ...Option) 
 					m.ChatCleanupSkipPinnedOrDefault(),
 					func() []*provider.Account { return g.Accounts(provName) })
 			}
-			prov = gw
-		default:
-			return nil, fmt.Errorf("provider %q: unknown type %q", p.Name, p.Type)
 		}
 		// 上游密钥池（多密钥轮询）：provider.api_keys 非空时启用（只对支持
 		// SetAPIKeys 的后端生效，当前是 openai 类上游）。

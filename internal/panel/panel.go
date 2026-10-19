@@ -1,167 +1,86 @@
-// Package panel 内嵌式 Web 管理面板：账号池总览、单号运维（解冻/禁用/签到/
-// 刷新余额/移除）、浏览器内 OAuth 添加账号（免重启热加载进池）、手动批量
-// 签到/保活，以及请求记录（含实际调度域）与运行日志（环形缓冲，前端「运行日志」页）。
-//
-// 设计约束：
-//   - 前端 go:embed 单文件（index.html），无任何外部构建依赖，与二进制同体部署；
-//   - 鉴权与网关 api_key 完全解耦：面板只认账号密码登录（会话 Cookie），见
-//     panel_auth.go；api_key 仅用于网关 /v1/* 与内置 OmniGate 的 /omni/*，不再能
-//     打开面板。面板 HTML 本身无秘密，可匿名加载；
-//   - 不改写既有池语义：所有运维操作落到 pool 已有入口（Revive/Disable/Remove...），
-//     添加账号走 auth.SaveAtomic + pool.Add，重启后与 auths/ 目录天然对齐。
+// Package panel 内嵌式 Web 管理面板：单引擎（OmniGate）账号、供应商、路由、
+// 模型、用量与请求记录。前端为无构建的原生 ES Module SPA，经 go:embed 与二进制
+// 同体部署。
 package panel
 
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"log"
 	"net/http"
 	"os"
-	"sort"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
-	"github.com/wuxianggujun/omnigate-panel/internal/auth"
-	"github.com/wuxianggujun/omnigate-panel/internal/credithist"
 	"github.com/wuxianggujun/omnigate-panel/internal/kv"
 	"github.com/wuxianggujun/omnigate-panel/internal/livecfg"
 	"github.com/wuxianggujun/omnigate-panel/internal/panelauth"
-	"github.com/wuxianggujun/omnigate-panel/internal/pool"
 	"github.com/wuxianggujun/omnigate-panel/internal/reqlog"
-	"github.com/wuxianggujun/omnigate-panel/internal/scheduler"
-	"github.com/wuxianggujun/omnigate-panel/internal/upstream"
 	"github.com/wuxianggujun/omnigate-panel/internal/usage"
 )
 
 // Config 面板依赖（main 装配注入）。
 type Config struct {
-	Pool      *pool.Pool
-	Upstream  *upstream.Client
-	Scheduler *scheduler.Scheduler // 手动触发签到/保活；nil 时对应接口返回 501
-	AuthDir   string               // OAuth 登录完成后凭证落盘目录
-	APIKey    string               // 空 = 不鉴权（与主服务同语义）；与 Live 同时给出时 Live 优先
-	RedisMode string               // "upstash" / "noop"，仅观测透出
-	Version   string               // 面板版本号（展示用）
+	APIKey  string // 网关密钥（仅用于展示；面板鉴权只认会话）
+	Version string // 面板版本号（展示用）
 
-	// Live 运行期可变配置（在线改配置立即生效）。
+	// Live 运行期可变配置（网关密钥热更新）。
 	Live *livecfg.Holder
 
-	// ConfigPath config.json 路径与加载器（配置页读写用）。
-	// LoadConfig 返回解析后的配置对象（前端展示/校验用，具体类型由 main 注入的闭包决定）；
-	// nil 时配置页返回 501。
+	// ConfigPath config.json 路径与读写器（系统设置页）。
 	ConfigPath string
-	LoadConfig func() (any, error)
-	// SaveConfig 校验并落盘配置，返回需要重启才能生效的字段列表；随后由 main 注入的
-	// ApplyConfig 闭包完成热生效（池参数/排程/密钥/脱敏）。error 时配置不写盘。
-	SaveConfig func(raw []byte) (restartRequired []string, err error)
+	// DataDir 持久化根目录（用于「存储」页展示）。
+	DataDir string
+	LoadConfig    func() (any, error)
+	SaveConfig    func(raw []byte) (restartRequired []string, err error)
+	RegenerateKey func() (string, error)
 
-	// StickyCount 返回粘性会话绑定数；nil 时报告 0。
-	StickyCount func() int
-
-	// Usage 逐请求用量记录器（nil = 用量接口返回 501）。
-	Usage *usage.Recorder
-	// History 余额快照历史（nil = 不返回「近 N 小时净变化」，用量页对账卡片隐藏）。
-	History *credithist.Recorder
-	// RequestLog 请求指标与归档（nil = 对应接口返回 501）。
+	// Usage / RequestLog 是共享记录器（可为 nil）。
+	Usage      *usage.Recorder
 	RequestLog *reqlog.Recorder
 
-	// ProbeFile 模型输出上限探测结果文件（scripts/probe_max_tokens.py --panel-out
-	// 写入；空或文件不存在 = model_probes 端点返回空集，面板不显示任何实测标注）。
-	// 只读展示：网关不解析、不依赖其内容做任何路由/出站决策。
-	ProbeFile string
-
-	// OwnershipFile 账号归属表文件（多租户：谁拥有哪个账号，见 ownership.go）。
-	// 空 = 纯内存（测试）；不存在时退化为「全部无主」，不影响账号本身。
-	OwnershipFile string
-
-	// OwnershipBackend / OwnershipKey 账号归属表的 KV 后端（PostgreSQL）。非空时
-	// 库为权威，文件退化为首次导入源 + 断库兜底。见 ownershipStore.EnableBackend。
+	// OwnershipFile 账号归属表文件（多租户）。
+	OwnershipFile    string
 	OwnershipBackend kv.Backend
 	OwnershipKey     string
 
-	// OmniConfigPath 内置 OmniGate 引擎的配置文件（omnigate.json）路径与读写器
-	// （OmniGate 供应商配置页用）。LoadOmniConfig 返回解析后的供应商配置对象；
-	// SaveOmniConfig 完成「校验 → 落盘 → 进程内热重载」，返回需重启字段列表。
-	// 任一为 nil 时对应接口返回 501（OmniGate 未启用）。
+	// OmniConfigPath 引擎配置（omnigate.json）与热重载读写器。
 	OmniConfigPath string
 	LoadOmniConfig func() (any, error)
 	SaveOmniConfig func(raw []byte) (restartRequired []string, err error)
 
-	// LoadOutbound / SaveOutbound 出站代理配置（config.json 的 outbound 段）
-	// 读写器（OmniGate 页「出站代理」卡片用）。SaveOutbound 完成「合并 → 校验
-	// → 落盘 → 热应用」；出站代理全部热生效，返回的需重启列表恒为空。
-	// 任一为 nil 时对应接口返回 501。
+	// LoadOutbound / SaveOutbound 出站代理配置（config.json 的 outbound 段）。
 	LoadOutbound func() (any, error)
 	SaveOutbound func(raw []byte) (restartRequired []string, err error)
 
-	// LoadRealmRouting / SaveRealmRouting 域路由配置（config.json 的 realm_routing
-	// 段）读写器（「模型与档位」页「域优先级」卡片用）。SaveRealmRouting 完成
-	//「合并 → 校验 → 落盘 → 热更新同一 *RealmRouter」；全部热生效，需重启列表恒空。
-	// 任一为 nil 时对应接口返回 501。
-	LoadRealmRouting func() (any, error)
-	SaveRealmRouting func(raw []byte) (restartRequired []string, err error)
-
-	// PanelAuth 面板登录鉴权运行时（独立于网关 api_key）：账号密码校验、服务端
-	// 会话、失败限流。nil 时面板所有 /panel/api/* 一律 401（未注入 store 视为未
-	// 配置，绝不放行 api_key）。
-	// LoadPanelAuth/SavePanelAuth 读写 config.json 的 panel_auth 段（账号管理页用）；
-	// SavePanelAuth 完成「校验 → 落盘 → 热重建同一 *panelauth.Store」。任一为 nil
-	// 时账号管理接口返回 501。
+	// 面板登录鉴权运行时。
 	PanelAuth     *panelauth.Store
 	LoadPanelAuth func() (PanelAuthSection, error)
 	SavePanelAuth func(section PanelAuthSection) (restartRequired []string, err error)
 
-	// RegenerateKey 重新生成网关 api_key（管理员操作）：由 main 注入，完成
-	//「生成新 key → 合并落盘 → 热生效（含内置 OmniGate 复用的 api_keys）」，返回新 key。
-	// nil 时 regenerate_key 端点返回 501。
-	RegenerateKey func() (string, error)
-
-	// ExportOmniAccounts / ImportOmniAccounts OmniGate 供应商账号（state.json 的
-	// dyn_accounts 段）的导入导出（账号迁移用）。Export 返回
-	// {provider: [DynAccount...]} 的原始 JSON；Import 合并导入并热重建网关
-	//（导入即生效）。任一为 nil 时 OmniGate 段不参与迁移。
+	// ExportOmniAccounts / ImportOmniAccounts 引擎账号迁移。
 	ExportOmniAccounts func() (json.RawMessage, error)
 	ImportOmniAccounts func(raw json.RawMessage) (imported, skipped int, err error)
 
-	// 统一账号池（面板「账号池」视图聚合 WorkBuddy + OmniGate 全部账号）。
-	// OmniAccounts 返回归一化的各 provider 账号（includeBalance=true 时对支持
-	// 余额的 provider 实时查上游）；OmniCheckin/OmniRemove 为单账号运维；
-	// OmniCheckinAll 让「全部签到」也覆盖 OmniGate。任一为 nil 时对应能力跳过。
+	// 引擎运行时闭包（进程内直连，不经过 HTTP）。
 	OmniAccounts   func(includeBalance bool) (any, error)
 	OmniCheckin    func(provider, label string) (any, error)
 	OmniRemove     func(provider, label string) (any, error)
 	OmniCheckinAll func() (any, error)
-	// OmniModels 返回 OmniGate 汇总模型目录（与 /omni/v1/models 同源，含积分价）。
-	// 面板侧只读代理：匿名也能看模型与价格，但不需要、也不暴露网关 api_key。
-	// nil 时 /panel/api/omni/models 返回 501。
-	OmniModels func(ctx context.Context) (any, error)
-	// OmniQuota 查询某 OmniGate 供应商的 Go 套餐额度（opencode 专属，「额度」按钮）：
-	// 用配置的 go 密钥查官方 /v1/usage，返回掩码密钥 + 三个窗口的剩余百分比与重置
-	// 时间。明文密钥不出 provider 层。nil 时对应接口返回 501。
-	OmniQuota func(provider string) (any, error)
-	// OmniKeyHealth 上游密钥池健康状态（自动禁用 / 连击记账 / 自动清理倒计时）：
-	// 掩码形态只读数据，viewer 也能看。nil 时对应接口返回 501。
-	OmniKeyHealth func() (any, error)
-	// OmniLogin 校验 runable 类账号（服务端会话探测），返回账号身份与当前积分。
-	// 面板「浏览器登录」调用：runable 只支持 Google/Facebook 登录，会话是 httpOnly
-	// Cookie（网页读不到），只能由用户粘贴 session_token；nil 时对应接口返回 501。
-	OmniLogin func(provider, email, password, cookie string) (any, error)
-	// OmniAdmin 是进程内 OmniGate 的 HTTP 入口（同 /omni/ 挂载点）。面板的
-	// 「OmniGate 管理端点代理」（omni_admin_proxy.go）用它转发 raccoon/TRAE 的
-	// 授权/回调/账号列表/签到/移除，并注入网关 api_key。nil 时对应接口返回 501。
-	OmniAdmin http.Handler
+	OmniModels     func(ctx context.Context) (any, error)
+	OmniQuota      func(provider string) (any, error)
+	OmniKeyHealth  func() (any, error)
+	OmniLogin      func(provider, email, password, cookie string) (any, error)
+	OmniAdmin      http.Handler
+	// OmniProviderTypes 返回插件注册表的元数据（类型 / 字段 schema / 能力 / 动作）。
+	OmniProviderTypes func() any
 
-	// New API（QuantumNous/new-api）供应商的浏览器登录抓取与统一刷新。该站登录开了
-	// Cloudflare Turnstile，服务端直连密码登录会被拦，故账号只能靠「浏览器登录 +
-	// 控制台脚本回传」建立。任一为 nil 时对应接口返回 501。
-	//
-	//	OmniNewAPIAuthorize  登记一次性 state，返回 {state, signin_url}
-	//	OmniNewAPICapture    脚本回传鉴权包（payload 为原始 JSON 体）→ 落库账号
-	//	OmniNewAPICaptureStatus 轮询 state 是否仍在等待
-	//	OmniNewAPISetKey     更新某账号的聊天 API Key（sk-）
-	//	OmniRefresh          统一刷新：轮换某 provider/账号的会话 access_token
+	// New API 浏览器登录抓取与统一刷新。
 	OmniNewAPIAuthorize     func(provider, label, apiKey string) (any, error)
 	OmniNewAPICapture       func(state string, payload json.RawMessage) (any, error)
 	OmniNewAPICaptureStatus func(state string) (bool, error)
@@ -169,92 +88,33 @@ type Config struct {
 	OmniRefresh             func(provider, label string) (any, error)
 }
 
-// Panel 管理面板 handler。挂载方式：外层 mux Handle("/panel/", panel)，
-// 本 mux 的 pattern 均带 /panel 前缀（外层不做前缀剥离）。
+// Panel 管理面板 handler。挂载方式：外层 mux Handle("/panel/", panel)。
 type Panel struct {
 	cfg     Config
 	mux     *http.ServeMux
 	started time.Time
 	logs    *Ring
 
-	// logins 进行中的 OAuth 设备授权会话（state → 会话信息）。
-	// poll 成功或超时（loginTTL）后剔除；面板常驻进程，容量天然有界。
-	loginMu sync.Mutex
-	logins  map[string]loginSession
-
-	// taskMu/taskLocks 一键完成任务的 per-account 互斥：同一账号的任务动作
-	// （单任务 / 全量）同时只允许一条在跑。重复点击直接返回 409"仍在执行"，
-	// 而不是并发跑两遍浪费上游请求（动作虽幂等，expert 系每遍含 8 次真实对话）。
-	// 不同账号之间不互斥（并行照旧）。TryLock 语义，锁条目常驻（账号数有界）。
-	taskMu    sync.Mutex
-	taskLocks map[string]*sync.Mutex
-
-	// 任务中心执行队列（taskcenter.go）。
-	queueOnce sync.Once
-	q         *queueState
-
-	// ownership 账号归属（多租户）：谁拥有哪个账号，见 ownership.go。
 	ownership *ownershipStore
-	// regLimit 自助注册限流（同 IP 固定窗口计数）。
-	regLimit *regLimiter
+	regLimit  *regLimiter
 
-	// newapiClaims 记下「自动命名」抓取会话的发起人（见 omni_newapi.go）。回传端点
-	// 是公开的（脚本跨域 POST，带不上面板会话），所以归属只能在发起时按 state 记下、
-	// 回传成功后用真实账号名落标。
 	newapiClaimsMu sync.Mutex
 	newapiClaims   map[string]newapiClaim
-}
 
-// tryLockAccount 尝试锁定账号的任务执行；已在执行返回 false。
-func (p *Panel) tryLockAccount(uid string) bool {
-	p.taskMu.Lock()
-	if p.taskLocks == nil {
-		p.taskLocks = make(map[string]*sync.Mutex)
-	}
-	mu := p.taskLocks[uid]
-	if mu == nil {
-		mu = &sync.Mutex{}
-		p.taskLocks[uid] = mu
-	}
-	p.taskMu.Unlock()
-	return mu.TryLock()
-}
-
-// unlockAccount 释放账号任务锁（与 tryLockAccount 配对）。
-func (p *Panel) unlockAccount(uid string) {
-	p.taskMu.Lock()
-	mu := p.taskLocks[uid]
-	p.taskMu.Unlock()
-	if mu != nil {
-		mu.Unlock()
-	}
-}
-
-// loginTTL 授权 URL 的最长有效期：超时的 state 直接回收，
-// 防止"开了添加账号弹窗就走开"的会话永久滞留。
-const loginTTL = 15 * time.Minute
-
-// loginSession 进行中的 OAuth 会话：创建时刻 + realm（cn/global，用于落盘与端点切换）。
-type loginSession struct {
-	created time.Time
-	realm   string // "cn" / "global"，缺省 cn
+	// batchRunning 防止重复点击「全部签到」并发打上游。
+	batchRunning atomic.Bool
 }
 
 // New 构建面板。
 func New(cfg Config) *Panel {
-	if cfg.RedisMode == "" {
-		cfg.RedisMode = "noop"
-	}
 	p := &Panel{
 		cfg:       cfg,
 		mux:       http.NewServeMux(),
 		started:   time.Now(),
 		logs:      NewRing(500),
-		logins:    map[string]loginSession{},
 		ownership: newOwnershipStore(cfg.OwnershipFile),
 		regLimit:  newRegLimiter(5, time.Hour),
 	}
-	// 归属表可选落库：库为权威，文件仅首次导入 + 断库兜底。
 	if err := p.ownership.EnableBackend(cfg.OwnershipBackend, cfg.OwnershipKey); err != nil {
 		log.Printf("panel: 归属表启用 PostgreSQL 后端失败，回落文件: %v", err)
 	}
@@ -262,147 +122,85 @@ func New(cfg Config) *Panel {
 	return p
 }
 
-// Logs 返回日志环形缓冲（main 经 MultiWriter 镜像 log 与 chat 表格日志进来）。
+// Logs 返回日志环形缓冲（main 经 MultiWriter 镜像 log 进来）。
 func (p *Panel) Logs() *Ring { return p.logs }
 
 func (p *Panel) routes() {
+	// SPA 与静态资源。
 	p.mux.HandleFunc("GET /panel/{$}", p.index)
-	p.mux.HandleFunc("GET /panel/app.js", p.appScript)
-	// 统一设计系统样式表（面板唯一页面）。
 	p.mux.HandleFunc("GET /panel/theme.css", p.themeStyle)
-	// 旧的 OmniGate 独立子页已并入主面板（供应商/出站代理/账号池统一视图）；
-	// 保留 URL 302 重定向，避免旧书签失效。
-	p.mux.HandleFunc("GET /panel/omni/{$}", p.omniRedirect)
+	p.mux.HandleFunc("GET /panel/js/", p.assets)
 
-	// 登录会话：GET 查询登录态（前端启动判定）、POST 登录、DELETE 登出。
-	// 这三个端点本身不鉴权（登录态未知），其余接口一律走 auth/admin/tenant。
+	// 会话与账号。
 	p.mux.HandleFunc("GET /panel/api/session", p.sessionState)
 	p.mux.HandleFunc("POST /panel/api/session", p.login)
 	p.mux.HandleFunc("DELETE /panel/api/session", p.logout)
-	// 自助注册（公开，同 IP 限流）：注册一个 user 角色账号并直接登录。
 	p.mux.HandleFunc("POST /panel/api/register", p.register)
-	// 已登录用户自助改密（任意角色）。
 	p.mux.HandleFunc("POST /panel/api/password", p.auth(p.changeOwnPassword))
-	// 账号管理（仅管理员）。
 	p.mux.HandleFunc("GET /panel/api/admin/users", p.admin(p.listPanelUsers))
 	p.mux.HandleFunc("POST /panel/api/admin/users", p.admin(p.savePanelUser))
 	p.mux.HandleFunc("POST /panel/api/admin/users/password", p.admin(p.resetPanelUserPassword))
 	p.mux.HandleFunc("POST /panel/api/admin/users/delete", p.admin(p.deletePanelUser))
-	// 自助注册开关（仅管理员）。
 	p.mux.HandleFunc("POST /panel/api/admin/registration", p.admin(p.setRegistration))
-	// 重新生成网关 api_key（仅管理员）：轮换密钥防泄漏被滥用。
 	p.mux.HandleFunc("POST /panel/api/regenerate_key", p.admin(p.regenerateKey))
 
-	// 平台配置类只读接口（admin / viewer）：即便脱敏也会暴露全部供应商与账号
-	// 标签，不属于「自己的账号」，普通 user 与未登录访客一律 403。
+	// 供应商配置与插件元数据。
 	p.mux.HandleFunc("GET /panel/api/omni/config", p.privileged(p.getOmniConfig))
-	// 管理员查看某供应商的完整密钥（明文，no-store，审计留痕）：「编辑供应商」
-	// 弹窗里的「查看完整」按钮专用。独立于上面的常驻脱敏 GET——明文只在管理员
-	// 显式点击时按供应商出门一次，不进入任何常驻回显。
+	p.mux.HandleFunc("POST /panel/api/omni/config", p.admin(p.saveOmniConfig))
+	p.mux.HandleFunc("GET /panel/api/omni/provider-types", p.read(p.providerTypes))
 	p.mux.HandleFunc("GET /panel/api/omni/provider-secret", p.admin(p.providerSecret))
-	// OpenCode Go 套餐额度（供应商行的「额度」按钮）：admin/viewer 只读，每次点击
-	// 触发真实上游查询（no-store），结果由 provider 层 60s 缓存兜底防连点。
 	p.mux.HandleFunc("GET /panel/api/omni/provider-quota", p.privileged(p.omniProviderQuota))
-	// 上游密钥池健康状态（自动禁用 / 连击 / 自动清理倒计时）：admin/viewer 只读，
-	// 掩码形态（无明文），no-store——一次额度失败就会改变禁用标记。
 	p.mux.HandleFunc("GET /panel/api/omni/key-health", p.privileged(p.omniKeyHealth))
 	p.mux.HandleFunc("GET /panel/api/omni/outbound", p.privileged(p.getOutbound))
-	p.mux.HandleFunc("GET /panel/api/realm_routing", p.privileged(p.getRealmRouting))
-	p.mux.HandleFunc("GET /panel/api/config", p.privileged(p.getConfig))
-
-	// 只读接口：默认公开（无需登录），但**按身份过滤账号明细**——admin/viewer
-	// 看全部，普通 user 只看自己拥有的账号，未登录访客只看到匿名统计（账号明细
-	// 为空）。凭证由 maskSecrets 脱敏，匿名请求额外抹掉网关 api_key/api_keys。
-	p.mux.HandleFunc("GET /panel/api/omni/accounts", p.read(p.omniAccounts))
-	// OmniGate 模型目录（含积分价）：面板侧只读代理，匿名可用，不暴露网关 api_key。
-	p.mux.HandleFunc("GET /panel/api/omni/models", p.read(p.omniModels))
-	p.mux.HandleFunc("GET /panel/api/overview", p.read(p.overview))
-	p.mux.HandleFunc("GET /panel/api/logs", p.read(p.logsHandler))
-	p.mux.HandleFunc("GET /panel/api/request_metrics", p.read(p.requestMetrics))
-	p.mux.HandleFunc("GET /panel/api/request_logs", p.read(p.requestLogs))
-	p.mux.HandleFunc("GET /panel/api/models", p.read(p.models))
-	p.mux.HandleFunc("GET /panel/api/accounts/{uid}/tasks", p.read(p.accountTasks))
-	p.mux.HandleFunc("GET /panel/api/tasks/queue", p.read(p.tasksQueueStatus))
-	p.mux.HandleFunc("GET /panel/api/school/vouchers", p.read(p.schoolVouchers))
-	p.mux.HandleFunc("GET /panel/api/packages", p.read(p.packages))
-	p.mux.HandleFunc("GET /panel/api/usage", p.read(p.usage))
-	// 余额快照历史（「近 N 小时消耗」/用量对账）：与 usage 同窗口口径，只读。
-	p.mux.HandleFunc("GET /panel/api/credits/history", p.read(p.creditsHistory))
-	p.mux.HandleFunc("GET /panel/api/model_probes", p.read(p.modelProbes))
-	// 添加账号的 OAuth 轮询：登录即可（普通用户也能给自己加号）。
-	p.mux.HandleFunc("GET /panel/api/login/poll", p.tenant(p.loginPoll))
-	p.mux.HandleFunc("GET /panel/api/login/regions", p.tenant(p.loginRegions))
-
-	// 平台配置写操作（仅管理员）：改配置、出站、域路由。
-	p.mux.HandleFunc("POST /panel/api/omni/config", p.admin(p.saveOmniConfig))
 	p.mux.HandleFunc("POST /panel/api/omni/outbound", p.admin(p.saveOutbound))
-	p.mux.HandleFunc("POST /panel/api/realm_routing", p.admin(p.saveRealmRouting))
+	p.mux.HandleFunc("GET /panel/api/provider-types", p.read(p.providerTypes))
 
-	// 账号级写操作（admin 全量 / user 仅自己的账号，归属校验在 handler 内）：
-	// 添加、运维、移除账号。批量入口对 user 只作用于自己的账号。
+	// 账号（admin 全量 / user 仅自己的账号）。
+	p.mux.HandleFunc("GET /panel/api/omni/accounts", p.read(p.omniAccounts))
 	p.mux.HandleFunc("POST /panel/api/omni/account/checkin", p.tenant(p.omniAccountCheckin))
 	p.mux.HandleFunc("POST /panel/api/omni/account/remove", p.tenant(p.omniAccountRemove))
 	p.mux.HandleFunc("POST /panel/api/omni/account/add", p.tenant(p.omniAccountAdd))
 	p.mux.HandleFunc("POST /panel/api/omni/account/login", p.tenant(p.omniAccountLogin))
-	// New API（justwoker 等）浏览器登录抓取：authorize/status 需登录，capture 公开
-	// （靠一次性 state 校验，脚本跑在 New API 站点 origin 上，走 no-cors 回传）。
+	p.mux.HandleFunc("POST /panel/api/omni/account/refresh", p.tenant(p.omniAccountRefresh))
 	p.mux.HandleFunc("POST /panel/api/omni/newapi/authorize", p.tenant(p.omniNewAPIAuthorize))
 	p.mux.HandleFunc("GET /panel/api/omni/newapi/status", p.tenant(p.omniNewAPICaptureStatus))
 	p.mux.HandleFunc("POST /panel/api/omni/newapi/capture", p.omniNewAPICapture)
 	p.mux.HandleFunc("OPTIONS /panel/api/omni/newapi/capture", p.omniNewAPICapturePreflight)
-	// 统一刷新：轮换 New API 账号的会话 access_token（单账号 / 整 provider）。
-	p.mux.HandleFunc("POST /panel/api/omni/account/refresh", p.tenant(p.omniAccountRefresh))
-	// 更新某账号的聊天 API Key（sk-）。
 	p.mux.HandleFunc("POST /panel/api/omni/newapi/setkey", p.tenant(p.omniNewAPISetKey))
-	// OmniGate 登录类管理端点代理（raccoon/trae 的 authorize/callback/token/
-	// accounts/checkin/remove）：面板注入 api_key 转发到进程内 OmniGate，并按归属
-	// 打标/过滤/校验。前端不再直连 /omni/admin/*，普通 user 无需持有 api_key。
 	p.mux.HandleFunc("/panel/api/omni/admin/raccoon/", p.tenant(p.omniAdminProxy))
 	p.mux.HandleFunc("/panel/api/omni/admin/trae/", p.tenant(p.omniAdminProxy))
 	p.mux.HandleFunc("/panel/api/omni/admin/geminiweb/", p.tenant(p.omniAdminProxy))
-	// 全局「模型名 → 实际模型」映射（model_mapping.py）：平台级设置，读取需登录、
-	// 写入仅管理员。见 omni_modelmap.go。
+
+	// 模型与路由。
+	p.mux.HandleFunc("GET /panel/api/omni/models", p.read(p.omniModels))
+	p.mux.HandleFunc("GET /panel/api/models", p.read(p.omniModels))
 	p.mux.HandleFunc("GET /panel/api/omni/model-mapping", p.privileged(p.omniModelMapProxy))
 	p.mux.HandleFunc("POST /panel/api/omni/model-mapping", p.admin(p.omniModelMapProxy))
 	p.mux.HandleFunc("DELETE /panel/api/omni/model-mapping/", p.admin(p.omniModelMapProxy))
-	p.mux.HandleFunc("POST /panel/api/login/start", p.tenant(p.loginStart))
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/revive", p.tenant(p.accountRevive))
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/disable", p.tenant(p.accountDisable))
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/pause", p.tenant(p.accountPause))
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/resume", p.tenant(p.accountResume))
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/checkin", p.tenant(p.accountCheckin))
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/balance", p.tenant(p.accountBalance))
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/remove", p.tenant(p.accountRemove))
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/tasks/accept", p.tenant(p.accountTaskAccept))
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/tasks/accept_all", p.tenant(p.taskAcceptAll))
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/tasks/claim", p.tenant(p.accountTaskClaim))
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/tasks/auto", p.tenant(p.accountTaskAuto))
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/tasks/auto_all", p.tenant(p.accountTaskAutoAll))
 
-	// 迁移 / 批量 / 全局：仅管理员（跨账号或含全部凭证，不属于「自己的账号」）。
-	p.mux.HandleFunc("POST /panel/api/import/cockpit", p.admin(p.importCockpit))
+	// 总览 / 用量 / 请求 / 日志。
+	p.mux.HandleFunc("GET /panel/api/overview", p.read(p.overview))
+	p.mux.HandleFunc("GET /panel/api/logs", p.read(p.logsHandler))
+	p.mux.HandleFunc("GET /panel/api/request_metrics", p.read(p.requestMetrics))
+	p.mux.HandleFunc("GET /panel/api/request_logs", p.read(p.requestLogs))
+	p.mux.HandleFunc("GET /panel/api/usage", p.read(p.usage))
+	p.mux.HandleFunc("POST /panel/api/usage/save", p.admin(p.usageSave))
+
+	// 批量与迁移。
+	p.mux.HandleFunc("POST /panel/api/checkin_all", p.tenant(p.checkinAll))
 	p.mux.HandleFunc("GET /panel/api/accounts/export", p.admin(p.exportAccounts))
 	p.mux.HandleFunc("POST /panel/api/accounts/import", p.admin(p.importAccounts))
-	p.mux.HandleFunc("POST /panel/api/tasks/scan_all", p.admin(p.tasksScanAll))
-	p.mux.HandleFunc("POST /panel/api/tasks/run_queue", p.admin(p.tasksRunQueue))
-	p.mux.HandleFunc("POST /panel/api/checkin_all", p.tenant(p.checkinAll))
-	p.mux.HandleFunc("POST /panel/api/travel_all", p.tenant(p.travelAll))
-	p.mux.HandleFunc("POST /panel/api/activity_all", p.tenant(p.activityAll))
-	p.mux.HandleFunc("POST /panel/api/keepalive_all", p.tenant(p.keepaliveAll))
-	p.mux.HandleFunc("POST /panel/api/balance_all", p.tenant(p.balanceAll))
-	p.mux.HandleFunc("POST /panel/api/usage/save", p.admin(p.usageSave))
+
+	// 系统配置。
+	p.mux.HandleFunc("GET /panel/api/config", p.privileged(p.getConfig))
 	p.mux.HandleFunc("POST /panel/api/config", p.admin(p.saveConfig))
 }
 
-// ServeHTTP 统一入口：先写安全响应头再分发，保证页面、静态资源、API
-// 与 401 错误响应全都带上（API 也可能在浏览器里被直接打开）。
+// ServeHTTP 统一入口：先写安全响应头再分发。
 func (p *Panel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	setSecurityHeaders(w)
 	p.mux.ServeHTTP(w, r)
 }
-
-// withAuth 已改造为账号会话鉴权：见 panel_auth.go 的 auth（任意登录用户）与
-// admin（管理员）中间件。网关 api_key 不再参与面板鉴权。
 
 // apiKey 当前生效密钥（Live 优先，回落静态字段）。
 func (p *Panel) apiKey() string {
@@ -412,88 +210,177 @@ func (p *Panel) apiKey() string {
 	return p.cfg.APIKey
 }
 
-// expiringSoonWindow 返回调度器当前生效的快过期路由窗口；测试面板无调度器时返回 0。
-func (p *Panel) expiringSoonWindow() time.Duration {
-	if p.cfg.Scheduler == nil {
-		return 0
+// providerTypes 返回插件注册表的 UI 元数据。
+func (p *Panel) providerTypes(w http.ResponseWriter, r *http.Request) {
+	types := any([]any{})
+	if p.cfg.OmniProviderTypes != nil {
+		types = p.cfg.OmniProviderTypes()
 	}
-	return p.cfg.Scheduler.ExpiringSoonWindow()
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "types": types})
 }
 
 // ---------------------------------------------------------------------------
-// 只读接口
+// 总览
 // ---------------------------------------------------------------------------
 
-// overview 总览：池计数 + 每账号状态 + 面板元信息。
-//
-// 计数（total/healthy/...）对所有人都是全局口径（= 「别人的匿名统计」）；账号
-// 明细按身份过滤：admin/viewer 全部，普通 user 只返回自己拥有的账号，未登录
-// 访客返回空数组（只看得到汇总数字）。
+type omniAccountRow struct {
+	Label          string `json:"label"`
+	HasToken       *bool  `json:"has_token,omitempty"`
+	AuthInvalid    bool   `json:"auth_invalid,omitempty"`
+	CoolingUntil   any    `json:"cooling_until,omitempty"`
+	SessionError   string `json:"session_error,omitempty"`
+	SessionExpired any    `json:"session_expired_at,omitempty"`
+	Credits        any    `json:"credits,omitempty"`
+}
+
+type omniProviderRow struct {
+	Name     string           `json:"name"`
+	Type     string           `json:"type"`
+	Accounts []omniAccountRow `json:"accounts"`
+}
+
 func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
-	owned, all := p.ownFilter(r)
-	accounts := make([]pool.Status, 0, 8)
-	for _, st := range p.cfg.Pool.List() {
-		if all || owned[wbOwnerKey(st.UID)] {
-			accounts = append(accounts, st)
-		}
-	}
-	writeJSON(w, http.StatusOK, p.overviewBody(accounts))
-}
-
-// overviewBody 组装 /panel/api/overview 的响应体（拆出来是为了让 credits_net
-// 这类「按可见账号过滤」的附加字段有个明确的落点）。
-func (p *Panel) overviewBody(accounts []pool.Status) map[string]any {
-	// 用 WithPaused 而不是 CountsDetailed：后者把暂停号并进 disabled（/status 的
-	// 「不可用」口径），而概况卡片要分开展示（issue #125）。
-	total, healthy, cooling, disabled, paused, inFlightFull := p.cfg.Pool.CountsDetailedWithPaused()
-	sticky := 0
-	if p.cfg.StickyCount != nil {
-		sticky = p.cfg.StickyCount()
-	}
 	body := map[string]any{
-		"version":         p.cfg.Version,
-		"uptime_sec":      int(time.Since(p.started).Seconds()),
-		"auth_required":   p.apiKey() != "",
-		"redis_mode":      p.cfg.RedisMode,
-		"sticky_sessions": sticky,
-		"total":           total,
-		"healthy":         healthy,
-		"cooling":         cooling,
-		"disabled":        disabled,
-		"paused":          paused,
-		"in_flight_full":  inFlightFull,
-		"accounts":        accounts,
-		// model_locks 模型级限流全清单（哪些模型不能用、锁了几个号、还要锁多久）：
-		// 与 accounts 的账号池视图互补，前端「模型锁池」表直接渲染。无锁时为 null。
-		"model_locks": p.cfg.Pool.ModelLockView(),
+		"version":       p.cfg.Version,
+		"uptime_sec":    int(time.Since(p.started).Seconds()),
+		"build":         panelBuild,
+		"auth_required": p.apiKey() != "",
 	}
-	// credits_net 余额快照历史的近 24h 净变化（负 = 掉了）：账号行据此直接标
-	// 「近24h −48」，与「积分构成」页的实时逐包查询互补——这里只读本地历史，
-	// 零上游开销，因此可以随每次轮询一起给。只对本次可见的账号返回（多租户），
-	// 且只含「算得出净变化」的账号——样本不足（刚重启）时宁可不给键，也不能给 0。
-	if p.cfg.History != nil {
-		// 只保留本次可见账号：user 不该看到别人的号有没有在掉分。
-		visibleUID := make(map[string]bool, len(accounts))
-		for _, st := range accounts {
-			visibleUID[st.UID] = true
-		}
-		net := map[string]credithist.Account{}
-		for _, a := range p.cfg.History.Snapshot(credithist.DefaultWindow, 0,
-			func(uid string) bool { return visibleUID[uid] }, time.Now()) {
-			// 只放「算得出净变化」的账号：样本不足时前端一律不显示（显示 0 会被读成
-			// 「没消耗」，而真相是「不知道」）。
-			if a.OK {
-				net[a.UID] = a
+	if p.cfg.OmniAccounts == nil {
+		writeJSON(w, http.StatusOK, body)
+		return
+	}
+	d, err := p.cfg.OmniAccounts(false)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, "list accounts: "+err.Error())
+		return
+	}
+	providers := decodeOmniProviders(d)
+	owned, all := p.ownFilter(r)
+	anon := !authed(r)
+
+	total, healthy, cooling, failed := 0, 0, 0, 0
+	rows := make([]map[string]any, 0, len(providers))
+	for _, prov := range providers {
+		ph, pc, pf := 0, 0, 0
+		for _, a := range prov.Accounts {
+			if !all && !owned[omniOwnerKey(prov.Name, a.Label)] {
+				continue
 			}
+			total++
+			if a.AuthInvalid || a.SessionError != "" {
+				failed++
+				pf++
+				continue
+			}
+			if isFutureTime(a.CoolingUntil) {
+				cooling++
+				pc++
+				continue
+			}
+			healthy++
+			ph++
 		}
-		body["credits_net"] = net
-		body["credits_net_window_sec"] = int64(credithist.DefaultWindow.Seconds())
+		if !anon {
+			rows = append(rows, map[string]any{
+				"name": prov.Name, "type": prov.Type,
+				"accounts": len(prov.Accounts), "healthy": ph,
+				"cooling": pc, "failed": pf,
+			})
+		}
 	}
-	return body
+	body["totals"] = map[string]any{
+		"accounts": total, "healthy": healthy,
+		"cooling": cooling, "failed": failed,
+	}
+	if !anon {
+		body["providers"] = rows
+	}
+	if cfg, err := p.loadOmniConfigMap(); err == nil {
+		if v, ok := cfg["default_provider"].(string); ok {
+			body["default_provider"] = v
+		}
+		if v, ok := cfg["default_model"].(string); ok {
+			body["default_model"] = v
+		}
+	}
+	storage := map[string]any{
+		"data_dir":    p.cfg.DataDir,
+		"config_path": p.cfg.ConfigPath,
+	}
+	if p.cfg.RequestLog != nil {
+		a := p.cfg.RequestLog.Snapshot().Archive
+		storage["request_archive_files"] = a.Files
+		storage["request_archive_bytes"] = a.Bytes
+		storage["dropped_writes"] = a.DroppedWrites
+		if a.Dir != "" {
+			storage["request_archive_dir"] = a.Dir
+		}
+	}
+	if p.cfg.DataDir != "" {
+		if fi, err := os.Stat(filepath.Join(p.cfg.DataDir, "usage.json")); err == nil {
+			storage["usage_file_bytes"] = fi.Size()
+		}
+	}
+	body["storage"] = storage
+	body["recent"] = []any{}
+	body["series"] = []any{}
+	writeJSON(w, http.StatusOK, body)
 }
 
-// logsHandler 返回日志环形缓冲快照（时间升序，含频道标记 chat/task/sys）。
-// 按身份过滤：普通用户只保留提到自己账号的行，未登录访客为空。
+func decodeOmniProviders(d any) []omniProviderRow {
+	raw, err := json.Marshal(d)
+	if err != nil {
+		return nil
+	}
+	var payload struct {
+		Providers []omniProviderRow `json:"providers"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return nil
+	}
+	return payload.Providers
+}
+
+func (p *Panel) loadOmniConfigMap() (map[string]any, error) {
+	if p.cfg.LoadOmniConfig == nil {
+		return nil, io.EOF
+	}
+	v, err := p.cfg.LoadOmniConfig()
+	if err != nil {
+		return nil, err
+	}
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return nil, err
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
+func isFutureTime(v any) bool {
+	switch t := v.(type) {
+	case string:
+		parsed, err := time.Parse(time.RFC3339, t)
+		return err == nil && parsed.After(time.Now())
+	case float64:
+		return int64(t) > time.Now().Unix()
+	case int64:
+		return t > time.Now().Unix()
+	case json.Number:
+		n, err := t.Int64()
+		return err == nil && n > time.Now().Unix()
+	}
+	return false
+}
+
+// ---------------------------------------------------------------------------
+// 日志 / 请求
+// ---------------------------------------------------------------------------
+
 func (p *Panel) logsHandler(w http.ResponseWriter, r *http.Request) {
 	entries := p.logs.Snapshot()
 	if visible, all := p.logLineVisible(r); !all {
@@ -508,8 +395,6 @@ func (p *Panel) logsHandler(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"entries": entries})
 }
 
-// requestMetrics 返回进程内请求指标、最近 100 条与归档状态。
-// Recent 按身份过滤；计数类指标是全局匿名统计（所有角色可见）。
 func (p *Panel) requestMetrics(w http.ResponseWriter, r *http.Request) {
 	if p.cfg.RequestLog == nil {
 		writeErr(w, http.StatusNotImplemented, "request logger not available")
@@ -528,10 +413,6 @@ func (p *Panel) requestMetrics(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, snap)
 }
 
-// requestLogs 从 JSONL 归档读取最近请求；limit 默认 200、最大 1000。
-// 支持按 outcome/account/model/provider/client_ip/user_agent 过滤（字符串字段为包含匹配）
-// 与 from/to 时间区间（闭区间，unix 秒或 RFC3339）——面板「请求记录」的筛选框、
-// 来源查询与「今天 / 自定义区间」都走这里。
 func (p *Panel) requestLogs(w http.ResponseWriter, r *http.Request) {
 	if p.cfg.RequestLog == nil {
 		writeErr(w, http.StatusNotImplemented, "request logger not available")
@@ -561,9 +442,6 @@ func (p *Panel) requestLogs(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	// 归属过滤：普通用户只保留自己账号服务的请求（admin/viewer 不过滤）。
-	// 归档读取按 limit 取「最近 N 条」，此处再过滤——极端情况下自己账号的请求
-	// 可能落在 N 条之外（前端可缩小筛选条件/调大 limit 再看）。
 	if visible, all := p.reqlogVisible(r); !all {
 		filtered := make([]reqlog.Event, 0, len(rows))
 		for _, e := range rows {
@@ -573,481 +451,16 @@ func (p *Panel) requestLogs(w http.ResponseWriter, r *http.Request) {
 		}
 		rows = filtered
 	}
-	// 空结果回 []（而不是 JSON null）：前端把 null 与"归档关闭"混在一起会走错分支，
-	// 显示成不满足筛选条件的最近请求。
 	if rows == nil {
 		rows = []reqlog.Event{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"entries": rows, "limit": limit})
 }
 
-// models 实时查询上游模型列表与 reasoning 实际档位（直连上游，不读路由层 1h 缓存）：
-// 回答"该模型到底支持哪几档思考"。顺带刷新 client 的 effort 降级能力缓存。
-// 与 /v1/models 同口径的双域输出：CN 域模型加 "cn:" 前缀、global 域加 "global:" 前缀
-// （gateway 路由协议，前端显示的 id 就是调用时要填的完整 model 值）。
-// 各域独立探测、独立容错：某域无可用账号则整域跳过；两域全空时才报错
-// （有错误明细回 502，一个账号都没有回 503）。
-func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
-	out := make([]map[string]any, 0)
-	var fetchErrs []string
-
-	// CN 域：有可用 CN 账号才查（此前无条件 Pool.Pick()+FetchModels——选中 global
-	// 账号时打 CN 端点必然失败，混合池表现为偶发 502，纯 global 池必炸）。
-	if uids := p.cfg.Pool.AvailableUIDsForRealm("cn"); len(uids) > 0 {
-		if acct := p.cfg.Pool.AuthByUID(uids[0]); acct != nil {
-			infos, err := p.cfg.Upstream.FetchModels(acct)
-			if err != nil {
-				fetchErrs = append(fetchErrs, "cn: "+err.Error())
-			} else {
-				for _, mi := range infos {
-					out = append(out, panelModelEntry("cn", mi, mi.Efforts, mi.DefaultEffort, p.cfg.Upstream.HTTP))
-				}
-			}
-		}
-	}
-
-	// global 域：路由开关开且有可用 global 账号才查（独立目录端点，FetchGlobalModelInfos；
-	// Upstream.GlobalEnabled 是探测侧同一道闸，与 main 装配的 config global.enabled 一致）。
-	if p.cfg.Upstream.GlobalEnabled {
-		if uids := p.cfg.Pool.AvailableUIDsForRealm("global"); len(uids) > 0 {
-			if acct := p.cfg.Pool.AuthByUID(uids[0]); acct != nil {
-				infos := p.cfg.Upstream.FetchGlobalModelInfos(acct)
-				if len(infos) == 0 {
-					fetchErrs = append(fetchErrs, "global: 上游未返回可用模型")
-				} else {
-					efforts, defaults := p.cfg.Upstream.GlobalEffortSnapshot()
-					for _, mi := range infos {
-						out = append(out, panelModelEntry("global", mi, efforts[mi.ID], defaults[mi.ID], p.cfg.Upstream.HTTP))
-					}
-				}
-			}
-		}
-	}
-
-	if len(out) == 0 {
-		if len(fetchErrs) > 0 {
-			writeErr(w, http.StatusBadGateway, "fetch models: "+strings.Join(fetchErrs, "; "))
-			return
-		}
-		writeErr(w, http.StatusServiceUnavailable, "没有可用账号：请先在面板添加账号再查询")
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "models": out})
-}
-
-// panelModelEntry 构造单个模型条目（两域共用）：id 是**裸模型名**（调用值，与 /v1/models
-// 一致，不含 cn:/global: 前缀），域由独立字段 realm 表达（面板显示域徽标/筛选）。
-// context_length / max_output_tokens 走四级查找链，effort 档位按 realm 域取
-// EffortListing（远端权威 ∪ 静态兜底表）——与 /v1/models 同一口径，两侧不再漂移。
-func panelModelEntry(realm string, mi upstream.ModelInfo, remoteEfforts []string, remoteDefault string, httpc *http.Client) map[string]any {
-	entry := map[string]any{
-		"id":                   mi.ID,
-		"realm":                realm,
-		"name":                 mi.Name,
-		"default_effort":       mi.DefaultEffort,
-		"supported_efforts":    mi.Efforts,
-		"can_disable_thinking": mi.CanDisableThinking,
-		"supports_reasoning":   mi.SupportsReasoning,
-		"supports_images":      mi.SupportsImages,
-		"credits":              mi.Credits,
-		"description":          mi.Description,
-		"tags":                 mi.Tags,
-		"vendor":               mi.Vendor,
-		"is_default":           mi.IsDefault,
-		"supports_tool_call":   mi.SupportsToolCall,
-		"only_reasoning":       mi.OnlyReasoning,
-		"reasoning_effort":     mi.ReasoningEffort,
-		"reasoning_summary":    mi.ReasoningSummary,
-	}
-	// 限时优惠（modelPromotions）：credits 是牌价，promo_* 是当前生效折扣
-	//（WorkBuddy 客户端显示的就是这个生效价）。前端据此显示「生效价+标签+划线牌价」。
-	if mi.PromoFactor != nil {
-		entry["promo_factor"] = *mi.PromoFactor
-		entry["promo_credits"] = mi.PromoCredits
-	}
-	if mi.PromoLabel != "" {
-		entry["promo_label"] = mi.PromoLabel
-	}
-	if mi.PromoNote != "" {
-		entry["promo_note"] = mi.PromoNote
-	}
-	if mi.MaxAllowedSize > 0 {
-		entry["max_allowed_size"] = mi.MaxAllowedSize
-	}
-	entry["context_length"] = upstream.ContextWindowListingV4(mi.ID, mi.ContextWindow, httpc)
-	if mo, ok := upstream.MaxOutputTokensListingV4(mi.ID, mi.MaxTokens, httpc); ok {
-		entry["max_output_tokens"] = mo
-	}
-	if efforts, def := upstream.EffortListing(realm, mi.ID, remoteEfforts, remoteDefault); efforts != nil {
-		entry["supported_efforts"] = efforts
-		if def != "" {
-			entry["default_effort"] = def
-		}
-	}
-	return entry
-}
-
-// modelProbes 返回模型输出上限的探测结果（scripts/probe_max_tokens.py --panel-out
-// 写入的契约文件），供前端在「模型与档位」的实测列做风险标注。
-//
-// 设计边界：纯只读透传——文件缺失/未配置返回空集（面板退化为无标注，与历史行为
-// 一致），网关自身不解析字段语义、不据此做任何路由或出站决策；上游改了限制后
-// 重跑一次工具、下次查询即刷新，无需重启网关。
-func (p *Panel) modelProbes(w http.ResponseWriter, r *http.Request) {
-	out := map[string]any{"probes": map[string]json.RawMessage{}, "exists": false}
-	if p.cfg.ProbeFile == "" {
-		writeJSON(w, http.StatusOK, out)
-		return
-	}
-	raw, err := os.ReadFile(p.cfg.ProbeFile)
-	if err != nil {
-		if os.IsNotExist(err) {
-			writeJSON(w, http.StatusOK, out)
-			return
-		}
-		writeErr(w, http.StatusInternalServerError, "read probes: "+err.Error())
-		return
-	}
-	var f struct {
-		Version int                        `json:"version"`
-		Probes  map[string]json.RawMessage `json:"probes"`
-	}
-	if err := json.Unmarshal(raw, &f); err != nil {
-		writeErr(w, http.StatusBadGateway, "parse probes: "+err.Error())
-		return
-	}
-	if f.Probes == nil {
-		f.Probes = map[string]json.RawMessage{}
-	}
-	out["probes"] = f.Probes
-	out["exists"] = true
-	if fi, err := os.Stat(p.cfg.ProbeFile); err == nil {
-		out["updated_at"] = fi.ModTime().Format(time.RFC3339)
-	}
-	writeJSON(w, http.StatusOK, out)
-}
-
 // ---------------------------------------------------------------------------
-// 账号运维
+// 用量
 // ---------------------------------------------------------------------------
 
-// accountRevive 手动复活：清禁用 + 冷却 + 熔断（运维口径无条件恢复）。
-func (p *Panel) accountRevive(w http.ResponseWriter, r *http.Request) {
-	uid := r.PathValue("uid")
-	if !p.requireWB(w, r, uid) {
-		return
-	}
-	if _, ok := p.cfg.Pool.Status(uid); !ok {
-		writeErr(w, http.StatusNotFound, "account not found")
-		return
-	}
-	p.cfg.Pool.Revive(uid)
-	log.Printf("panel: revive uid=%s（人工清除禁用/冷却/熔断）", uid)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
-}
-
-// accountDisable 人工禁用（不再参与选号，需面板 revive 或重登恢复）。
-func (p *Panel) accountDisable(w http.ResponseWriter, r *http.Request) {
-	uid := r.PathValue("uid")
-	if !p.requireWB(w, r, uid) {
-		return
-	}
-	if _, ok := p.cfg.Pool.Status(uid); !ok {
-		writeErr(w, http.StatusNotFound, "account not found")
-		return
-	}
-	p.cfg.Pool.Disable(uid, "manual disable (panel)")
-	log.Printf("panel: disable uid=%s（人工禁用）", uid)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
-}
-
-// accountPause 暂停选号：账号退出选号候选，但**照常参与**签到 / 活跃上报 / 保活 /
-// 余额刷新。与 disable 的区别：不写 reason、不清冷却域、不重置计数——账号是「临时
-// 让位」而非「判死」，点「恢复选号」即可立刻回到池子（无需重登或解冻）。
-func (p *Panel) accountPause(w http.ResponseWriter, r *http.Request) {
-	uid := r.PathValue("uid")
-	if !p.requireWB(w, r, uid) {
-		return
-	}
-	if !p.cfg.Pool.Pause(uid) {
-		writeErr(w, http.StatusNotFound, "account not found")
-		return
-	}
-	log.Printf("panel: pause uid=%s（暂停选号，保号任务照常）", uid)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
-}
-
-// accountResume 解除暂停选号（幂等，对未暂停账号为空操作）。
-func (p *Panel) accountResume(w http.ResponseWriter, r *http.Request) {
-	uid := r.PathValue("uid")
-	if !p.requireWB(w, r, uid) {
-		return
-	}
-	if !p.cfg.Pool.Resume(uid) {
-		writeErr(w, http.StatusNotFound, "account not found")
-		return
-	}
-	log.Printf("panel: resume uid=%s（恢复参与选号）", uid)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
-}
-
-// accountCheckin 单号签到：DailyCheckin + 余额查询解冻（已签到等业务错误不阻塞余额刷新），
-// 与 scheduler.RunCheckinNow 的单号语义一致。
-func (p *Panel) accountCheckin(w http.ResponseWriter, r *http.Request) {
-	uid := r.PathValue("uid")
-	if !p.requireWB(w, r, uid) {
-		return
-	}
-	a := p.cfg.Pool.AuthByUID(uid)
-	if a == nil {
-		writeErr(w, http.StatusNotFound, "account not found")
-		return
-	}
-	checkinMsg := ""
-	checkinDone := false
-	// 企业版无签到体系（上游 400 code 10001「企业账号不支持该操作」）：不发起该调用，
-	// 端点退化为「刷新额度」——企业额度走 get-enterprise-user-usage 口径（见 upstream）。
-	// 前端对企业号不渲染「签到」按钮；此处是 API 侧防御（外部脚本/旧缓存前端仍可能调用）。
-	if a.IsEnterprise() {
-		checkinMsg = "企业账号无签到体系（已跳过签到，仅刷新额度）"
-	} else if err := p.cfg.Upstream.DailyCheckin(a); err != nil {
-		checkinMsg = err.Error() // "今天已签到"等业务错误照常查余额
-		// 幂等拒绝同样是「今日已签」，标记后按钮显示「已签」。
-		if upstream.IsAlreadyCheckin(err) {
-			p.cfg.Pool.NoteCheckinDone(uid)
-			checkinDone = true
-		}
-	} else {
-		p.cfg.Pool.NoteCheckinDone(uid)
-		checkinDone = true
-	}
-	resp := map[string]any{"ok": true, "checkin_done": checkinDone}
-	if a.IsEnterprise() {
-		resp["enterprise"] = true
-	}
-	if checkinMsg != "" {
-		resp["checkin_message"] = checkinMsg
-	}
-	remain, total, expiring, earliestAt, earliestRemaining, err := p.cfg.Upstream.UserResourceDetailedWithExpiry(a, p.expiringSoonWindow())
-	if err != nil {
-		resp["balance_error"] = err.Error()
-		writeJSON(w, http.StatusOK, resp)
-		return
-	}
-	p.cfg.Pool.ReenableIfCredits(uid, remain, total)
-	p.cfg.Pool.SetCreditsDetailed(uid, remain, total, expiring, earliestAt, earliestRemaining)
-	resp["credits"] = remain
-	resp["credits_total"] = total
-	log.Printf("panel: checkin uid=%s msg=%q credits=%d/%d", uid, checkinMsg, remain, total)
-	writeJSON(w, http.StatusOK, resp)
-}
-
-// accountBalance 单号余额刷新：更新余额与到期快照，不触碰冷却状态。
-func (p *Panel) accountBalance(w http.ResponseWriter, r *http.Request) {
-	uid := r.PathValue("uid")
-	if !p.requireWB(w, r, uid) {
-		return
-	}
-	a := p.cfg.Pool.AuthByUID(uid)
-	if a == nil {
-		writeErr(w, http.StatusNotFound, "account not found")
-		return
-	}
-	remain, total, expiring, earliestAt, earliestRemaining, err := p.cfg.Upstream.UserResourceDetailedWithExpiry(a, p.expiringSoonWindow())
-	if err != nil {
-		writeErr(w, http.StatusBadGateway, "user resource: "+err.Error())
-		return
-	}
-	p.cfg.Pool.SetCreditsDetailed(uid, remain, total, expiring, earliestAt, earliestRemaining)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "credits": remain, "credits_total": total})
-}
-
-// accountRemove 移除账号：先出池（立即落盘 state），再删 auth 文件。
-func (p *Panel) accountRemove(w http.ResponseWriter, r *http.Request) {
-	uid := r.PathValue("uid")
-	if !p.requireWB(w, r, uid) {
-		return
-	}
-	a := p.cfg.Pool.Remove(uid)
-	if a == nil {
-		writeErr(w, http.StatusNotFound, "account not found")
-		return
-	}
-	p.ownership.Remove(wbOwnerKey(uid))
-	fileMsg := ""
-	if a.FilePath != "" {
-		if err := os.Remove(a.FilePath); err != nil && !os.IsNotExist(err) {
-			fileMsg = err.Error()
-		}
-	}
-	if fileMsg != "" {
-		log.Printf("panel: remove uid=%s（auth 文件删除失败: %s）", uid, fileMsg)
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "file_error": fileMsg})
-		return
-	}
-	log.Printf("panel: remove uid=%s（已出池并删除凭证文件）", uid)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
-}
-
-// ---------------------------------------------------------------------------
-// 批量任务
-// ---------------------------------------------------------------------------
-
-// checkinAll 手动触发签到（异步执行，进度看日志区/账号状态变化）。
-// 覆盖两个来源：WorkBuddy 池（含猫猫旅行）+ OmniGate 各 raccoon 供应商。
-// 多租户：普通用户只作用于自己名下的账号（WorkBuddy 按 uid 过滤，OmniGate 逐个
-// 自己的账号签到）；管理员为全量。
-func (p *Panel) checkinAll(w http.ResponseWriter, r *http.Request) {
-	if p.cfg.Scheduler == nil && p.cfg.OmniCheckinAll == nil && p.cfg.OmniCheckin == nil {
-		writeErr(w, http.StatusNotImplemented, "scheduler not available")
-		return
-	}
-	allow := p.wbAllow(r)
-	if p.cfg.Scheduler != nil {
-		go p.cfg.Scheduler.RunCheckinNowFiltered(allow)
-		log.Printf("panel: 手动签到已触发（WorkBuddy，含猫猫旅行；范围=%s）", scopeDesc(r))
-	}
-	if allow == nil {
-		if p.cfg.OmniCheckinAll != nil {
-			go func() {
-				if _, err := p.cfg.OmniCheckinAll(); err != nil {
-					log.Printf("panel: OmniGate 全量签到失败: %v", err)
-				} else {
-					log.Printf("panel: OmniGate 全量签到已完成")
-				}
-			}()
-		}
-	} else if p.cfg.OmniCheckin != nil {
-		accts := p.ownedOmniAccounts(r)
-		go func() {
-			for _, ac := range accts {
-				if _, err := p.cfg.OmniCheckin(ac[0], ac[1]); err != nil {
-					log.Printf("panel: OmniGate 签到 %s/%s 失败: %v", ac[0], ac[1], err)
-				}
-			}
-			log.Printf("panel: OmniGate 个人签到完成（%d 个账号）", len(accts))
-		}()
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "started": true})
-}
-
-// travelAll 手动触发旅行巡检（异步执行）。普通用户只作用于自己的账号。
-func (p *Panel) travelAll(w http.ResponseWriter, r *http.Request) {
-	if p.cfg.Scheduler == nil {
-		writeErr(w, http.StatusNotImplemented, "scheduler not available")
-		return
-	}
-	go p.cfg.Scheduler.RunTravelNowFiltered(p.wbAllow(r))
-	log.Printf("panel: 手动旅行巡检已触发（范围=%s）", scopeDesc(r))
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "started": true})
-}
-
-// activityAll 手动触发活跃上报（异步执行；点亮连登 + 解锁领养前置）。
-// 普通用户只作用于自己的账号。
-func (p *Panel) activityAll(w http.ResponseWriter, r *http.Request) {
-	if p.cfg.Scheduler == nil {
-		writeErr(w, http.StatusNotImplemented, "scheduler not available")
-		return
-	}
-	go p.cfg.Scheduler.RunActivityNowFiltered(p.wbAllow(r))
-	log.Printf("panel: 手动活跃上报已触发（范围=%s）", scopeDesc(r))
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "started": true})
-}
-
-// keepaliveAll 手动触发 token 保活（异步执行）。普通用户只作用于自己的账号。
-func (p *Panel) keepaliveAll(w http.ResponseWriter, r *http.Request) {
-	if p.cfg.Scheduler == nil {
-		writeErr(w, http.StatusNotImplemented, "scheduler not available")
-		return
-	}
-	go p.cfg.Scheduler.RunKeepaliveNowFiltered(p.wbAllow(r))
-	log.Printf("panel: 手动保活已触发（范围=%s）", scopeDesc(r))
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "started": true})
-}
-
-// balanceAll 手动全量刷新余额：并发查上游、写回池内 credits（含解冻语义），
-// 完成后返回——面板紧接着拉 overview 即是最新值。账号量小（个位数），
-// 同步等待（上限受短 RPC 超时约束）比"触发后盲刷"体验更确定。
-func (p *Panel) balanceAll(w http.ResponseWriter, r *http.Request) {
-	if p.cfg.Scheduler == nil {
-		writeErr(w, http.StatusNotImplemented, "scheduler not available")
-		return
-	}
-	allow := p.wbAllow(r)
-	p.cfg.Scheduler.RunBalanceRefreshNowFiltered(allow)
-	p.syncNicknames(allow)
-	log.Printf("panel: 手动余额刷新完成（范围=%s）", scopeDesc(r))
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "accounts": p.visibleWB(r)})
-}
-
-// syncNicknames 手动刷新时的昵称同步（issue #94：上游改名免重登）。
-// 只在面板手动「刷新」路径调用——后台余额定时器不触发（用户明确要求资料接口
-// 仅手动触达）。逐号拉 /console/account，只取 nickname（手机号等敏感字段在
-// upstream.FetchAccountProfile 内即被丢弃）；单号失败静默跳过，不打断余额刷新
-// 的既有结果。allow != nil 时只同步 allow(uid)==true 的账号（多租户）。
-func (p *Panel) syncNicknames(allow func(uid string) bool) {
-	type job struct {
-		uid string
-		a   *auth.Auth
-	}
-	var jobs []job
-	for _, st := range p.cfg.Pool.List() {
-		if allow != nil && !allow(st.UID) {
-			continue
-		}
-		if st.Disabled {
-			continue
-		}
-		if a := p.cfg.Pool.AuthByUID(st.UID); a != nil && a.AccessTokenValue() != "" {
-			jobs = append(jobs, job{uid: st.UID, a: a})
-		}
-	}
-	if len(jobs) == 0 {
-		return
-	}
-	var (
-		mu      sync.Mutex
-		updated int
-		failed  int
-		sem     = make(chan struct{}, 3)
-		wg      sync.WaitGroup
-	)
-	for _, j := range jobs {
-		wg.Add(1)
-		go func(j job) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			nick, err := p.cfg.Upstream.FetchAccountProfile(j.a)
-			if err != nil {
-				mu.Lock()
-				failed++
-				mu.Unlock()
-				return
-			}
-			if p.cfg.Pool.SetNickname(j.uid, nick) {
-				mu.Lock()
-				updated++
-				mu.Unlock()
-			}
-		}(j)
-	}
-	wg.Wait()
-	if updated > 0 || failed > 0 {
-		log.Printf("panel: 昵称同步：更新 %d 个，失败 %d 个（未变化不计数）", updated, failed)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// helpers
-// ---------------------------------------------------------------------------
-
-// usage 返回逐请求用量聚合。统计窗口三选一：
-//   - from/to（unix 秒）：显式区间，用于「今天」与「自定义」——区间由浏览器按
-//     本地时区算好再发，服务端时区与浏览器不一致时「今天」才不会被算错；
-//   - hours：滚动窗口（默认 72，上限 1440=60 天），卡片汇总/按域/按账号/按模型/
-//     时序**全部**按该窗口统计；显式 hours=0 表示全部历史（含 90 天前折叠出的日桶）；
-//   - 都不给：等同于 hours=72（保持旧调用方行为）。
 func (p *Panel) usage(w http.ResponseWriter, r *http.Request) {
 	if p.cfg.Usage == nil {
 		writeErr(w, http.StatusNotImplemented, "usage recorder not available")
@@ -1068,160 +481,31 @@ func (p *Panel) usage(w http.ResponseWriter, r *http.Request) {
 			win.Hours = 1440
 		}
 	}
-	// 昵称仅用于展示，取自池快照（不含任何凭证）。
-	nicks := map[string]string{}
-	for _, s := range p.cfg.Pool.List() {
-		if s.Nickname != "" {
-			nicks[s.UID] = s.Nickname
-		}
-	}
-	var currentRate func(realm, model string) string
-	if p.cfg.Upstream != nil {
-		currentRate = p.cfg.Upstream.ModelRate
-	}
-	// 归属过滤：普通用户只看自己账号的用量（在分片层面过滤，汇总口径一致）；
-	// admin/viewer 不过滤；未登录访客的空集合 → 空用量。
+	// 普通用户只看自己账号的用量。用量桶只带账号 label，不带 provider：
+	// 用归属键的 label 部分匹配（同 label 跨供应商时略宽，但不会泄露别人的明细）。
 	owned, all := p.ownFilter(r)
 	var allowUID func(uid string) bool
 	if !all {
-		allowUID = func(uid string) bool { return owned[wbOwnerKey(uid)] }
+		labels := map[string]bool{}
+		for k := range owned {
+			if _, label, ok := strings.Cut(k, "/"); ok {
+				labels[label] = true
+			}
+		}
+		allowUID = func(uid string) bool { return labels[uid] }
 	}
-	writeJSON(w, http.StatusOK, p.cfg.Usage.SnapshotWindowFiltered(win, nicks, currentRate, allowUID))
+	writeJSON(w, http.StatusOK, p.cfg.Usage.SnapshotWindowFiltered(win, nil, nil, allowUID))
 }
 
-// creditHistoryPoints 余额历史序列的降采样点数（近 24h 约每 40 分钟一根柱）。
-// 只要够看出「什么时候掉的、掉了多少」，不必把 300 个原始采样点全发给浏览器。
-const creditHistoryPoints = 36
-
-// creditsHistory 返回余额快照历史（「近 N 小时消耗」与用量对账的数据源）。
-//
-// 窗口口径与 /panel/api/usage 的 hours **逐位一致**（[当前整点-(N-1)h, now]），
-// 前端用同一个 hours 同时拉两份数据，逐账号对账时两侧区间才完全重合。响应里的
-// hours 是**实际生效**的小时数（「全部历史」/ 超过保留期一律收敛到保留期小时数），
-// 前端拿它去拉同口径的用量——不能回请求值，否则两侧又错开了。
-//
-// 与用量页不同，历史是采样点而不是小时桶：请求窗口超过保留期（26h）时只能给出
-// 保留期内那一段，响应里每行的 span_sec / from / to 就是**实际**覆盖区间，
-// 前端据此如实标注「近 3.2h」，不假装成 24h。
-// 归属过滤同 overview：普通用户只看自己账号，admin/viewer 看全部，未登录为空。
-func (p *Panel) creditsHistory(w http.ResponseWriter, r *http.Request) {
-	if p.cfg.History == nil {
-		writeErr(w, http.StatusNotImplemented, "credit history not available")
+func (p *Panel) usageSave(w http.ResponseWriter, r *http.Request) {
+	if p.cfg.Usage == nil {
+		writeErr(w, http.StatusNotImplemented, "usage recorder not available")
 		return
 	}
-	q := r.URL.Query()
-	now := time.Now()
-	from := parseTimeParam(q.Get("from"))
-	to := parseTimeParam(q.Get("to"))
-	if !to.IsZero() {
-		now = to
-	}
-	// 窗口口径必须与 /panel/api/usage 的 hours 口径**逐位一致**：
-	//   hours=N → [当前整点-(N-1)h, now]
-	// 用量按「桶起点落在窗口内」筛桶，余额按采样点筛。若这里从 now-Nh 起算，两侧起点
-	// 就差小半桶——热模型（gpt-6.1-sol）一小时约 90 分，足以把对账结论从「对得上」
-	// 翻成「积分过期」。对齐整点后两侧起止完全重合，容差只需覆盖采样间隔。
-	const maxHours = int(credithist.Retention / time.Hour)
-	hours := int(credithist.DefaultWindow / time.Hour)
-	window := credithist.DefaultWindow
-	explicit := false
-	switch {
-	case !from.IsZero() && !to.IsZero() && to.After(from):
-		// 显式区间：按调用方给的边界（调用方负责对齐整点，见 usage.Window 的约定）。
-		explicit = true
-		window = to.Sub(from)
-		hours = int(window / time.Hour)
-	case from.IsZero() && to.IsZero():
-		if v := q.Get("hours"); v != "" {
-			if n, err := strconv.Atoi(v); err == nil {
-				hours = n
-			}
-		}
-		// hours<=0 = 全部历史：余额历史只留 Retention，能给的只有保留期那一段。
-		if hours <= 0 || hours > maxHours {
-			hours = maxHours
-		}
-		window = now.Sub(usage.TruncateHour(now).Add(-time.Duration(hours-1) * time.Hour))
-	}
-	if window <= 0 || window > credithist.Retention {
-		// 超保留期：窗口收敛到保留期。显式区间（from/to）的 hours 是按原窗口算出来的，
-		// 必须跟着重算——否则响应里 hours 比 window_sec 大，前端拿这个 hours 去拉同口径
-		// 用量就会拉到比余额历史更长的窗口，差额立刻变成「积分过期」的假警报。
-		window = credithist.Retention
-		if explicit {
-			hours = int(window / time.Hour)
-		}
-	}
-	owned, all := p.ownFilter(r)
-	var allow func(uid string) bool
-	if !all {
-		allow = func(uid string) bool { return owned[wbOwnerKey(uid)] }
-	}
-	snap := p.cfg.History.Snapshot(window, creditHistoryPoints, allow, now)
-	// 采样点是 5 分钟粒度、用量是小时桶：两侧必须覆盖同一批整点桶才对得上。能对齐的
-	// 桶数由最早的采样点决定（窗口锚在当前整点），不够就收窄——否则刚上线时会拿 26h
-	// 的用量去比 25 分钟的余额变化，差额纯属幻觉。hours=0 表示连一个整点桶都覆盖不了，
-	// 前端据此只展示余额侧、不做对账。
-	if !explicit {
-		if n := alignedHours(snap, now); n < hours {
-			hours = n
-			if n >= 1 {
-				window = now.Sub(usage.TruncateHour(now).Add(-time.Duration(n-1) * time.Hour))
-				snap = p.cfg.History.Snapshot(window, creditHistoryPoints, allow, now)
-			}
-		}
-	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"window_sec":    int64(window.Seconds()),
-		"hours":         hours,
-		"from":          now.Add(-window).Format(time.RFC3339),
-		"to":            now.Format(time.RFC3339),
-		"retention_sec": int64(credithist.Retention.Seconds()),
-		"series_points": creditHistoryPoints,
-		"accounts":      snap,
-	})
+	p.cfg.Usage.Save()
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
-// alignedHours 返回这批采样能对齐到几个整点桶。hours=N 的窗口是 [当前整点-(N-1)h, now]，
-// 每个账号的净变化取自「窗口内最早的采样点 → 最新采样点」，所以 N 的上限由**历史最短的
-// 那个账号**决定：它的最早采样点若晚于窗口左边界，它那一小段净变化就会被掺进整窗口的
-// 合计里（用量按整桶算、余额只算了一小截 → 虚报「积分过期」）。
-// 取所有账号里**最晚**的 From 就是这个约束。另外给 20 分钟余量（桶的 1/3，与前端
-// 的对账容差同口径）：采样是 5 分钟粒度、历史起点又常落在桶中间，不留余量的话每遇到
-// 桶边界没采样就白丢一整桶——刚上线时窗口会一直卡在 1 小时。
-// 返回 0 表示连一个整点桶都覆盖不了（刚上线几分钟的状态）。
-//
-// 锚点必须与 usage 的窗口左边界同源（usage.TruncateHour，本地整点）：一边用 UTC 整点、
-// 一边用本地整点的话，非整小时时区下会数错桶。
-func alignedHours(snap []credithist.Account, now time.Time) int {
-	const slack = 20 * time.Minute
-	anchor := usage.TruncateHour(now)
-	var newest time.Time
-	for _, a := range snap {
-		if a.From == "" {
-			continue
-		}
-		ts, err := time.Parse(time.RFC3339, a.From)
-		if err != nil {
-			continue
-		}
-		if newest.IsZero() || ts.After(newest) {
-			newest = ts
-		}
-	}
-	if newest.IsZero() {
-		return 0
-	}
-	d := anchor.Sub(newest) + slack
-	if d < 0 {
-		return 0
-	}
-	return int(d/time.Hour) + 1
-}
-
-// parseTimeParam 解析时间查询参数：unix 秒（前端默认）或 RFC3339（便于手工调
-// 接口/写脚本）。空串与非法值都返回零值 = 该侧不设界，不报错——区间参数是可选
-// 增强，拼错一个 from 不该让整页用量打不开。
 func parseTimeParam(v string) time.Time {
 	v = strings.TrimSpace(v)
 	if v == "" {
@@ -1231,7 +515,6 @@ func parseTimeParam(v string) time.Time {
 		if n <= 0 {
 			return time.Time{}
 		}
-		// 兼容秒与毫秒（前端可能直接把 Date.now() 传上来）。
 		if n > 1e12 {
 			return time.UnixMilli(n)
 		}
@@ -1246,66 +529,92 @@ func parseTimeParam(v string) time.Time {
 	return time.Time{}
 }
 
-// usageSave 立即把内存中的用量桶落盘（正常由后台 30s 防抖刷新负责）。
-func (p *Panel) usageSave(w http.ResponseWriter, r *http.Request) {
-	if p.cfg.Usage == nil {
-		writeErr(w, http.StatusNotImplemented, "usage recorder not available")
-		return
-	}
-	p.cfg.Usage.Save()
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+// ---------------------------------------------------------------------------
+// 批量 / 迁移
+// ---------------------------------------------------------------------------
+
+func safeGo(name string, fn func()) {
+	go func() {
+		defer func() {
+			if rec := recover(); rec != nil {
+				log.Printf("panel: %s panic: %v", name, rec)
+			}
+		}()
+		fn()
+	}()
 }
 
-// packages 返回全部账号的积分包构成，供「积分构成」视图对比。
-//
-// 逐个账号向上游查（并发有上限，避免瞬时打满上游限流），失败只在对应账号上
-// 标 error，不影响其它账号——一个号 token 失效不该让整页空白。
-func (p *Panel) packages(w http.ResponseWriter, r *http.Request) {
-	accts := p.visibleWB(r)
-	type row struct {
-		UID      string                   `json:"uid"`
-		Nickname string                   `json:"nickname"`
-		Realm    string                   `json:"realm"`
-		Remain   int64                    `json:"remain"`
-		Size     int64                    `json:"size"`
-		Packages []upstream.CreditPackage `json:"packages"`
-		Error    string                   `json:"error,omitempty"`
+func (p *Panel) checkinAll(w http.ResponseWriter, r *http.Request) {
+	if p.cfg.OmniCheckinAll == nil && p.cfg.OmniCheckin == nil {
+		writeErr(w, http.StatusNotImplemented, "checkin not available")
+		return
 	}
-	out := make([]row, len(accts))
-
-	sem := make(chan struct{}, 3)
-	var wg sync.WaitGroup
-	for i, s := range accts {
-		wg.Add(1)
-		go func(i int, s pool.Status) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-
-			it := row{UID: s.UID, Nickname: s.Nickname, Realm: s.Realm}
-			a := p.cfg.Pool.AuthByUID(s.UID)
-			if a == nil {
-				it.Error = "account not loaded"
-				out[i] = it
+	if !p.batchRunning.CompareAndSwap(false, true) {
+		writeErr(w, http.StatusTooManyRequests, "batch_in_progress")
+		return
+	}
+	if roleOf(r).IsAdmin() {
+		if p.cfg.OmniCheckinAll == nil {
+			p.batchRunning.Store(false)
+			writeErr(w, http.StatusNotImplemented, "checkin not available")
+			return
+		}
+		safeGo("全量签到", func() {
+			defer p.batchRunning.Store(false)
+			if _, err := p.cfg.OmniCheckinAll(); err != nil {
+				log.Printf("panel: 全量签到失败: %v", err)
 				return
 			}
-			packs, remain, size, err := p.cfg.Upstream.CreditPackages(a)
-			if err != nil {
-				it.Error = err.Error()
-				out[i] = it
-				return
+			log.Printf("panel: 全量签到完成")
+		})
+	} else {
+		accts := p.ownedOmniAccounts(r)
+		safeGo("个人签到", func() {
+			defer p.batchRunning.Store(false)
+			for _, ac := range accts {
+				if _, err := p.cfg.OmniCheckin(ac[0], ac[1]); err != nil {
+					log.Printf("panel: 签到 %s/%s 失败: %v", ac[0], ac[1], err)
+				}
 			}
-			it.Packages = packs
-			it.Remain = remain
-			it.Size = size
-			out[i] = it
-		}(i, s)
+			log.Printf("panel: 个人签到完成（%d 个账号）", len(accts))
+		})
 	}
-	wg.Wait()
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "started": true})
+}
 
-	// 余额降序：多的在前，便于和少的对比。
-	sort.SliceStable(out, func(i, j int) bool { return out[i].Remain > out[j].Remain })
-	writeJSON(w, http.StatusOK, map[string]any{"accounts": out})
+func (p *Panel) exportAccounts(w http.ResponseWriter, r *http.Request) {
+	if p.cfg.ExportOmniAccounts == nil {
+		writeErr(w, http.StatusNotImplemented, "export not available")
+		return
+	}
+	raw, err := p.cfg.ExportOmniAccounts()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Disposition", "attachment; filename=omnigate-accounts.json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(raw)
+}
+
+func (p *Panel) importAccounts(w http.ResponseWriter, r *http.Request) {
+	if p.cfg.ImportOmniAccounts == nil {
+		writeErr(w, http.StatusNotImplemented, "import not available")
+		return
+	}
+	raw, err := io.ReadAll(io.LimitReader(r.Body, 8<<20))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "read body: "+err.Error())
+		return
+	}
+	imported, skipped, err := p.cfg.ImportOmniAccounts(raw)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "imported": imported, "skipped": skipped})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

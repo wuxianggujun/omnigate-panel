@@ -31,7 +31,7 @@ import (
 )
 
 // sessionCookieName 面板会话 Cookie 名（HttpOnly，仅 /panel 路径可见）。
-const sessionCookieName = "wb2api_session"
+const sessionCookieName = "omnigate_session"
 
 // PanelAuthSection 面板鉴权配置（config.json 的 panel_auth 段），面板读写用。
 type PanelAuthSection struct {
@@ -166,6 +166,10 @@ func (p *Panel) sessionState(w http.ResponseWriter, r *http.Request) {
 
 // login POST /panel/api/session：用户名 + 密码登录，成功下发会话 Cookie。
 func (p *Panel) login(w http.ResponseWriter, r *http.Request) {
+	if !sameOrigin(r) {
+		writeErr(w, http.StatusForbidden, "csrf_origin_mismatch")
+		return
+	}
 	if p.cfg.PanelAuth == nil || !p.cfg.PanelAuth.HasUsers() {
 		writeErr(w, http.StatusBadRequest, "panel_auth_not_configured")
 		return

@@ -1,40 +1,28 @@
 # 服务名 / 容器名 = omnigate-panel。
 #
-# 旧部署用的是 workbuddy2api / wb2api，本次已全套改名，所以升级时要在旧部署目录里
-# 先 `docker compose down`（停掉旧容器），再 `docker compose up -d --build`。
-# 这是**一次性**动作：auths/ data/ config.json 走的是 bind mount，数据不丢，
-# 旧账号 / state / 配置可直接复用。
-#
-# 注意 compose 的「项目名」默认取本文件所在目录名。请在**旧部署目录**里更新代码
-# （保持目录名不变）；若换了新目录，需把旧的 auths/ data/ config.json 拷过来，
-# 或把下面的挂载改成旧数据的绝对路径。
+# 单二进制：内置 OmniGate 引擎 + Web 面板，不再有 auths/ 账号目录或独立工具二进制。
+# 首次启动前复制配置：
+#   cp config.example.json config.json
+# 引擎配置默认放在 data/omnigate.json（由 OMNIGATE_CONFIG 指向），首次启动自动生成，
+# 也可以在面板「供应商」页添加后自动写入。
 services:
   omnigate-panel:
     build: .
     container_name: omnigate-panel
     restart: unless-stopped
-    # 容器默认以 app 用户（uid 10001）运行。宿主机挂载目录属主不同会导致
-    # 「写入 auths/*.json.tmp 失败 permission denied」，三种解法任选：
-    #   1) 非 root · 让容器以你自己的 uid 运行（挂载目录本来就是你建的）：
-    #      PUID=$(id -u) PGID=$(id -g) docker compose up -d
-    #      或写进 .env 文件：PUID=1000 / PGID=1000
-    #   2) sudo chown -R 10001:10001 ./auths ./data ./config.json
-    #   3) user: "0:0" 以 root 运行（省事但容器逃逸面更大，自担）
+    # 容器默认以 app 用户（uid 10001）运行。宿主机挂载目录属主不同会导致写盘失败：
+    #   1) 让容器以你自己的 uid 运行：PUID=$(id -u) PGID=$(id -g) docker compose up -d
+    #   2) sudo chown -R 10001:10001 ./data ./config.json
+    #   3) user: "0:0"（省事但容器逃逸面更大，自担）
     user: "${PUID:-10001}:${PGID:-10001}"
     environment:
       - TZ=Asia/Shanghai
+      # 引擎配置放进 data/，避免单文件 bind mount 的「缺文件变目录」问题。
+      - OMNIGATE_CONFIG=/app/data/omnigate.json
     ports:
       - "7863:7863"
     volumes:
-      - ./auths:/app/auths
       - ./data:/app/data
-      # 注意：宿主机必须先有 config.json（cp config.example.json config.json）。
-      # 缺失时 Docker 会把挂载点创建成目录 → 容器启动失败（程序会自动生成配置，
-      # 但前提是它能以文件形式写入 —— 挂载目录会挡住这条路径）。
-      # 不挂 :ro：面板「配置」页需要写回此文件（保存后热生效）。
+      # 宿主机必须先有 config.json（cp config.example.json config.json）。
+      # 面板「系统」页需要写回此文件，故不挂 :ro。
       - ./config.json:/app/config.json
-      # OmniGate 引擎的独立配置（Runable / 浣熊 / OpenAI 兼容上游）。
-      # 可选：缺失时面板自动跳过 OmniGate，其余功能照常。先用
-      #   cp omnigate.example.json omnigate.json
-      # 生成后再挂载（同样不挂 :ro，面板可写回）。
-      - ./omnigate.json:/app/omnigate.json

@@ -47,6 +47,8 @@ func TestMaskRestoreRoundTrip(t *testing.T) {
 						"cookie":        "abc1234567890",
 						"refresh_token": "rt-abcdefgh",
 						"password":      "p@ssw0rd",
+						"password_hash": "pbkdf2-sha256$210000$salt$hashvalue",
+						"session_cookie": "sid=sessionsecret123",
 					},
 				},
 			},
@@ -84,6 +86,7 @@ func TestMaskRestoreRoundTrip(t *testing.T) {
 	for _, secret := range []string{
 		"upstream-key-1234567890", "abc1234567890", "rt-abcdefgh", "p@ssw0rd",
 		"__Secure-better-auth.session_token=xyz789", "user:pass",
+		"pbkdf2-sha256$210000$salt$hashvalue", "sid=sessionsecret123",
 	} {
 		if strings.Contains(string(raw), secret) {
 			t.Fatalf("掩码后仍含明文 %q：%s", secret, raw)

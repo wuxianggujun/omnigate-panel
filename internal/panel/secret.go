@@ -28,10 +28,10 @@ const maskMarker = "…(len="
 // 覆盖 config.json / omnigate.json 两个视图里的全部凭证键。
 func secretKey(k string) bool {
 	switch strings.ToLower(strings.TrimSpace(k)) {
-	case "cookie", "password", "passwd", "refresh_token", "access_token",
+	case "cookie", "password", "passwd", "password_hash", "refresh_token", "access_token",
 		"token", "api_key", "apikey", "secret", "client_secret",
-		"session_token", "device_token", "authorization", "credential", "credentials",
-		"dsn":
+		"session_token", "session_cookie", "device_token", "authorization",
+		"credential", "credentials", "dsn":
 		return true
 	}
 	return false

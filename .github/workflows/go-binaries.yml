@@ -34,7 +34,6 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      # ubuntu runner 自带 node → panel 包的 JS 运行时冒烟测试（TestAppJSTopLevelSmoke）会真实执行
       - run: go test ./...
 
   build:
@@ -83,11 +82,11 @@ jobs:
           case "${{ matrix.goos }}" in
             windows)
               NAME="omnigate-panel-v${V}-windows-amd64.zip"
-              zip -q "$NAME" omnigate-panel.exe config.example.json README.md
+              zip -q "$NAME" omnigate-panel.exe config.example.json omnigate.example.json README.md
               ;;
             *)
               NAME="omnigate-panel-v${V}-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz"
-              tar czf "$NAME" omnigate-panel config.example.json README.md
+              tar czf "$NAME" omnigate-panel config.example.json omnigate.example.json README.md
               ;;
           esac
           echo "name=$NAME" >> "$GITHUB_ENV"

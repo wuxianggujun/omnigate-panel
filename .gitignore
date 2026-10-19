@@ -48,3 +48,6 @@ docs/
 *.zip
 server.exe
 .DS_Store
+
+# Qoder 多智能体临时 worktree
+.qoder/

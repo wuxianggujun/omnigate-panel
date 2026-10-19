@@ -1,11 +1,7 @@
 {
-  "server": {
-    "host": "127.0.0.1",
-    "port": 8317
-  },
   "data_dir": "data/omnigate",
-  "default_provider": "raccoon",
-  "default_model": "raccoon/raccoon-8c4485",
+  "default_provider": "deepseek",
+  "default_model": "",
   "mode": "text",
   "reasoning": false,
   "model_whitelist": [],
@@ -22,14 +18,6 @@
     "version_sync_interval_hours": 24,
     "tls_enabled": true
   },
-  "maintenance": {
-    "keepalive_enabled": false,
-    "keepalive_interval_minutes": 30,
-    "chat_cleanup_enabled": false,
-    "chat_cleanup_keep_hours": 24,
-    "chat_cleanup_interval_hours": 6,
-    "chat_cleanup_skip_pinned": true
-  },
   "rate_limit": {
     "enabled": false,
     "window": 60,
@@ -42,6 +30,13 @@
   },
   "providers": [
     {
+      "name": "deepseek",
+      "type": "openai",
+      "base_url": "https://api.deepseek.com/v1",
+      "api_key": "sk-xxxxxxxxxxxxxxxx",
+      "models": ["deepseek-chat", "deepseek-reasoner"]
+    },
+    {
       "name": "raccoon",
       "type": "raccoon",
       "main_origin": "https://xiaohuanxiong.com",
@@ -51,47 +46,12 @@
       "name": "runable",
       "type": "runable",
       "base_url": "https://api.runable.com",
-      "device_header": "dweb/a69d4f72ddd711c660237adaf5c76287ac5473f5",
-      "accounts": []
-    },
-    {
-      "name": "deepseek",
-      "type": "openai",
-      "base_url": "https://api.deepseek.com/v1",
-      "api_key": "sk-xxxxxxxxxxxxxxxx",
-      "models": ["deepseek-chat", "deepseek-reasoner"]
-    },
-    {
-      "name": "trae",
-      "type": "trae",
-      "agent_host": "https://trae-api-cn.mchost.guru",
-      "ug_host": "https://api.trae.cn",
-      "oauth_host": "https://api.trae.com.cn",
       "accounts": []
     }
   ],
   "checkin": {
-    "enabled": true,
+    "enabled": false,
     "interval_minutes": 360,
-    "tasks": [
-      {
-        "name": "runable-keepalive",
-        "type": "runable",
-        "provider": "runable",
-        "interval_minutes": 360
-      },
-      {
-        "name": "raccoon-checkin",
-        "type": "raccoon",
-        "provider": "raccoon",
-        "interval_minutes": 720
-      },
-      {
-        "name": "trae-checkin",
-        "type": "trae",
-        "provider": "trae",
-        "interval_minutes": 720
-      }
-    ]
+    "tasks": []
   }
 }

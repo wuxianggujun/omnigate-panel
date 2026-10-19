@@ -23,6 +23,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 
@@ -224,32 +225,27 @@ func omniAccountLabel(body []byte) string {
 }
 
 // claimOmniLabel 认领 label：仅普通 user 需要打标（管理员加的号保持无主/共享）。
-// label 已被别人占用时返回 false。
+// label 已被别人占用时返回 false；检查与写入在归属表锁内原子完成。
 func (p *Panel) claimOmniLabel(r *http.Request, provider, label string) bool {
 	if roleOf(r) != panelauth.RoleUser {
 		return true
 	}
-	owner := usernameOf(r)
-	key := omniOwnerKey(provider, label)
-	if cur := p.ownership.Owner(key); cur != "" && cur != owner {
-		return false
-	}
-	p.ownership.Set(key, owner)
-	return true
+	return p.ownership.Claim(omniOwnerKey(provider, label), usernameOf(r))
 }
 
-// assignOmni 无条件把 label 归到当前用户名下（用于 callback/token 成功之后，
-// 此时 label 可能来自响应而非请求；管理员则清除可能的误标——保持无主）。
+// assignOmni 把 label 归到当前用户名下（用于 callback/token 成功之后）。
+// 普通用户只能认领无主或自己的 label，不能覆盖别人的账号；管理员保持无主/共享。
 func (p *Panel) assignOmni(r *http.Request, provider, label string) {
 	key := omniOwnerKey(provider, label)
 	if roleOf(r) != panelauth.RoleUser {
-		// 管理员操作：若此前被某个 user 误标（例如占位），清成无主。
 		if p.ownership.Owner(key) != "" {
 			p.ownership.Remove(key)
 		}
 		return
 	}
-	p.ownership.Set(key, usernameOf(r))
+	if !p.ownership.Claim(key, usernameOf(r)) {
+		log.Printf("panel: 归属冲突 %s（已属 %s，跳过 user %s）", key, p.ownership.Owner(key), usernameOf(r))
+	}
 }
 
 // filterOmniAccounts 按归属过滤 accounts 响应体（普通 user 只看自己的）。
@@ -269,7 +265,7 @@ func (p *Panel) filterOmniAccounts(r *http.Request, provider string, body []byte
 	}
 	var m map[string]any
 	if err := json.Unmarshal(body, &m); err != nil {
-		return body
+		return []byte(`{"accounts":[]}`)
 	}
 	list, _ := m["accounts"].([]any)
 	out := make([]any, 0, len(list))
@@ -295,7 +291,7 @@ func (p *Panel) filterOmniAccounts(r *http.Request, provider string, body []byte
 	m["accounts"] = out
 	enc, err := json.Marshal(m)
 	if err != nil {
-		return body
+		return []byte(`{"accounts":[]}`)
 	}
 	return enc
 }

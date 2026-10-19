@@ -4,10 +4,13 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/plugin"
 )
 
 // DefaultDeviceHeader mirrors the value hard-coded in the original APK.
@@ -55,8 +58,8 @@ type Config struct {
 
 	// PanelKey 是面板自己那把网关密钥（= config.json 的 api_key），由 cmd/server 在
 	// 构建运行时注入。它**恒为全量**且**绝不落盘**（json:"-"）：
-	//   - 面板前端要用它调 /omni/*，所以它必须永远有效；
-	//   - 它不属于「发给客户端的密钥」，不该出现在面板的密钥卡里，也不该被写进
+	//   - 面板与客户端共用同一把全量钥匙；
+	//   - 它不属于「发给客户端的收窄密钥」，不该出现在面板的密钥卡里，也不该被写进
 	//     omnigate.json（否则轮换 api_key 后旧钥匙会残留在文件里继续可用）。
 	// 空 = 未注入（例如直接跑 OmniGate 独立二进制时）。
 	PanelKey string `json:"-"`
@@ -677,9 +680,6 @@ func normalizeKeys(keys []string) []string {
 }
 
 func (c *Config) validate() error {
-	if len(c.Providers) == 0 {
-		return fmt.Errorf("no providers configured")
-	}
 	seen := map[string]bool{}
 	for _, p := range c.Providers {
 		if p.Name == "" {
@@ -689,10 +689,24 @@ func (c *Config) validate() error {
 			return fmt.Errorf("duplicate provider %q", p.Name)
 		}
 		seen[p.Name] = true
-		switch p.Type {
-		case "runable", "openai", "raccoon", "trae", "newapi", "geminiweb", "opencode":
-		default:
-			return fmt.Errorf("provider %q: unknown type %q", p.Name, p.Type)
+		if err := validateProviderType(p.Type); err != nil {
+			return fmt.Errorf("provider %q: %w", p.Name, err)
+		}
+		// 上游地址只允许 http/https：file://、gopher:// 等协议既不是上游的实际
+		// 形态，也会把「配置写权限」放大成任意本地协议访问。
+		for _, f := range []struct{ key, val string }{
+			{"base_url", p.BaseURL},
+			{"main_origin", p.MainOrigin},
+			{"llm_base", p.LLMBase},
+			{"auth_base", p.AuthBase},
+			{"agent_host", p.AgentHost},
+			{"ug_host", p.UgHost},
+			{"oauth_host", p.OAuthHost},
+			{"go_base_url", p.GoBaseURL},
+		} {
+			if err := validateHTTPURL("provider."+f.key, f.val); err != nil {
+				return fmt.Errorf("provider %q: %w", p.Name, err)
+			}
 		}
 		// tier_prefer 写错只会静默退回默认顺序（go 优先），在面板上很难察觉，
 		// 所以与其它枚举字段同口径：加载/保存时就拒绝。
@@ -746,6 +760,9 @@ func (c *Config) validate() error {
 		if !seen[t.Provider] {
 			return fmt.Errorf("checkin.tasks[%s]: 未知 provider %q", taskLabel(t), t.Provider)
 		}
+		if err := validateHTTPURL("checkin.tasks["+taskLabel(t)+"].url", t.URL); err != nil {
+			return err
+		}
 	}
 	// 快过期选号的时长字段：写了但解析不了，静默回落默认值会让人以为配置生效了，
 	// 不如在加载/保存时直接拒绝（与 pool.expiring_soon 的宽容风格不同——那里是
@@ -763,12 +780,45 @@ func (c *Config) validate() error {
 	return nil
 }
 
+// validateProviderType 接受「已注册插件」或内置类型：新增插件只要在 Load 之前
+// Register，就能直接出现在配置里；内置类型即使注册表尚未初始化也保持可用，
+// 让配置校验不再依赖调用方的启动顺序。
+func validateProviderType(typ string) error {
+	if _, err := plugin.Get(typ); err == nil {
+		return nil
+	}
+	switch typ {
+	case "runable", "openai", "raccoon", "trae", "newapi", "geminiweb", "opencode":
+		return nil
+	}
+	return fmt.Errorf("unknown type %q", typ)
+}
+
 // keyLabel 给密钥条目一个可读标签用于报错（绝不回显密钥本身）。
 func keyLabel(k APIKey) string {
 	if k.Name != "" {
 		return k.Name
 	}
 	return "未命名"
+}
+
+// validateHTTPURL 校验可选的上游 URL：空值放行，非空必须是带主机的 http/https。
+func validateHTTPURL(field, raw string) error {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("%s: 无法解析 URL: %w", field, err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("%s: 仅支持 http/https，得到 %q", field, u.Scheme)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("%s: URL 缺少主机名", field)
+	}
+	return nil
 }
 
 // taskLabel 给签到任务一个可读标签用于报错。

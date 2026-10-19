@@ -101,4 +101,8 @@ func TestProviderSecretAdminOnly(t *testing.T) {
 	if rec := do(p, "GET", "/panel/api/omni/provider-secret", "", admin, nil); rec.Code != http.StatusBadRequest {
 		t.Fatalf("missing name = %d want 400", rec.Code)
 	}
+	// ⑦ 前端使用 ?provider=，必须与 ?name= 等价。
+	if rec := do(p, "GET", "/panel/api/omni/provider-secret?provider=atria", "", admin, nil); rec.Code != http.StatusOK {
+		t.Fatalf("provider= alias = %d want 200 body=%s", rec.Code, rec.Body.String())
+	}
 }

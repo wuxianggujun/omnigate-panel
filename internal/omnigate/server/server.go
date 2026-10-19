@@ -173,7 +173,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleDeepResearchInteract(w, s.withImageBase(r))
 	case (r.Method == http.MethodGet || r.Method == http.MethodPost || r.Method == http.MethodDelete) &&
 		(path == "/admin/model-mapping" || strings.HasPrefix(path, "/admin/model-mapping/")):
-		if !s.authorized(w, r) {
+		if !s.authorizedAdmin(w, r) {
 			return
 		}
 		s.handleModelMapping(w, r)
@@ -197,17 +197,17 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// comes from the one-time pending session keyed by the echoed trace id.
 		s.handleTraeRedirect(w, r)
 	case strings.HasPrefix(path, "/admin/raccoon/"):
-		if !s.authorized(w, r) {
+		if !s.authorizedAdmin(w, r) {
 			return
 		}
 		s.handleRaccoonAdmin(w, r)
 	case strings.HasPrefix(path, "/admin/trae/"):
-		if !s.authorized(w, r) {
+		if !s.authorizedAdmin(w, r) {
 			return
 		}
 		s.handleTraeAdmin(w, r)
 	case strings.HasPrefix(path, "/admin/geminiweb/"):
-		if !s.authorized(w, r) {
+		if !s.authorizedAdmin(w, r) {
 			return
 		}
 		s.handleGeminiWebAdmin(w, r)
@@ -216,10 +216,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// omniMountPrefix 是 OmniGate 在本服务里的挂载前缀（见 cmd/server 的
-// http.StripPrefix("/omni", …)）。请求记录里补回前缀，让 /omni/* 路径可读、
-// 且与 WorkBuddy 的 /v1/* 区分开。
-const omniMountPrefix = "/omni"
+// omniMountPrefix 是网关在宿主服务里的挂载前缀。单引擎版本直接挂在根路径，
+// 因此为空；保留这个常量让图片 URL 与请求记录路径共用同一处定义。
+const omniMountPrefix = ""
 
 // serveLogged 包裹一次 chat/responses 调用：注入路由记账、捕获状态码与首字节
 // 时间，出口把结果写进请求记录。未注入记录器时退化为直接调用（零开销）。
@@ -463,6 +462,23 @@ func (s *Server) authorized(w http.ResponseWriter, r *http.Request) bool {
 	}
 	writeJSON(w, 401, openai.ErrorJSON("invalid_api_key", "invalid or missing API key"))
 	return false
+}
+
+// authorizedAdmin 是管理端点专用鉴权：除了密钥有效，还必须是全量密钥。
+// 发给客户端的收窄密钥（api_keys[].providers 非空）只能调用模型接口，
+// 不能改全局映射、增删账号或操作上游登录态。
+func (s *Server) authorizedAdmin(w http.ResponseWriter, r *http.Request) bool {
+	k, ok := s.keyScope(r)
+	if !ok {
+		writeJSON(w, 401, openai.ErrorJSON("invalid_api_key", "invalid or missing API key"))
+		return false
+	}
+	if k.Scoped() {
+		writeJSON(w, 403, openai.ErrorJSON("admin_key_required",
+			"this API key is scoped to providers ["+strings.Join(k.Providers, ", ")+"] and cannot access admin endpoints"))
+		return false
+	}
+	return true
 }
 
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {

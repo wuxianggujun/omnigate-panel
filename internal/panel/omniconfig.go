@@ -63,6 +63,9 @@ func (p *Panel) providerSecret(w http.ResponseWriter, r *http.Request) {
 	}
 	name := strings.TrimSpace(r.URL.Query().Get("name"))
 	if name == "" {
+		name = strings.TrimSpace(r.URL.Query().Get("provider"))
+	}
+	if name == "" {
 		writeErr(w, http.StatusBadRequest, "missing name")
 		return
 	}

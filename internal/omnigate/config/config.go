@@ -268,7 +268,7 @@ type ServerConfig struct {
 // ProviderConfig describes one upstream and its accounts.
 type ProviderConfig struct {
 	Name         string   `json:"name"`
-	Type         string   `json:"type"` // "runable" | "openai" | "raccoon" | "trae" | "newapi"
+	Type         string   `json:"type"` // 插件类型：内置见 plugin/catalog，也可由外部 Register 提供。
 	BaseURL      string   `json:"base_url"`
 	DeviceHeader string   `json:"device_header"`
 	APIKey       string   `json:"api_key"`
@@ -366,7 +366,7 @@ type CheckinConfig struct {
 type CheckinTask struct {
 	Name            string            `json:"name"`
 	Provider        string            `json:"provider"`
-	Type            string            `json:"type"` // "http" | "runable" | "raccoon" | "trae" | "newapi" | "newapi-refresh" | "geminiweb"
+	Type            string            `json:"type"` // "http"（通用）或插件描述符声明的任务类型（如 raccoon / newapi-refresh）。
 	Method          string            `json:"method"`
 	URL             string            `json:"url"`
 	Headers         map[string]string `json:"headers"`

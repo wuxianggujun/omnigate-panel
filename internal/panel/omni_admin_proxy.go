@@ -27,13 +27,10 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/plugin"
+	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/plugin/catalog"
 	"github.com/wuxianggujun/omnigate-panel/internal/panelauth"
 )
-
-// omniAdminKinds 允许代理的 OmniGate 管理子域，由插件描述符派生（login.transport=admin
-// 的类型，如 raccoon / trae / geminiweb）。默认闭包未注入时回落到内置三种，保证测试与
-// 单机嵌入场景仍可用；生产由 main 注入 catalog 派生的结果。
-var omniAdminKindsFallback = map[string]bool{"raccoon": true, "trae": true, "geminiweb": true}
 
 // omniAdminSubs 允许代理的子路径白名单（多段子路径按首段匹配）。
 var omniAdminSubs = map[string]bool{
@@ -51,7 +48,8 @@ var omniAdminSubs = map[string]bool{
 }
 
 // adminKindAllowed 判断 kind 是否属于走 admin 代理的供应商类型。优先用注入的
-// 描述符集合；未注入时回落内置三种（单机/测试）。
+// 描述符集合；未注入时（测试 / 单机嵌入）直接读内置目录，规则相同：只有
+// login.transport=admin 的类型才放行。不再维护手写名单。
 func (p *Panel) adminKindAllowed(kind string) bool {
 	if p.cfg.OmniAdminKinds != nil {
 		for _, k := range p.cfg.OmniAdminKinds() {
@@ -61,7 +59,12 @@ func (p *Panel) adminKindAllowed(kind string) bool {
 		}
 		return false
 	}
-	return omniAdminKindsFallback[kind]
+	for _, d := range catalog.All() {
+		if d.Type == kind && d.Login != nil && d.Login.Transport == plugin.LoginTransportAdmin {
+			return true
+		}
+	}
+	return false
 }
 
 // firstSeg 返回子路径的首段（"chats/delete" → "chats"）。

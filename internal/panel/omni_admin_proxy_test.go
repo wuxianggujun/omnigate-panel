@@ -48,7 +48,8 @@ func TestOmniAdminProxyKindGateFromDescriptor(t *testing.T) {
 	}
 }
 
-// 未注入 OmniAdminKinds 时回落内置三种：单机/测试场景仍可用。
+// 未注入 OmniAdminKinds 时直接读内置目录（login.transport=admin 的类型）：
+// 单机/测试场景仍可用，且与生产注入的派生规则一致。
 func TestOmniAdminProxyFallsBackToBuiltinKinds(t *testing.T) {
 	p, tok := mustPanel(t, Config{
 		Version: "test",

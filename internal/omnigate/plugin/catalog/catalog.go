@@ -96,7 +96,7 @@ func raccoonSpec() plugin.Plugin {
 			action(plugin.ActionRemove, "移除账号", plugin.ActionScopeAccount, "从账号池移除该账号。", true),
 		},
 		Tasks: []plugin.Task{
-			{Type: "raccoon", Label: "小浣熊签到", Description: "定时领取登录积分。"},
+			{Type: "raccoon", Label: "小浣熊签到", Description: "定时领取登录积分。", Action: plugin.ActionCheckin, Scope: plugin.ActionScopeAccount},
 		},
 		Login: &plugin.LoginSpec{
 			Kind:      plugin.LoginKindOAuth,
@@ -164,7 +164,7 @@ func runableSpec() plugin.Plugin {
 			action(plugin.ActionRemove, "移除账号", plugin.ActionScopeAccount, "从账号池移除该账号。", true),
 		},
 		Tasks: []plugin.Task{
-			{Type: "runable", Label: "Runable 会话巡检", Description: "检查账号 Cookie 是否仍有效。"},
+			{Type: "runable", Label: "Runable 会话巡检", Description: "检查账号 Cookie 是否仍有效。", Action: plugin.ActionCheckin, Scope: plugin.ActionScopeAccount},
 		},
 		Login: &plugin.LoginSpec{
 			Kind:      plugin.LoginKindPaste,
@@ -290,8 +290,8 @@ func newAPISpec() plugin.Plugin {
 			action(plugin.ActionRemove, "移除账号", plugin.ActionScopeAccount, "从账号池移除该账号。", true),
 		},
 		Tasks: []plugin.Task{
-			{Type: "newapi", Label: "New API 签到", Description: "定时领取站点每日额度。"},
-			{Type: "newapi-refresh", Label: "New API 刷新令牌", Description: "定时轮换即将过期的 access_token。"},
+			{Type: "newapi", Label: "New API 签到", Description: "定时领取站点每日额度。", Action: plugin.ActionCheckin, Scope: plugin.ActionScopeAccount},
+			{Type: "newapi-refresh", Label: "New API 刷新令牌", Description: "定时轮换即将过期的 access_token。", Action: plugin.ActionRefresh, Scope: plugin.ActionScopeAccount},
 		},
 		Login: &plugin.LoginSpec{
 			Kind:      plugin.LoginKindSnippet,
@@ -382,7 +382,7 @@ func geminiWebSpec() plugin.Plugin {
 			action(plugin.ActionRemove, "移除账号", plugin.ActionScopeAccount, "从账号池移除该账号。", true),
 		},
 		Tasks: []plugin.Task{
-			{Type: "geminiweb", Label: "Gemini Web 验活", Description: "定时探测会话并持久化轮换后的 Cookie。"},
+			{Type: "geminiweb", Label: "Gemini Web 验活", Description: "定时探测会话并持久化轮换后的 Cookie。", Action: plugin.ActionCheckin, Scope: plugin.ActionScopeAccount},
 		},
 		Login: &plugin.LoginSpec{
 			Kind:      plugin.LoginKindPaste,
@@ -462,7 +462,7 @@ func traeSpec() plugin.Plugin {
 			action(plugin.ActionRemove, "移除账号", plugin.ActionScopeAccount, "从账号池移除该账号。", true),
 		},
 		Tasks: []plugin.Task{
-			{Type: "trae", Label: "TRAE 签到", Description: "定时领取每日签到积分。"},
+			{Type: "trae", Label: "TRAE 签到", Description: "定时领取每日签到积分。", Action: plugin.ActionCheckin, Scope: plugin.ActionScopeAccount},
 		},
 		Login: &plugin.LoginSpec{
 			Kind:      plugin.LoginKindOAuth,

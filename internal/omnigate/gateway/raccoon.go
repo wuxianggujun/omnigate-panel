@@ -333,31 +333,3 @@ func (g *Gateway) RaccoonCheckin(ctx context.Context, providerName, label string
 	}
 	return out, nil
 }
-
-// RunRaccoonCheckin is the scheduler entrypoint for type "raccoon" tasks.
-func (g *Gateway) RunRaccoonCheckin(providerName string) {
-	rp, err := g.raccoonProvider(providerName)
-	if err != nil {
-		g.log.Warn("签到：%v", err)
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-	defer cancel()
-	for _, acc := range g.Accounts(providerName) {
-		g.ensureRaccoonToken(ctx, providerName, rp, acc)
-		if acc.Cookie == "" {
-			g.log.Warn("签到：账号「%s」没有可用 access_token", acc.Label)
-			continue
-		}
-		res, err := rp.Client().Checkin(ctx, acc.Cookie)
-		if err != nil {
-			g.log.Warn("签到：账号「%s」失败: %v", acc.Label, err)
-			continue
-		}
-		if res.Success {
-			g.log.Info("签到 %s「%s」成功：%s", providerName, acc.Label, res.Message)
-		} else {
-			g.log.Info("签到 %s「%s」：%s", providerName, acc.Label, res.Message)
-		}
-	}
-}

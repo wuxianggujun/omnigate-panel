@@ -1844,24 +1844,6 @@ func (g *Gateway) RunableCheckin(ctx context.Context, providerName, label string
 	return out, nil
 }
 
-// RunRunableCheckin is the scheduler entrypoint for type "runable" tasks.
-func (g *Gateway) RunRunableCheckin(providerName string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	out, err := g.RunableCheckin(ctx, providerName, "")
-	if err != nil {
-		g.log.Warn("签到：%v", err)
-		return
-	}
-	for _, o := range out {
-		if o.Error != "" {
-			g.log.Warn("签到/保活 %s「%s」%s", providerName, o.Label, o.Error)
-		} else {
-			g.log.Info("签到/保活 %s「%s」%s", providerName, o.Label, o.Message)
-		}
-	}
-}
-
 // RunableAccounts lists a Runable provider's accounts with a best-effort credit
 // balance (available = 每日额度 + 每月额度). The panel account pool asks for this
 // on demand (withBalance); the plain listing stays a cheap in-memory view so the

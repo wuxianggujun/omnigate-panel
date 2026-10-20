@@ -200,37 +200,16 @@ type GeminiWebCheckinOutcome struct {
 	Error   string `json:"error,omitempty"`
 }
 
-// RunGeminiWebCheckin probes every account's session and persists any cookie
-// rotation — the scheduler's periodic health check for geminiweb, ported from
-// gclient.py's _health_check_loop. It also flags an account whose session no
-// longer works so the panel can surface it.
-func (g *Gateway) RunGeminiWebCheckin(providerName string) {
-	gp, err := g.geminiWebProvider(providerName)
-	if err != nil {
-		g.log.Warn("签到：%v", err)
-		return
-	}
-	for _, acc := range g.Accounts(providerName) {
-		if acc.Cookie == "" {
-			g.log.Warn("签到：账号「%s」未配置 Cookie", acc.Label)
-			continue
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-		check := gp.CheckAccount(ctx, acc)
-		cancel()
-		if check.Valid {
-			g.st.SetCookie(providerName, acc.Label, acc.Cookie)
-			g.log.Info("签到 %s「%s」会话有效（%d 个模型）", providerName, acc.Label, len(check.Models))
-			continue
-		}
-		g.sess.MarkExpired(providerName, acc.Label, check.Error)
-		g.log.Warn("签到 %s「%s」失败: %s", providerName, acc.Label, check.Error)
-	}
-}
-
 // GeminiWebCheckin probes each account's session. Gemini Web has no check-in
 // reward, so this only verifies the cookie still works (and refreshes the
 // cached session), which is what the panel's 签到 button is useful for here.
+//
+// The probe rebuilds the session and lets the upstream rotate the cookie;
+// ensureSession writes the rotated value back into acc.Cookie. This method
+// persists that rotation and records the session health, so the ops/scheduler
+// path behaves exactly like the panel's check-in button — otherwise a rotated
+// cookie would be dropped and the next request would re-handshake with the
+// stale one.
 func (g *Gateway) GeminiWebCheckin(ctx context.Context, providerName, label string) ([]GeminiWebCheckinOutcome, error) {
 	gp, err := g.geminiWebProvider(providerName)
 	if err != nil {
@@ -247,9 +226,11 @@ func (g *Gateway) GeminiWebCheckin(ctx context.Context, providerName, label stri
 		check := gp.CheckAccount(cctx, acc)
 		cancel()
 		if !check.Valid {
+			g.sess.MarkExpired(providerName, acc.Label, check.Error)
 			out = append(out, GeminiWebCheckinOutcome{Label: acc.Label, Error: check.Error})
 			continue
 		}
+		g.st.SetCookie(providerName, acc.Label, acc.Cookie)
 		out = append(out, GeminiWebCheckinOutcome{
 			Label:   acc.Label,
 			Success: true,

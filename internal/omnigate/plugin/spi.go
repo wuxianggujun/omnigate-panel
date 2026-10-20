@@ -206,10 +206,17 @@ func (a Action) Validate() error {
 // Task describes a built-in scheduled task kind understood by the scheduler.
 // Type matches config.CheckinTask.Type (for example "raccoon" or
 // "newapi-refresh").
+//
+// Action is what makes the declaration live: the scheduler resolves a task type
+// to its owning plugin through this descriptor and then invokes Action on that
+// provider's behavior set, instead of switching on the type string. Empty Action
+// means the task has no provider-side operation (it is not a maintenance task).
 type Task struct {
-	Type        string `json:"type"`
-	Label       string `json:"label"`
-	Description string `json:"description,omitempty"`
+	Type        string      `json:"type"`
+	Label       string      `json:"label"`
+	Description string      `json:"description,omitempty"`
+	Action      ActionName  `json:"action,omitempty"`
+	Scope       ActionScope `json:"scope,omitempty"`
 }
 
 // LoginKind names the interaction a type's login uses. It tells the panel which
@@ -418,6 +425,20 @@ func (p Plugin) validate() error {
 		}
 		if _, dup := tasks[task.Type]; dup {
 			return fmt.Errorf("type %q: task %q 重复", p.Type, task.Type)
+		}
+		// A scheduled task that runs a provider action must name one the type
+		// actually declares; otherwise the scheduler would dispatch into an
+		// operation the provider rejects at runtime.
+		if task.Action != "" {
+			if !task.Action.Valid() {
+				return fmt.Errorf("type %q: task %q: 未知 action %q", p.Type, task.Type, task.Action)
+			}
+			if _, declared := actions[task.Action]; !declared {
+				return fmt.Errorf("type %q: task %q 的 action %q 未在 actions 中声明", p.Type, task.Type, task.Action)
+			}
+		}
+		if task.Scope != "" && !task.Scope.Valid() {
+			return fmt.Errorf("type %q: task %q: 未知 scope %q", p.Type, task.Type, task.Scope)
 		}
 		tasks[task.Type] = struct{}{}
 	}

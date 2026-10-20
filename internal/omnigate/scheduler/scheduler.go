@@ -14,6 +14,7 @@ import (
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/config"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/gateway"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/logx"
+	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/plugin"
 )
 
 // Scheduler drives the configured check-in tasks.
@@ -163,6 +164,15 @@ func (s *Scheduler) taskReady(task config.CheckinTask) (bool, string) {
 	if task.Type == "" || task.Type == "http" {
 		return true, ""
 	}
+	// The task type must resolve to a registered plugin declaration; an unknown
+	// type can never run, so it is suspended rather than retried every cycle.
+	_, decl, ok := plugin.TaskByType(task.Type)
+	if !ok {
+		return false, fmt.Sprintf("任务类型 %q 未在插件描述符中声明", task.Type)
+	}
+	if decl.Action == "" {
+		return false, fmt.Sprintf("任务类型 %q 未声明可执行 action", task.Type)
+	}
 	name := task.Provider
 	if name == "" {
 		name = s.cfg.DefaultProvider
@@ -208,53 +218,69 @@ func jitterOffset(name string, last int64, jitter time.Duration) time.Duration {
 }
 
 func (s *Scheduler) runTask(task config.CheckinTask) {
-	switch task.Type {
-	case "runable":
-		provider := task.Provider
-		if provider == "" {
-			provider = s.cfg.DefaultProvider
-		}
-		s.log.Info("签到任务：Runable 保活/刷新（%s）", provider)
-		s.gw.RunRunableCheckin(provider)
-	case "raccoon":
-		provider := task.Provider
-		if provider == "" {
-			provider = s.cfg.DefaultProvider
-		}
-		s.log.Info("签到任务：小浣熊桌面登录奖励（%s）", provider)
-		s.gw.RunRaccoonCheckin(provider)
-	case "trae":
-		provider := task.Provider
-		if provider == "" {
-			provider = s.cfg.DefaultProvider
-		}
-		s.log.Info("签到任务：TRAE 每日签到（%s）", provider)
-		s.gw.RunTraeCheckin(provider)
-	case "newapi":
-		provider := task.Provider
-		if provider == "" {
-			provider = s.cfg.DefaultProvider
-		}
-		s.log.Info("签到任务：New API 每日签到（%s）", provider)
-		s.gw.RunNewAPICheckin(provider)
-	case "newapi-refresh":
-		provider := task.Provider
-		if provider == "" {
-			provider = s.cfg.DefaultProvider
-		}
-		s.log.Info("刷新任务：New API 统一刷新（%s）", provider)
-		s.gw.RunNewAPIRefresh(provider)
-	case "geminiweb":
-		provider := task.Provider
-		if provider == "" {
-			provider = s.cfg.DefaultProvider
-		}
-		s.log.Info("签到任务：Gemini Web 会话健康检查（%s）", provider)
-		s.gw.RunGeminiWebCheckin(provider)
-	case "http", "":
+	// Generic HTTP tasks carry their own URL and credential placeholders; they
+	// are not a provider operation, so they never consult the plugin registry.
+	if task.Type == "" || task.Type == "http" {
 		s.runHTTP(task)
-	default:
+		return
+	}
+	// Resolve the task type through the plugin registry. The descriptor says
+	// which action the task runs and which provider type owns it, so adding a
+	// provider task no longer means editing this file — only its catalog entry.
+	desc, decl, ok := plugin.TaskByType(task.Type)
+	if !ok {
 		s.log.Warn("未知签到任务类型 %q", task.Type)
+		return
+	}
+	if decl.Action == "" {
+		s.log.Warn("签到任务 %q（类型 %s）未声明 action，无法执行", taskName(task), task.Type)
+		return
+	}
+	provider := task.Provider
+	if provider == "" {
+		provider = s.cfg.DefaultProvider
+	}
+	ops := s.gw.Ops(provider)
+	if !ops.Supports(decl.Action) {
+		s.log.Warn("签到任务 %q：供应商 %q（%s）不支持 %s", taskName(task), provider, desc.Type, decl.Action)
+		return
+	}
+	s.log.Info("签到任务：%s（%s）", decl.Label, provider)
+	// One outer budget for the whole batch; each account keeps its own inner
+	// timeout inside the gateway, so a slow upstream cannot hang the loop.
+	ctx, cancel := context.WithTimeout(context.Background(), descriptorTaskTimeout)
+	defer cancel()
+	res, err := ops.HandleAction(ctx, provider, plugin.ActionRequest{
+		Action: decl.Action,
+		Params: map[string]string{"label": ""},
+	})
+	if err != nil {
+		s.log.Warn("签到任务 %q（%s）失败: %v", taskName(task), provider, err)
+		return
+	}
+	s.logOutcomes(provider, res.Data)
+}
+
+// descriptorTaskTimeout bounds one descriptor-driven task run (all accounts).
+const descriptorTaskTimeout = 5 * time.Minute
+
+// logOutcomes renders a batch result the way every provider's check-in reports:
+// one line per account, failures as warnings. The data is the neutral
+// plugin.AccountOutcome slice the ops adapters return.
+func (s *Scheduler) logOutcomes(provider string, data any) {
+	outcomes, ok := data.([]plugin.AccountOutcome)
+	if !ok {
+		return
+	}
+	for _, o := range outcomes {
+		switch {
+		case o.Error != "":
+			s.log.Warn("签到 %s「%s」失败: %s", provider, o.Label, o.Error)
+		case o.Message != "":
+			s.log.Info("签到 %s「%s」：%s", provider, o.Label, o.Message)
+		default:
+			s.log.Info("签到 %s「%s」完成", provider, o.Label)
+		}
 	}
 }
 

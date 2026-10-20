@@ -35,7 +35,7 @@ type Config struct {
 	// ConfigPath config.json 路径与读写器（系统设置页）。
 	ConfigPath string
 	// DataDir 持久化根目录（用于「存储」页展示）。
-	DataDir string
+	DataDir       string
 	LoadConfig    func() (any, error)
 	SaveConfig    func(raw []byte) (restartRequired []string, err error)
 	RegenerateKey func() (string, error)
@@ -79,6 +79,10 @@ type Config struct {
 	OmniAdmin      http.Handler
 	// OmniProviderTypes 返回插件注册表的元数据（类型 / 字段 schema / 能力 / 动作）。
 	OmniProviderTypes func() any
+	// OmniAdminKinds 返回走 /omni/admin/<type>/* 代理的供应商类型（即描述符里
+	// login.transport=admin 的类型）。面板据此决定代理放行哪些 kind，新增一个
+	// admin 传输的插件只需改 catalog，无需再动面板。
+	OmniAdminKinds func() []string
 
 	// New API 浏览器登录抓取与统一刷新。
 	OmniNewAPIAuthorize     func(provider, label, apiKey string) (any, error)
@@ -167,9 +171,9 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("POST /panel/api/omni/newapi/capture", p.omniNewAPICapture)
 	p.mux.HandleFunc("OPTIONS /panel/api/omni/newapi/capture", p.omniNewAPICapturePreflight)
 	p.mux.HandleFunc("POST /panel/api/omni/newapi/setkey", p.tenant(p.omniNewAPISetKey))
-	p.mux.HandleFunc("/panel/api/omni/admin/raccoon/", p.tenant(p.omniAdminProxy))
-	p.mux.HandleFunc("/panel/api/omni/admin/trae/", p.tenant(p.omniAdminProxy))
-	p.mux.HandleFunc("/panel/api/omni/admin/geminiweb/", p.tenant(p.omniAdminProxy))
+	// 走 /omni/admin/<type>/* 代理的供应商类型由描述符（login.transport=admin）
+	// 决定，这里只注册一条前缀路由，具体 kind 由 omniAdminProxy 按元数据放行。
+	p.mux.HandleFunc("/panel/api/omni/admin/", p.tenant(p.omniAdminProxy))
 
 	// 模型与路由。
 	p.mux.HandleFunc("GET /panel/api/omni/models", p.read(p.omniModels))

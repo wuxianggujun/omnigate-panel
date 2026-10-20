@@ -48,6 +48,21 @@ func All() []Plugin { return defaultRegistry.All() }
 // Types returns every registered type, sorted lexicographically.
 func Types() []string { return defaultRegistry.Types() }
 
+// TaskByType resolves a scheduled task type (config.CheckinTask.Type) to the
+// plugin that declares it and the declaration itself. The scheduler uses it to
+// dispatch by descriptor instead of switching on the type string.
+func TaskByType(taskType string) (Plugin, Task, bool) {
+	return defaultRegistry.TaskByType(taskType)
+}
+
+// TypesByLoginTransport returns every type whose login flow is driven over the
+// given transport, sorted lexically. The panel uses it to decide which kinds its
+// /omni/admin/<type>/* proxy accepts, so a new admin-transport provider is a
+// catalog-only change — no panel edit required.
+func TypesByLoginTransport(t LoginTransport) []string {
+	return defaultRegistry.TypesByLoginTransport(t)
+}
+
 // Register validates and stores p. The stored copy is deep-copied so later
 // caller mutations cannot change what other layers see.
 func (r *Registry) Register(p Plugin) error {
@@ -113,6 +128,50 @@ func (r *Registry) Types() []string {
 	out := make([]string, 0, len(r.plugins))
 	for typ := range r.plugins {
 		out = append(out, typ)
+	}
+	r.mu.RUnlock()
+	sort.Strings(out)
+	return out
+}
+
+// TaskByType resolves a scheduled task type to its declaring plugin and the
+// declaration. A task type is owned by at most one plugin (Validate rejects
+// duplicates within a descriptor); if two plugins somehow claim the same task
+// type, the one whose type sorts first wins so resolution stays deterministic.
+func (r *Registry) TaskByType(taskType string) (Plugin, Task, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var (
+		best     Plugin
+		bestTask Task
+		found    bool
+	)
+	for _, p := range r.plugins {
+		for _, t := range p.Tasks {
+			if t.Type != taskType {
+				continue
+			}
+			if !found || p.Type < best.Type {
+				best, bestTask, found = p, t, true
+			}
+			break
+		}
+	}
+	if !found {
+		return Plugin{}, Task{}, false
+	}
+	return best.clone(), bestTask, true
+}
+
+// TypesByLoginTransport returns every registered type whose Login.Transport
+// equals t, sorted lexically. A nil Login (no interactive flow) never matches.
+func (r *Registry) TypesByLoginTransport(t LoginTransport) []string {
+	r.mu.RLock()
+	out := make([]string, 0, len(r.plugins))
+	for typ, p := range r.plugins {
+		if p.Login != nil && p.Login.Transport == t {
+			out = append(out, typ)
+		}
 	}
 	r.mu.RUnlock()
 	sort.Strings(out)

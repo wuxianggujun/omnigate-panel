@@ -30,8 +30,10 @@ import (
 	"github.com/wuxianggujun/omnigate-panel/internal/panelauth"
 )
 
-// omniAdminKinds 允许代理的 OmniGate 管理子域（raccoon / trae / geminiweb）。
-var omniAdminKinds = map[string]bool{"raccoon": true, "trae": true, "geminiweb": true}
+// omniAdminKinds 允许代理的 OmniGate 管理子域，由插件描述符派生（login.transport=admin
+// 的类型，如 raccoon / trae / geminiweb）。默认闭包未注入时回落到内置三种，保证测试与
+// 单机嵌入场景仍可用；生产由 main 注入 catalog 派生的结果。
+var omniAdminKindsFallback = map[string]bool{"raccoon": true, "trae": true, "geminiweb": true}
 
 // omniAdminSubs 允许代理的子路径白名单（多段子路径按首段匹配）。
 var omniAdminSubs = map[string]bool{
@@ -46,6 +48,20 @@ var omniAdminSubs = map[string]bool{
 	"gemmaps":     true,
 	"chats":       true,
 	"keepalive":   true,
+}
+
+// adminKindAllowed 判断 kind 是否属于走 admin 代理的供应商类型。优先用注入的
+// 描述符集合；未注入时回落内置三种（单机/测试）。
+func (p *Panel) adminKindAllowed(kind string) bool {
+	if p.cfg.OmniAdminKinds != nil {
+		for _, k := range p.cfg.OmniAdminKinds() {
+			if k == kind {
+				return true
+			}
+		}
+		return false
+	}
+	return omniAdminKindsFallback[kind]
 }
 
 // firstSeg 返回子路径的首段（"chats/delete" → "chats"）。
@@ -87,7 +103,7 @@ func (p *Panel) omniAdminProxy(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, "/panel/api/omni/admin/")
 	kind, sub, ok := strings.Cut(rest, "/")
 	// sub 可能是多段（如 chats/delete）：白名单只看首段，转发保留完整子路径。
-	if !ok || !omniAdminKinds[kind] || !omniAdminSubs[firstSeg(sub)] {
+	if !ok || !p.adminKindAllowed(kind) || !omniAdminSubs[firstSeg(sub)] {
 		writeErr(w, http.StatusNotFound, "not_found")
 		return
 	}

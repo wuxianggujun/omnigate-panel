@@ -47,6 +47,7 @@ var opsByType = map[string]func(*Gateway) ProviderOps{
 	"trae":      func(g *Gateway) ProviderOps { return traeOps{g} },
 	"newapi":    func(g *Gateway) ProviderOps { return newapiOps{g} },
 	"geminiweb": func(g *Gateway) ProviderOps { return geminiwebOps{g} },
+	"opencode":  func(g *Gateway) ProviderOps { return opencodeOps{g} },
 }
 
 // declaresAction reads the type's descriptor; a missing descriptor means the
@@ -292,6 +293,39 @@ func (o geminiwebOps) HandleAction(ctx context.Context, providerName string, req
 		return plugin.ActionResult{Data: geminiOutcomes(res)}, nil
 	default:
 		return plugin.ActionResult{}, fmt.Errorf("geminiweb 不支持操作 %q", req.Action)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// opencode
+
+// opencodeOps exposes OpenCode's provider-scoped quota query through the same
+// action path as every other type. OpenCode is a key-pool provider
+// (AccountModeNone): it has no accounts to list or maintain — only the Go 套餐
+// keys whose remaining quota the panel reads on demand. Quota is provider-scoped,
+// so req.Account is nil and no label is read.
+type opencodeOps struct{ g *Gateway }
+
+func (o opencodeOps) Supports(a plugin.ActionName) bool { return declaresAction("opencode", a) }
+
+func (o opencodeOps) ListAccounts(_ context.Context, providerName string, _ bool) ([]map[string]any, error) {
+	return o.g.genericAccountRows(providerName), nil
+}
+
+func (o opencodeOps) RemoveAccount(providerName, label string) bool {
+	return o.g.RaccoonRemoveAccount(providerName, label)
+}
+
+func (o opencodeOps) HandleAction(ctx context.Context, providerName string, req plugin.ActionRequest) (plugin.ActionResult, error) {
+	switch req.Action {
+	case plugin.ActionQuota:
+		res, err := o.g.OpencodeQuota(ctx, providerName)
+		if err != nil {
+			return plugin.ActionResult{}, err
+		}
+		return plugin.ActionResult{Data: res}, nil
+	default:
+		return plugin.ActionResult{}, fmt.Errorf("opencode 不支持操作 %q", req.Action)
 	}
 }
 

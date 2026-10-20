@@ -19,6 +19,7 @@ import (
 
 	"github.com/wuxianggujun/omnigate-panel/internal/kv"
 	"github.com/wuxianggujun/omnigate-panel/internal/livecfg"
+	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/plugin"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/plugin/catalog"
 	"github.com/wuxianggujun/omnigate-panel/internal/outbound"
 	"github.com/wuxianggujun/omnigate-panel/internal/panel"
@@ -257,7 +258,7 @@ func main() {
 		pcfg.OmniQuota = func(provider string) (any, error) {
 			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 			defer cancel()
-			return omni.OpencodeQuota(ctx, provider)
+			return omni.Quota(ctx, provider)
 		}
 		pcfg.OmniKeyHealth = omni.KeyHealthReport
 		pcfg.OmniLogin = omni.LoginRunable
@@ -268,6 +269,11 @@ func main() {
 		pcfg.OmniRefresh = omni.Refresh
 		pcfg.OmniAdmin = omni.Handler()
 		pcfg.OmniProviderTypes = func() any { return catalog.All() }
+		// admin 代理放行的供应商类型由描述符派生：新增一个 login.transport=admin
+		// 的插件后，面板代理自动放行，无需再改面板路由或白名单。
+		pcfg.OmniAdminKinds = func() []string {
+			return plugin.TypesByLoginTransport(plugin.LoginTransportAdmin)
+		}
 	}
 	pn := panel.New(pcfg)
 	log.SetOutput(io.MultiWriter(os.Stderr, pn.Logs()))

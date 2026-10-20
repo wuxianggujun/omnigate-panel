@@ -254,15 +254,24 @@ func (m *omniManager) Models(ctx context.Context) (any, error) {
 	return rt.gw.ListModels(ctx), nil
 }
 
-// OpencodeQuota 查询某 opencode 供应商全部 go 密钥的套餐额度（面板供应商行的
-//「额度」按钮）。进程内直取当前运行时——出站代理路由与热重载后的密钥池都
-// 由网关持有，面板侧不感知。明文密钥不出 provider 层。
-func (m *omniManager) OpencodeQuota(ctx context.Context, provider string) (any, error) {
+// Quota 查询某供应商的额度（面板供应商行的「额度」按钮）。分派交给网关的
+// ProviderOps：只有声明了 quota 动作的类型（当前为 opencode）才会执行，面板侧
+// 不再感知 provider 类型。进程内直取当前运行时——出站代理路由与热重载后的密钥池
+// 都由网关持有。明文密钥不出 provider 层。
+func (m *omniManager) Quota(ctx context.Context, provider string) (any, error) {
 	rt := m.cur.Load()
 	if rt == nil {
 		return nil, errors.New("omnigate 未就绪")
 	}
-	return rt.gw.OpencodeQuota(ctx, provider)
+	ops := rt.gw.Ops(provider)
+	if !ops.Supports(plugin.ActionQuota) {
+		return nil, fmt.Errorf("provider %q 不支持额度查询", provider)
+	}
+	res, err := ops.HandleAction(ctx, provider, plugin.ActionRequest{Action: plugin.ActionQuota})
+	if err != nil {
+		return nil, err
+	}
+	return res.Data, nil
 }
 
 // SetAPIKey 更新网关 api_key 并热重载（面板「重新生成」密钥后调用，使面板

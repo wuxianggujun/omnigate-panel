@@ -223,6 +223,84 @@ func TestLoginSpecClonedAndValidated(t *testing.T) {
 	}
 }
 
+// 任务类型 → 插件描述的解析：调度器靠它按描述符分发，不再 switch 类型字符串。
+func TestRegistryTaskByType(t *testing.T) {
+	r := NewRegistry()
+	p := samplePlugin("alpha", "Alpha")
+	p.Actions = append(p.Actions, Action{Name: ActionCheckin, Label: "签到", Scope: ActionScopeAccount})
+	p.Tasks = []Task{{Type: "alpha-checkin", Label: "签到", Action: ActionCheckin, Scope: ActionScopeAccount}}
+	r.MustRegister(p)
+	// A type that declares no task.
+	r.MustRegister(samplePlugin("beta", "Beta"))
+
+	desc, decl, ok := r.TaskByType("alpha-checkin")
+	if !ok {
+		t.Fatal("alpha-checkin 应能解析到声明它的插件")
+	}
+	if desc.Type != "alpha" {
+		t.Fatalf("desc.Type = %q, want alpha", desc.Type)
+	}
+	if decl.Action != ActionCheckin || decl.Scope != ActionScopeAccount {
+		t.Fatalf("decl = %+v, want checkin/account", decl)
+	}
+	if _, _, ok := r.TaskByType("nope"); ok {
+		t.Fatal("未声明的任务类型不该解析成功")
+	}
+}
+
+// 任务声明的 action 必须在同一描述符的 actions 里：否则调度器会分发到一个该类型
+// 运行时不接受的操作。
+func TestRegistryRejectsTaskWithUndeclaredAction(t *testing.T) {
+	r := NewRegistry()
+	p := samplePlugin("alpha", "Alpha")
+	// samplePlugin declares only ActionRemove; a task claiming checkin is invalid.
+	p.Tasks = []Task{{Type: "alpha-checkin", Label: "签到", Action: ActionCheckin}}
+	if err := r.Register(p); !errors.Is(err, ErrInvalidPlugin) {
+		t.Fatalf("task action 未声明应被拒绝，得到 %v", err)
+	}
+
+	// A task that declares no action is fine (it is not a provider operation).
+	plain := samplePlugin("plain", "Plain")
+	plain.Tasks = []Task{{Type: "plain-noop", Label: "无操作"}}
+	if err := r.Register(plain); err != nil {
+		t.Fatalf("未声明 action 的任务应被接受: %v", err)
+	}
+}
+
+// 按 login.transport 反查类型：面板代理用它决定放行哪些 kind，新增 admin
+// 传输的插件后无需再改面板。
+func TestRegistryTypesByLoginTransport(t *testing.T) {
+	r := NewRegistry()
+	admin1 := samplePlugin("alpha", "Alpha")
+	admin1.Login = &LoginSpec{Kind: LoginKindOAuth, Transport: LoginTransportAdmin}
+	r.MustRegister(admin1)
+	admin2 := samplePlugin("gamma", "Gamma")
+	admin2.Login = &LoginSpec{Kind: LoginKindPaste, Transport: LoginTransportAdmin}
+	r.MustRegister(admin2)
+	acct := samplePlugin("beta", "Beta")
+	acct.Login = &LoginSpec{Kind: LoginKindPaste, Transport: LoginTransportAccount}
+	r.MustRegister(acct)
+	// 无登录流程的类型不参与任何 transport 集合。
+	r.MustRegister(samplePlugin("nol", "No Login"))
+
+	got := r.TypesByLoginTransport(LoginTransportAdmin)
+	want := []string{"alpha", "gamma"} // 词法序
+	if len(got) != len(want) {
+		t.Fatalf("admin 传输类型 = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("admin 传输类型 = %v, want %v", got, want)
+		}
+	}
+	if acctTypes := r.TypesByLoginTransport(LoginTransportAccount); len(acctTypes) != 1 || acctTypes[0] != "beta" {
+		t.Fatalf("account 传输类型 = %v, want [beta]", acctTypes)
+	}
+	if newapi := r.TypesByLoginTransport(LoginTransportNewAPI); len(newapi) != 0 {
+		t.Fatalf("无 newapi 传输类型时应为空，得到 %v", newapi)
+	}
+}
+
 func TestRegistryNormalizesNilSlices(t *testing.T) {
 	r := NewRegistry()
 	p := samplePlugin("plain", "Plain")

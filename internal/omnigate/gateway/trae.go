@@ -395,26 +395,3 @@ func (g *Gateway) TraeCheckin(ctx context.Context, providerName, label string) (
 	}
 	return out, nil
 }
-
-// RunTraeCheckin is the scheduler entry point: check in every account.
-func (g *Gateway) RunTraeCheckin(providerName string) {
-	if _, err := g.traeProvider(providerName); err != nil {
-		g.log.Warn("签到：%v", err)
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
-	defer cancel()
-	outcomes, err := g.TraeCheckin(ctx, providerName, "")
-	if err != nil {
-		g.log.Warn("签到：%v", err)
-		return
-	}
-	for _, o := range outcomes {
-		switch {
-		case o.Error != "":
-			g.log.Warn("签到 %s「%s」失败: %s", providerName, o.Label, o.Error)
-		default:
-			g.log.Info("签到 %s「%s」：%s", providerName, o.Label, o.Message)
-		}
-	}
-}

@@ -99,6 +99,19 @@ type Traits struct {
 	AccountScopedModels bool `json:"account_scoped_models,omitempty"`
 	// SystemPrompt: the gateway injects provider.system_prompt for this type.
 	SystemPrompt bool `json:"system_prompt,omitempty"`
+	// SessionCookie: the account credential is a user-pasted session cookie that
+	// can silently expire (the upstream then answers 401/403). The gateway keeps
+	// a session-health ledger for these accounts so the panel can warn the
+	// operator before a chat request actually fails.
+	SessionCookie bool `json:"session_cookie,omitempty"`
+	// FallbackDefaultModel: an unresolved model falls back to cfg.DefaultModel
+	// rather than being forwarded verbatim, because the upstream's public model
+	// catalog is not authoritative for routing.
+	FallbackDefaultModel bool `json:"fallback_default_model,omitempty"`
+	// FallbackExcluded: the type's models are never used as generic third-party
+	// fallback candidates (free web-session providers, whose quota must not be
+	// silently drained by another provider's failure).
+	FallbackExcluded bool `json:"fallback_excluded,omitempty"`
 }
 
 // Capability is a coarse feature flag shown by the panel and used for

@@ -131,10 +131,12 @@ func runableSpec() plugin.Plugin {
 			return runable.NewProvider(s.Name, s.BaseURL, s.DeviceHeader), nil
 		},
 		Traits: plugin.Traits{
-			WireFormat:     plugin.WireRunable,
-			ToolEmulation:  true,
-			MaxPromptChars: runable.MaxPromptChars,
-			SystemPrompt:   true,
+			WireFormat:           plugin.WireRunable,
+			ToolEmulation:        true,
+			MaxPromptChars:       runable.MaxPromptChars,
+			SystemPrompt:         true,
+			SessionCookie:        true,
+			FallbackDefaultModel: true,
 		},
 		ConfigFields: []plugin.Field{
 			field("base_url", "Base URL", plugin.GroupConnection, plugin.KindURL,
@@ -361,11 +363,12 @@ func geminiWebSpec() plugin.Plugin {
 			return geminiweb.NewProvider(s.Name, s.Models), nil
 		},
 		Traits: plugin.Traits{
-			WireFormat:    plugin.WireGeminiWeb,
-			ToolEmulation: true,
-			Attachments:   true,
-			RotatesCookie: true,
-			SystemPrompt:  true,
+			WireFormat:       plugin.WireGeminiWeb,
+			ToolEmulation:    true,
+			Attachments:      true,
+			RotatesCookie:    true,
+			SystemPrompt:     true,
+			FallbackExcluded: true,
 		},
 		ConfigFields: []plugin.Field{
 			modelsField("留空 = 内置 gemini-pro / gemini-flash / gemini-flash-thinking / gemini-flash-lite。"),

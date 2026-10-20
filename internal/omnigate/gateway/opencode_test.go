@@ -95,15 +95,16 @@ func TestAccountProvidersStillRequireAccounts(t *testing.T) {
 	}
 }
 
-// opencode 是 OpenAI 兼容上游，reasoning_effort 要转发（runable 之类的自研协议没有
-// 对应概念，不在其中）。
+// reasoning_effort 是否转发由插件描述符的 Traits.ReasoningEffort 决定。OpenAI 兼容
+// 上游（opencode/newapi）以及会透传该字段的自研协议（raccoon/trae）都算支持；runable
+// 与 geminiweb 没有对应概念，不在其中。
 func TestSupportsEffortIncludesOpencode(t *testing.T) {
-	for _, typ := range []string{"openai", "raccoon", "opencode"} {
+	for _, typ := range []string{"openai", "raccoon", "opencode", "newapi", "trae"} {
 		if !supportsEffort(typ) {
 			t.Errorf("%s 应转发 reasoning_effort", typ)
 		}
 	}
-	for _, typ := range []string{"runable", "geminiweb", "newapi"} {
+	for _, typ := range []string{"runable", "geminiweb"} {
 		if supportsEffort(typ) {
 			t.Errorf("%s 不该被标记为支持 reasoning_effort", typ)
 		}

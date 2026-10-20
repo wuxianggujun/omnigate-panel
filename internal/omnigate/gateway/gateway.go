@@ -492,6 +492,31 @@ func (g *Gateway) ProviderType(name string) string {
 	return ""
 }
 
+// traitsOf returns the protocol traits a provider type declares in the plugin
+// registry. It is the single source of truth for the protocol-level questions
+// the gateway used to answer by switching on the type string (tool emulation,
+// attachments, reasoning_effort, prompt limit, wire format).
+//
+// An unregistered type yields the zero Traits — the safe default: no emulation,
+// no attachments, no prompt limit, empty wire format — so an unknown type keeps
+// behaving exactly as it did before it had a descriptor.
+func traitsOf(typ string) plugin.Traits {
+	if desc, err := plugin.Get(typ); err == nil {
+		return desc.Traits
+	}
+	return plugin.Traits{}
+}
+
+// accountModeOf returns the account mode a type declares ("", none, pool or
+// dynamic). An unregistered type yields "" — deliberately not AccountModeNone,
+// so a provider without a descriptor still requires a configured account.
+func accountModeOf(typ string) plugin.AccountMode {
+	if desc, err := plugin.Get(typ); err == nil {
+		return desc.AccountMode
+	}
+	return ""
+}
+
 // Accounts returns the account pool for a provider.
 func (g *Gateway) Accounts(name string) []*provider.Account {
 	g.accountsMu.RLock()
@@ -881,7 +906,7 @@ func (g *Gateway) resolveModel(ctx context.Context, providerName, model string) 
 			}
 		}
 	}
-	if g.ProviderType(providerName) == "runable" && g.cfg.DefaultModel != "" {
+	if traitsOf(g.ProviderType(providerName)).FallbackDefaultModel && g.cfg.DefaultModel != "" {
 		return g.cfg.DefaultModel
 	}
 	return model
@@ -1130,21 +1155,17 @@ func (g *Gateway) HandleChat(ctx context.Context, req *openai.ChatRequest, w htt
 	g.log.Info("✓ 完成 %s · %s", displayModel, res.finish)
 }
 
-// supportsEffort reports whether a provider forwards reasoning_effort upstream.
-// raccoon and OpenAI-compatible upstreams accept the OpenAI thinking tier;
-// runable's bespoke protocol has no equivalent. opencode 也是 OpenAI 兼容上游，
-// 且它自己的模型元数据带 reasoning_efforts 档位，所以同样转发。
+// supportsEffort reports whether a provider type forwards reasoning_effort
+// upstream. The fact lives in the plugin descriptor (Traits.ReasoningEffort), so
+// adding a type that accepts the OpenAI thinking tier is a catalog-only change.
 func supportsEffort(provType string) bool {
-	return provType == "raccoon" || provType == "openai" || provType == "opencode"
+	return traitsOf(provType).ReasoningEffort
 }
 
 // defaultPromptLimit 是各供应商类型「单条 prompt 字符数」的默认上限（上游硬限制）。
-// 0 = 无默认上限。
+// 0 = 无默认上限。默认值来自插件描述符（Traits.MaxPromptChars）。
 func defaultPromptLimit(provType string) int {
-	if provType == "runable" {
-		return runable.MaxPromptChars
-	}
-	return 0
+	return traitsOf(provType).MaxPromptChars
 }
 
 // promptLimit 返回该 provider 的单条 prompt 字符上限（0 = 不检查）。供应商配置里的
@@ -1240,7 +1261,7 @@ func (g *Gateway) buildInput(prov provider.Provider, model string, req *openai.C
 		return out
 	}
 	// Prompt-based providers need emulated tool calling.
-	if hasTools && (prov.Type() == "runable" || prov.Type() == "geminiweb") {
+	if hasTools && traitsOf(prov.Type()).ToolEmulation {
 		in := provider.ChatInput{
 			ChatID:          util.UUID(),
 			Model:           model,
@@ -1274,10 +1295,10 @@ func (g *Gateway) buildInput(prov provider.Provider, model string, req *openai.C
 	if hasTools {
 		in.Messages = req.Messages
 		in.Tools = req.Tools
-	} else if prov.Type() == "runable" {
+	} else if traitsOf(prov.Type()).WireFormat == plugin.WireRunable {
 		in.ChatID = g.getConv(toolcall.ConvKey(model, req.Messages)).chatID
 		in.Prompt = clamp(g.runablePrompt(model, req.Messages, true))
-	} else if prov.Type() == "geminiweb" {
+	} else if traitsOf(prov.Type()).WireFormat == plugin.WireGeminiWeb {
 		// Gemini Web 不认 OpenAI 消息数组，也没有可复用的服务端会话 id：把整段
 		// 历史（含 system）压成一条 prompt，每次自带上下文。
 		p := toolcall.Flatten(req.Messages)
@@ -1322,10 +1343,11 @@ func (g *Gateway) applySystemPrompt(in *provider.ChatInput, prov provider.Provid
 }
 
 // collectAttachments gathers the non-text parts of every message, for providers
-// that can actually carry them. A text-only provider gets nothing: handing it
-// attachments would only invite it to pretend it forwarded something.
+// that can actually carry them (Traits.Attachments). A text-only provider gets
+// nothing: handing it attachments would only invite it to pretend it forwarded
+// something.
 func collectAttachments(p provider.Provider, msgs []openai.Message) []openai.Attachment {
-	if p.Type() != "geminiweb" {
+	if !traitsOf(p.Type()).Attachments {
 		return nil
 	}
 	var out []openai.Attachment
@@ -1434,7 +1456,7 @@ func (g *Gateway) runChat(ctx context.Context, provName string, prov provider.Pr
 	limit := g.promptLimit(prov)
 
 	// Prompt-based providers need emulated tool calling.
-	if hasTools && (prov.Type() == "runable" || prov.Type() == "geminiweb") {
+	if hasTools && traitsOf(prov.Type()).ToolEmulation {
 		stream, err := g.openStream(ctx, provName, prov, in)
 		if err != nil {
 			return nil, friendlyUpstreamErr(provName, limit, err)
@@ -1597,10 +1619,11 @@ func (g *Gateway) openStream(ctx context.Context, provName string, prov provider
 
 	// Stateless upstreams (api-key based) need no account pool.
 	if len(accts) == 0 {
-		// opencode 与 openai 同属「密钥型」上游：凭证在供应商自己的密钥池里
-		// （opencode 是 zen_keys / go_keys 两套），账号池天然为空。漏掉这个分支
-		// 会让它在运行时直接报「no accounts configured」——配置界面上却完全正常。
-		if prov.Type() == "openai" || prov.Type() == "opencode" {
+		// 密钥型上游（openai / opencode）的凭证在供应商自己的密钥池里
+		// （opencode 是 zen_keys / go_keys 两套），账号池天然为空。AccountMode
+		// 为 none 就表示「没有账号记录、凭证在供应商级」，漏掉这个分支会让它在
+		// 运行时直接报「no accounts configured」——配置界面上却完全正常。
+		if accountModeOf(prov.Type()) == plugin.AccountModeNone {
 			if m := ReqMetaFrom(ctx); m != nil {
 				m.Account = "api-key"
 			}
@@ -1672,8 +1695,9 @@ func (g *Gateway) openStream(ctx context.Context, provName string, prov provider
 					}
 				}
 			}
-			// runable 会话是用户手动粘贴的，过期时上游回 401/403：记账供面板预警。
-			if err != nil && prov.Type() == "runable" && runableUnauthorized(err) {
+			// 会话型凭据（SessionCookie）由用户手动粘贴，过期时上游回 401/403：
+			// 记账供面板预警。
+			if err != nil && traitsOf(prov.Type()).SessionCookie && runableUnauthorized(err) {
 				g.sess.MarkExpired(provName, acc.Label, err.Error())
 			}
 			if err == nil {

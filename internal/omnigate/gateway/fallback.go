@@ -56,7 +56,7 @@ func (g *Gateway) fallbackCandidates(ctx context.Context, primaryProvider, prima
 		byName := map[string]fallbackCandidate{}
 		for _, name := range g.order {
 			pcfg := g.cfg.Provider(name)
-			if pcfg == nil || pcfg.Type == "geminiweb" {
+			if pcfg == nil || traitsOf(pcfg.Type).FallbackExcluded {
 				continue
 			}
 			models, err := g.models(ctx, name)

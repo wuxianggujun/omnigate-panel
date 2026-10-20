@@ -583,7 +583,8 @@ function modelIdsForProvider(name) {
   const set = new Set();
   for (const model of ui.models) {
     const id = String(model?.id || '');
-    if (!id) continue;
+    // 别名是路由层的名字，不能再作为另一个映射的上游目标，否则容易配出环。
+    if (!id || model.alias_of) continue;
     if (model.owned_by === name) {
       set.add(id.startsWith(`${name}/`) ? id.slice(name.length + 1) : id);
     } else if (id.startsWith(`${name}/`)) {
@@ -592,8 +593,10 @@ function modelIdsForProvider(name) {
   }
   const provider = providerList().find((p) => p.name === name);
   for (const model of provider?.config?.models || []) {
-    const value = String(model);
-    set.add(value.startsWith(`${name}/`) ? value.slice(name.length + 1) : value);
+    // 配置里存的是上游原始 ID；即使它恰好以 provider 名开头（例如
+    // provider=cline-pass、上游模型=cline-pass/deepseek-v4.1-flash），
+    // 也不能再剥一层，否则会把上游 ID 改坏。
+    set.add(String(model));
   }
   return Array.from(set).sort();
 }

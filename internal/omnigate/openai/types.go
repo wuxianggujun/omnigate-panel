@@ -282,6 +282,11 @@ type Model struct {
 	ContextWindow int64  `json:"context_window,omitempty"`
 	MaxTokens     int64  `json:"max_tokens,omitempty"`
 
+	// AliasOf 非空表示这条目录项是全局别名（model_mapping），值是它的目标链。
+	// 别名只是客户端可见的转发名，不是某个供应商真实存在的上游模型；面板据此
+	// 把它和供应商自有模型区分开。标准 OpenAI 客户端会忽略这个扩展字段。
+	AliasOf []string `json:"alias_of,omitempty"`
+
 	// Credits 是统一后的「积分消耗价」：raccoon 为计费倍率（×），runable 为每
 	// 百万 token 消耗的积分。CreditUnit 解释单位。
 	Credits    *float64 `json:"credits,omitempty"`

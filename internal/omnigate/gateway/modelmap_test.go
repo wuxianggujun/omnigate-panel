@@ -279,6 +279,14 @@ func TestListModelsExposesAliasInScope(t *testing.T) {
 	if !all["gpt-4o"] {
 		t.Fatalf("alias not listed: %+v", all)
 	}
+	for _, m := range g.ListModelsFor(context.Background(), nil) {
+		if m.ID != "gpt-4o" {
+			continue
+		}
+		if len(m.AliasOf) != 1 || m.AliasOf[0] != "fake/m" {
+			t.Fatalf("alias targets = %v, want [fake/m]", m.AliasOf)
+		}
+	}
 	// Out of scope for a key restricted to another provider → not listed.
 	for _, m := range g.ListModelsFor(context.Background(), []string{"other"}) {
 		if m.ID == "gpt-4o" {

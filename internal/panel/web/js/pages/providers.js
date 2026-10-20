@@ -304,7 +304,11 @@ function keyFieldValues(configProvider) {
 }
 
 function providerModels(provider) {
-  const catalog = (ui.models || []).filter((m) => m.owned_by === provider.name || String(m.id || '').startsWith(`${provider.name}/`));
+  // 别名（alias_of）是路由层的转发名，不是供应商真实存在的上游模型；
+  // 供应商页只展示自有模型，别名统一在「全局模型目录」和路由页查看。
+  const catalog = (ui.models || []).filter((m) =>
+    !m.alias_of &&
+    (m.owned_by === provider.name || String(m.id || '').startsWith(`${provider.name}/`)));
   const out = uniqueBy(catalog, (m) => m.id);
   const knownSuffixes = new Set(out.map((m) => {
     const id = String(m.id || '');
@@ -1073,7 +1077,7 @@ function modelsTab(provider, models, current) {
   wrap.appendChild(el('div', { class: 'section-toolbar' },
     el('div', { class: 'toolbar-title' },
       el('h3', { text: '模型目录' }),
-      el('span', { class: 'muted small', text: `${models.length} 个模型；id 已带供应商前缀` }),
+      el('span', { class: 'muted small', text: `${models.length} 个模型；id 形如 供应商/上游模型 ID` }),
     ),
     el('div', { class: 'toolbar-actions' },
       el('a', { class: 'btn btn-ghost btn-sm', href: '#/models' }, '全局模型目录'),

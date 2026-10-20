@@ -755,7 +755,12 @@ func (g *Gateway) ListModelsFor(ctx context.Context, allowed []string) []openai.
 			continue
 		}
 		seen[alias] = true
-		out = append(out, openai.Model{ID: alias, Object: "model", OwnedBy: pn})
+		out = append(out, openai.Model{
+			ID:      alias,
+			Object:  "model",
+			OwnedBy: pn,
+			AliasOf: g.ModelMappings().Chain(alias),
+		})
 	}
 	// 全局模型白名单（MODEL_WHITELIST）：非空时只暴露其中列出的对外模型 ID。
 	// 作用点选在这里，让 /v1/models、/v1beta/models 与面板模型目录三处口径一致。

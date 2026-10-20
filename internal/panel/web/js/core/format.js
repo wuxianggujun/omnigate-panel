@@ -1,4 +1,6 @@
-// format.js — 展示格式化、领域标签与内置供应商元数据（后端 provider-types 404 时兜底）。
+// format.js — 展示格式化、领域标签与内置供应商元数据（生成产物，接口失败时兜底）。
+
+import { BUILTIN_DESCRIPTORS } from './builtin-types.generated.js';
 
 const intFmt = new Intl.NumberFormat('zh-CN');
 const compactFmt = new Intl.NumberFormat('zh-CN', { notation: 'compact', maximumFractionDigits: 1 });
@@ -29,6 +31,17 @@ export const LOGIN_KIND_LABELS = Object.freeze({
   snippet: '浏览器脚本捕获',
   paste: '粘贴凭证',
   manual: '手动填写',
+});
+
+// 描述符的 group 是稳定的英文常量；表单直接把它当分组标题，这里译成中文。
+const GROUP_LABELS = Object.freeze({
+  basic: '基础',
+  connection: '连接',
+  credentials: '凭据',
+  models: '模型',
+  behavior: '行为',
+  advanced: '高级',
+  fingerprint: '指纹',
 });
 
 export const CAPABILITY_LABELS = Object.freeze({
@@ -405,234 +418,11 @@ export function sum(list, getter) {
 }
 
 // ---------------------------------------------------------------------------
-// 内置供应商元数据：7 种类型。后端 GET /panel/api/omni/provider-types 可用时
-// 以服务端为准；404 / 失败 / 结构不符时退回这份定义（页面完全由 schema 驱动）。
+// 兜底供应商元数据：由 catalog 生成（builtin-types.generated.js），与后端
+// provider-types 接口同形；两条路径共用 normalizeProviderTypes 解析。
 // ---------------------------------------------------------------------------
 
-const group = {
-  conn: '连接',
-  cred: '凭据',
-  model: '模型',
-  behavior: '行为',
-};
-
-/** @typedef {{name:string,label:string,type:string,group?:string,help?:string,placeholder?:string,required?:boolean,default?:any,advanced?:boolean,options?:Array<{value:string,label:string}|string>,item_type?:string,visible_if?:any,min?:number,max?:number,step?:number,rows?:number}} SchemaField */
-
-/** @type {Array<any>} */
-export const BUILTIN_PROVIDER_TYPES = Object.freeze([
-  {
-    type: 'raccoon',
-    label: '浣熊',
-    account_mode: 'oauth',
-    capabilities: ['chat', 'stream', 'tools', 'vision'],
-    actions: [
-      { id: 'checkin', label: '签到' },
-      { id: 'refresh', label: '刷新' },
-      { id: 'login', label: '登录' },
-      { id: 'remove', label: '移除' },
-    ],
-    config_schema: [
-      { name: 'main_origin', label: '主站地址', type: 'url', group: group.conn, placeholder: 'https://xiaohuanxiong.com', default: 'https://xiaohuanxiong.com' },
-      { name: 'llm_base', label: '模型接口', type: 'url', group: group.conn, help: '留空则使用主站默认路径' },
-      { name: 'auth_base', label: '鉴权接口', type: 'url', group: group.conn, help: '留空则使用主站默认路径' },
-      { name: 'system_prompt', label: '供应商系统提示词', type: 'textarea', group: group.behavior, rows: 3, help: '非空时注入发给该上游的每个请求' },
-      { name: 'max_prompt_chars', label: '单条提示词上限', type: 'number', group: group.behavior, advanced: true, help: '0 使用类型默认值，负数关闭限制' },
-    ],
-    account_schema: [
-      { name: 'label', label: '账号标签', type: 'text', required: true, placeholder: '例如 main' },
-      { name: 'cookie', label: 'Access Token', type: 'secret', required: true, help: '粘贴登录后的 access_token；也可先添加空壳再补' },
-      { name: 'refresh_token', label: 'Refresh Token', type: 'secret', advanced: true, help: '可选，用于自动续期' },
-      { name: 'email', label: '邮箱', type: 'text', advanced: true },
-      { name: 'password', label: '密码', type: 'secret', advanced: true },
-    ],
-    login: {
-      kind: 'oauth',
-      transport: 'admin',
-      label: '浏览器授权登录',
-      help: '在浏览器完成小浣熊登录后，把回调地址或授权码粘贴回来即可添加账号。',
-      fields: [
-        { name: 'label', label: '账号标签', type: 'text', help: '留空 = 自动命名（如「账号 1」）。' },
-        { name: 'redirect_base', label: '回调地址前缀', type: 'url', advanced: true, help: '可选：留空用桌面自定义协议（需手动粘贴回调）；填写时授权页会回跳到该地址，面板自动抓取授权码。' },
-      ],
-    },
-  },
-  {
-    type: 'runable',
-    label: 'Runable',
-    account_mode: 'cookie',
-    capabilities: ['chat', 'stream', 'tools'],
-    actions: [
-      { id: 'checkin', label: '签到' },
-      { id: 'refresh', label: '刷新' },
-      { id: 'login', label: '登录' },
-      { id: 'remove', label: '移除' },
-    ],
-    config_schema: [
-      { name: 'base_url', label: '上游地址', type: 'url', group: group.conn, placeholder: 'https://api.runable.com', default: 'https://api.runable.com' },
-      { name: 'device_header', label: 'Device Header', type: 'text', group: group.conn, advanced: true, help: '上游客户端指纹，通常无需修改' },
-      { name: 'system_prompt', label: '供应商系统提示词', type: 'textarea', group: group.behavior, rows: 3 },
-      { name: 'max_prompt_chars', label: '单条提示词上限', type: 'number', group: group.behavior, advanced: true },
-    ],
-    account_schema: [
-      { name: 'label', label: '账号标签', type: 'text', required: true, placeholder: '例如 team-alpha' },
-      { name: 'cookie', label: 'Session Token', type: 'secret', required: true, help: '浏览器登录 runable.com 后复制 session_token' },
-      { name: 'email', label: '邮箱', type: 'text', advanced: true },
-      { name: 'password', label: '密码', type: 'secret', advanced: true, help: '上游已关闭邮箱密码登录时仅留作备注' },
-    ],
-    login: {
-      kind: 'paste',
-      transport: 'account',
-      label: '粘贴会话 Cookie',
-      help: 'runable 只支持 Google / Facebook 登录，会话是 httpOnly Cookie，网页脚本读不到；请从浏览器开发者工具复制 session_token 粘贴进来。',
-      fields: [
-        { name: 'label', label: '账号标签', type: 'text', help: '留空 = 自动命名（如「账号 1」）。' },
-        { name: 'email', label: '邮箱', type: 'text', help: '可选：填了邮箱/密码则用服务端登录校验，替代 Cookie。' },
-        { name: 'password', label: '密码', type: 'secret', help: '可选：与邮箱配对使用。' },
-        { name: 'cookie', label: 'Session Cookie', type: 'secret', help: 'runable.com 的 session_token Cookie 值。' },
-      ],
-    },
-  },
-  {
-    type: 'openai',
-    label: 'OpenAI 兼容',
-    account_mode: 'apikey',
-    capabilities: ['chat', 'stream', 'tools', 'vision', 'reasoning'],
-    actions: [],
-    config_schema: [
-      { name: 'base_url', label: 'Base URL', type: 'url', group: group.conn, required: true, placeholder: 'https://api.openai.com/v1', default: 'https://api.openai.com/v1' },
-      { name: 'api_key', label: '上游密钥', type: 'secret', group: group.cred, help: '单个密钥；留空也可仅使用密钥池' },
-      { name: 'api_keys', label: '上游密钥池', type: 'list', item_type: 'secret', group: group.cred, help: '按请求轮询，401/403/429 自动冷却切下一个' },
-      { name: 'models', label: '模型列表', type: 'list', group: group.model, help: '留空时自动从上游 /models 发现' },
-      { name: 'system_prompt', label: '供应商系统提示词', type: 'textarea', group: group.behavior, rows: 3 },
-      { name: 'max_prompt_chars', label: '单条提示词上限', type: 'number', group: group.behavior, advanced: true },
-    ],
-    account_schema: [],
-  },
-  {
-    type: 'opencode',
-    label: 'OpenCode',
-    account_mode: 'apikey',
-    capabilities: ['chat', 'stream', 'tools', 'reasoning'],
-    actions: [],
-    config_schema: [
-      { name: 'base_url', label: 'Zen Base URL', type: 'url', group: group.conn, placeholder: 'https://opencode.ai/zen/v1', default: 'https://opencode.ai/zen/v1' },
-      { name: 'tier_prefer', label: '套餐优先', type: 'enum', group: group.conn, default: 'go', options: [{ value: 'go', label: 'Go 订阅优先' }, { value: 'zen', label: 'Zen 按量优先' }] },
-      { name: 'go_base_url', label: 'Go Base URL', type: 'url', group: group.conn, advanced: true, help: '留空使用官方默认地址' },
-      { name: 'zen_keys', label: 'Zen 密钥池', type: 'list', item_type: 'secret', group: group.cred, help: '按量付费 tier，池内轮询与冷却' },
-      { name: 'go_keys', label: 'Go 密钥池', type: 'list', item_type: 'secret', group: group.cred, help: '订阅套餐 tier，可在「上游密钥」查询套餐额度' },
-      { name: 'anonymous', label: '匿名免费通道', type: 'bool', group: group.behavior, default: true, help: '零密钥时按官方客户端形态使用公共免费层' },
-      { name: 'models', label: '模型列表', type: 'list', group: group.model, help: '留空时自动发现' },
-      { name: 'system_prompt', label: '供应商系统提示词', type: 'textarea', group: group.behavior, rows: 3, advanced: true },
-      { name: 'max_prompt_chars', label: '单条提示词上限', type: 'number', group: group.behavior, advanced: true },
-    ],
-    account_schema: [],
-  },
-  {
-    type: 'trae',
-    label: 'TRAE',
-    account_mode: 'login',
-    capabilities: ['chat', 'stream', 'tools', 'reasoning'],
-    actions: [
-      { id: 'checkin', label: '签到' },
-      { id: 'refresh', label: '刷新' },
-      { id: 'login', label: '登录' },
-      { id: 'remove', label: '移除' },
-    ],
-    config_schema: [
-      { name: 'agent_host', label: 'Agent Host', type: 'url', group: group.conn, placeholder: 'https://trae-api-cn.mchost.guru', default: 'https://trae-api-cn.mchost.guru' },
-      { name: 'ug_host', label: 'UG Host', type: 'url', group: group.conn, default: 'https://api.trae.cn' },
-      { name: 'oauth_host', label: 'OAuth Host', type: 'url', group: group.conn, default: 'https://api.trae.com.cn' },
-      { name: 'system_prompt', label: '供应商系统提示词', type: 'textarea', group: group.behavior, rows: 3 },
-      { name: 'max_prompt_chars', label: '单条提示词上限', type: 'number', group: group.behavior, advanced: true },
-    ],
-    account_schema: [
-      { name: 'label', label: '账号标签', type: 'text', required: true, placeholder: '例如 solo-1' },
-      { name: 'cookie', label: 'Access Token', type: 'secret', required: true },
-      { name: 'refresh_token', label: 'Refresh Token', type: 'secret', advanced: true },
-      { name: 'uid', label: 'UID', type: 'text', advanced: true },
-      { name: 'machine_id', label: 'Machine ID', type: 'text', advanced: true, help: '每个账号必须唯一，签到依赖该指纹' },
-      { name: 'device_id', label: 'Device ID', type: 'text', advanced: true },
-      { name: 'api_host', label: 'API Host', type: 'url', advanced: true },
-    ],
-    login: {
-      kind: 'oauth',
-      transport: 'admin',
-      label: '浏览器授权登录',
-      help: '在浏览器完成 TRAE 登录后，把回调地址粘贴回来即可添加账号；设备指纹在登录时生成并随账号保存。',
-      fields: [
-        { name: 'label', label: '账号标签', type: 'text', help: '留空 = 自动命名（如「TRAE 账号 1」）。' },
-      ],
-    },
-  },
-  {
-    type: 'newapi',
-    label: 'New API',
-    account_mode: 'login',
-    capabilities: ['chat', 'stream', 'tools', 'vision', 'reasoning'],
-    actions: [
-      { id: 'checkin', label: '签到' },
-      { id: 'refresh', label: '刷新' },
-      { id: 'login', label: '登录' },
-      { id: 'remove', label: '移除' },
-    ],
-    config_schema: [
-      { name: 'base_url', label: '站点地址', type: 'url', group: group.conn, required: true, placeholder: 'https://your-newapi.example.com' },
-      { name: 'api_key', label: '默认聊天密钥', type: 'secret', group: group.cred, help: '供应商级 sk- 密钥，账号未单独配置时使用' },
-      { name: 'api_keys', label: '密钥池', type: 'list', item_type: 'secret', group: group.cred },
-      { name: 'models', label: '模型列表', type: 'list', group: group.model },
-      { name: 'system_prompt', label: '供应商系统提示词', type: 'textarea', group: group.behavior, rows: 3, advanced: true },
-      { name: 'max_prompt_chars', label: '单条提示词上限', type: 'number', group: group.behavior, advanced: true },
-    ],
-    account_schema: [
-      { name: 'label', label: '账号标签', type: 'text', required: true },
-      { name: 'cookie', label: '会话 ID', type: 'secret', required: true, help: 'New API 的 X-Auth-Session / access token' },
-      { name: 'api_key', label: '聊天 API Key', type: 'secret', help: 'sk- 密钥，用于实际对话' },
-      { name: 'refresh_token', label: 'Refresh Token', type: 'secret', advanced: true },
-      { name: 'session_cookie', label: 'Session Cookie', type: 'secret', advanced: true },
-    ],
-    login: {
-      kind: 'snippet',
-      transport: 'newapi',
-      label: '浏览器会话捕获',
-      help: '在站点登录后，把面板生成的脚本粘贴进浏览器控制台运行；脚本会把 access_token 与会话回传给面板并自动建号。',
-      fields: [
-        { name: 'label', label: '账号标签', type: 'text', help: '留空 = 自动命名（用站点用户名当账号名）。' },
-        { name: 'api_key', label: 'Chat API Key', type: 'secret', help: '可选：站点里的 sk- 密钥，用于聊天与模型目录；也可稍后在账号里补填。' },
-      ],
-    },
-  },
-  {
-    type: 'geminiweb',
-    label: 'Gemini Web',
-    account_mode: 'cookie',
-    capabilities: ['chat', 'stream', 'vision'],
-    actions: [
-      { id: 'checkin', label: '签到' },
-      { id: 'refresh', label: '刷新' },
-      { id: 'login', label: '登录' },
-      { id: 'remove', label: '移除' },
-    ],
-    config_schema: [
-      { name: 'base_url', label: '网页端地址', type: 'url', group: group.conn, advanced: true, default: 'https://gemini.google.com' },
-      { name: 'system_prompt', label: '供应商系统提示词', type: 'textarea', group: group.behavior, rows: 3 },
-      { name: 'max_prompt_chars', label: '单条提示词上限', type: 'number', group: group.behavior, advanced: true },
-    ],
-    account_schema: [
-      { name: 'label', label: '账号标签', type: 'text', required: true },
-      { name: 'cookie', label: 'Cookie', type: 'secret', required: true, help: '包含 __Secure-1PSID 等 Gemini 网页端 Cookie' },
-    ],
-    login: {
-      kind: 'paste',
-      transport: 'admin',
-      label: '粘贴 Google Cookie',
-      help: '从浏览器复制 gemini.google.com 的完整 Cookie（需含 __Secure-1PSID 与 __Secure-1PSIDTS），粘贴后服务端会立即验活。',
-      fields: [
-        { name: 'label', label: '账号标签', type: 'text', help: '留空 = 自动命名（如「账号 1」）。' },
-        { name: 'cookie', label: 'Google Cookie', type: 'secret', required: true, help: 'gemini.google.com 的完整 Cookie。' },
-      ],
-    },
-  },
-]);
+export const BUILTIN_PROVIDER_TYPES = normalizeProviderTypes({ types: BUILTIN_DESCRIPTORS }) || [];
 
 export function findProviderType(types, type) {
   const list = Array.isArray(types) && types.length ? types : BUILTIN_PROVIDER_TYPES;
@@ -656,16 +446,6 @@ function normalizeCondition(condition) {
   if (condition.key && !condition.field) return { ...condition, field: condition.key };
   return condition;
 }
-
-const GROUP_LABELS = Object.freeze({
-  basic: '基础',
-  connection: '连接',
-  credentials: '凭据',
-  models: '模型',
-  behavior: '行为',
-  advanced: '高级',
-  fingerprint: '指纹',
-});
 
 function normalizeSchemaField(field) {
   if (!field || typeof field !== 'object') return null;

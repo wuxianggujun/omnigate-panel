@@ -318,7 +318,7 @@ function render() {
   page.appendChild(el('div', { class: 'page-footer-note' },
     el('span', { text: `共 ${fmtInt(ui.entries.length)} 条可见记录` }),
     ui.lastLoaded ? el('span', { text: `更新于 ${fmtTime(ui.lastLoaded)}` }) : null,
-    el('span', { text: '归档上限 1000 条/次；筛选为包含匹配。' }),
+    el('span', { text: '列表最多 1000 条/次，完整日用量见「用量」页；筛选为包含匹配。' }),
   ));
   rootEl.replaceChildren(page);
 }

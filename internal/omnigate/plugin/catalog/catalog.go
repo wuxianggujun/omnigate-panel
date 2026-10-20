@@ -345,7 +345,7 @@ func openAISpec() plugin.Plugin {
 			field("api_keys", "API Key 池", plugin.GroupCredentials, plugin.KindList,
 				itemKind(plugin.KindSecret),
 				help("一行一个；多把按请求轮询，失败自动冷却。留空 = 用 api_key。")),
-			modelsField("留空 = 自动发现；填写时作为目录不可用时的回退清单。"),
+			modelsField("留空 = 自动向上游发现；填写 = 只使用这些模型，不再自动拉取。"),
 			systemPromptField(),
 		},
 		AccountFields: []plugin.Field{},

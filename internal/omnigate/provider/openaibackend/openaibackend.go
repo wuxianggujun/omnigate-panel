@@ -446,8 +446,18 @@ func (p *Provider) auth(req *http.Request, key string) {
 	}
 }
 
-// ListModels fetches /models, falling back to the configured model list.
+// ListModels 返回供应商的模型目录。
+//
+// 显式配置了 models 时，它就是目录白名单：直接返回该清单，绝不访问上游 /models。
+// 否则「手动只加了一个模型」会被自动发现覆盖成上游的全部模型。models 留空才自动发现。
 func (p *Provider) ListModels(ctx context.Context) ([]openai.Model, error) {
+	if len(p.models) > 0 {
+		out := make([]openai.Model, 0, len(p.models))
+		for _, id := range p.models {
+			out = append(out, openai.Model{ID: id, Object: "model", OwnedBy: p.name})
+		}
+		return out, nil
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.baseURL+"/models", nil)
 	if err == nil {
 		key, _ := p.pick(nil)

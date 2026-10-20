@@ -558,6 +558,46 @@ function uniqueModels() {
   return Array.from(set).sort();
 }
 
+// aliasSuggestions：别名输入框的补全候选（目录模型 + 已剥离 provider 前缀的裸名 +
+// 现有别名 + 供应商显式模型）。只是建议，不限制手输。
+function aliasSuggestions() {
+  const set = new Set();
+  for (const model of ui.models) {
+    const id = String(model?.id || '');
+    if (!id) continue;
+    set.add(id);
+    const slash = id.indexOf('/');
+    if (slash > 0) set.add(id.slice(slash + 1));
+  }
+  for (const alias of Object.keys(ui.mappings)) set.add(alias);
+  for (const provider of providerList()) {
+    for (const model of provider?.config?.models || []) set.add(String(model));
+  }
+  return Array.from(set).sort();
+}
+
+// modelIdsForProvider：某供应商在目录里可选的模型，统一去掉 "provider/" 前缀，
+// 便于拼成映射目标的 "provider/model" 形式。
+function modelIdsForProvider(name) {
+  if (!name) return [];
+  const set = new Set();
+  for (const model of ui.models) {
+    const id = String(model?.id || '');
+    if (!id) continue;
+    if (model.owned_by === name) {
+      set.add(id.startsWith(`${name}/`) ? id.slice(name.length + 1) : id);
+    } else if (id.startsWith(`${name}/`)) {
+      set.add(id.slice(name.length + 1));
+    }
+  }
+  const provider = providerList().find((p) => p.name === name);
+  for (const model of provider?.config?.models || []) {
+    const value = String(model);
+    set.add(value.startsWith(`${name}/`) ? value.slice(name.length + 1) : value);
+  }
+  return Array.from(set).sort();
+}
+
 function renderResolution() {
   const inputValue = String(ui.resolutionInput || '').trim();
   const box = el('div', { class: 'resolve-box' });
@@ -866,14 +906,62 @@ function openMappingModal(alias) {
   const aliasInput = el('input', {
     class: 'input mono', type: 'text', value: alias || '', placeholder: '例如 gpt-4o',
     disabled: editing, autocomplete: 'off', spellcheck: 'false',
+    attrs: { list: 'mapping-alias-options' },
   });
+  const aliasOptions = el('datalist', { id: 'mapping-alias-options' },
+    aliasSuggestions().map((value) => el('option', { value })),
+  );
   const targetsInput = el('textarea', {
     class: 'input textarea mono', rows: 4,
     value: editing ? (ui.mappings[alias] || []).join('\n') : '',
-    placeholder: 'provider/model，每行一个；自上而下构成回退链\n例如 raccoon/gpt-4o\njustwoker/gpt-4.1',
+    placeholder: 'provider/model，每行一个；自上而下构成回退链\n例如 atria/Atria-Dawn-Preview\ncline-pass/deepseek-v4.1-flash',
   });
   const enabledInput = el('input', { type: 'checkbox', checked: editing ? !ui.disabled[alias] : true });
   const errorBox = el('p', { class: 'form-error', attrs: { role: 'alert' } });
+
+  // 列表选择：先选供应商，再从它的目录模型里挑目标，点「加入目标链」追加到下方文本框。
+  // 文本框保留手动输入，两种方式写的是同一份目标链。
+  const providers = providerList();
+  const providerSelect = el('select', { class: 'input select' },
+    el('option', { value: '', text: '选择供应商…' }),
+    providers.map((p) => el('option', {
+      value: p.name,
+      text: `${p.name} · ${typeMeta(p.type).label || providerLabel(p.type)}`,
+      selected: providers.length === 1,
+    })),
+  );
+  const modelSelect = el('select', { class: 'input select' });
+  const addTargetBtn = el('button', { class: 'btn btn-ghost', type: 'button' }, icon('plus', 14), '加入目标链');
+  const fillModels = () => {
+    const name = providerSelect.value;
+    const models = modelIdsForProvider(name);
+    modelSelect.replaceChildren(
+      el('option', { value: '', text: models.length ? '选择模型…' : (name ? '该供应商暂无目录模型' : '先选择供应商') }),
+      ...models.map((id) => el('option', { value: id, text: id })),
+    );
+    modelSelect.disabled = !name || !models.length;
+    addTargetBtn.disabled = !name || !models.length;
+  };
+  providerSelect.addEventListener('change', fillModels);
+  fillModels();
+  addTargetBtn.addEventListener('click', () => {
+    const name = providerSelect.value;
+    const model = modelSelect.value;
+    if (!name || !model) {
+      errorBox.textContent = '请先选择供应商与模型';
+      return;
+    }
+    const target = `${name}/${model}`;
+    const lines = targetsInput.value.split(/\r?\n|,/).map((s) => s.trim()).filter(Boolean);
+    if (lines.includes(target)) {
+      errorBox.textContent = '目标链中已存在该模型';
+      return;
+    }
+    lines.push(target);
+    targetsInput.value = lines.join('\n');
+    errorBox.textContent = '';
+  });
+
   const saveBtn = el('button', { class: 'btn btn-primary', type: 'button' }, editing ? '保存映射' : '添加映射');
   const cancelBtn = el('button', { class: 'btn btn-ghost', type: 'button' }, '取消');
 
@@ -885,7 +973,13 @@ function openMappingModal(alias) {
       el('div', { class: 'field' },
         el('label', { class: 'field-label' }, '别名', el('span', { class: 'required-mark', text: '*' })),
         aliasInput,
-        el('p', { class: 'field-help', text: editing ? '编辑时不允许改名；如需新名字请删除后重新添加。' : '建议使用客户端现有的模型名。' }),
+        aliasOptions,
+        el('p', { class: 'field-help', text: editing ? '编辑时不允许改名；如需新名字请删除后重新添加。' : '建议使用客户端现有的模型名；输入框支持从模型目录补全。' }),
+      ),
+      el('div', { class: 'field' },
+        el('label', { class: 'field-label' }, '从模型列表选择目标'),
+        el('div', { class: 'mapping-picker' }, providerSelect, modelSelect, addTargetBtn),
+        el('p', { class: 'field-help', text: '选好供应商与模型后点「加入目标链」；也可以在下方手动输入任意 provider/model。' }),
       ),
       el('div', { class: 'field' },
         el('label', { class: 'field-label' }, '目标链', el('span', { class: 'required-mark', text: '*' })),

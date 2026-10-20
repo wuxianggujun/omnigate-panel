@@ -1179,6 +1179,9 @@ code, pre, .mono { font-family: var(--mono); font-variant-ligatures: none; }
 .mapping-arrow { color: var(--border-strong); font-size: 11px; }
 .mapping-actions { display: flex; align-items: center; gap: 2px; flex: none; }
 .mapping-form { display: flex; flex-direction: column; gap: 14px; }
+.mapping-picker { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.mapping-picker .select { flex: 1 1 170px; min-width: 0; }
+.mapping-picker .btn { flex: none; }
 
 .scope-body { display: flex; flex-direction: column; gap: 7px; }
 .scope-key-card {

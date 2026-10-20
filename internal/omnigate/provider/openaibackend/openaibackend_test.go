@@ -381,3 +381,43 @@ func TestIsQuotaFailureClassify(t *testing.T) {
 		}
 	}
 }
+
+// 显式配置 models 时，目录就是这份白名单：不访问上游 /models，也不把上游
+// 的全部模型混进来（手动只加一个就只显示一个）。
+func TestListModelsUsesConfiguredListOnly(t *testing.T) {
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"upstream-only"},{"id":"another"}]}`))
+	}))
+	defer srv.Close()
+
+	p := New("fake", srv.URL, "", []string{"deepseek-v4.1-flash"})
+	models, err := p.ListModels(context.Background())
+	if err != nil {
+		t.Fatalf("ListModels: %v", err)
+	}
+	if len(models) != 1 || models[0].ID != "deepseek-v4.1-flash" || models[0].OwnedBy != "fake" {
+		t.Fatalf("应只返回配置的模型，实际 %+v", models)
+	}
+	if hits != 0 {
+		t.Fatalf("显式模型清单不应访问上游 /models，实际 %d 次", hits)
+	}
+}
+
+// models 留空时才自动发现上游目录。
+func TestListModelsAutoDiscoversWhenUnset(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"upstream-a"},{"id":"upstream-b"}]}`))
+	}))
+	defer srv.Close()
+
+	p := New("fake", srv.URL, "", nil)
+	models, err := p.ListModels(context.Background())
+	if err != nil {
+		t.Fatalf("ListModels: %v", err)
+	}
+	if len(models) != 2 || models[0].ID != "upstream-a" || models[1].ID != "upstream-b" {
+		t.Fatalf("models 留空应自动发现上游目录，实际 %+v", models)
+	}
+}

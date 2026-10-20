@@ -18,7 +18,7 @@ import {
   BUILTIN_PROVIDER_TYPES, accountBalance, accountError, capsOfModel, capabilityLabel,
   deepClone, fmtChartTime, fmtCredits, fmtDateTime, fmtDuration, fmtInt, fmtNum, fmtPercent,
   fmtRelative, fmtRemaining, fmtTime, fmtTokenPrice, fmtUptime, healthOfAccount,
-  normalizeProviderTypes, parseDate, prettyJSON, providerLabel, truncate, uniqueBy,
+  isKeyBasedProvider, normalizeProviderTypes, parseDate, prettyJSON, providerLabel, truncate, uniqueBy,
 } from '../core/format.js';
 import { createTabs } from '../components/tabs.js';
 import { createTable } from '../components/table.js';
@@ -260,7 +260,7 @@ function providerStatus(provider) {
   const role = authState().role;
   if (!accounts.length) {
     const meta = typeMeta(provider.type);
-    if (meta.account_mode === 'apikey') {
+    if (isKeyBasedProvider(meta)) {
       if (provider.config && keyFieldValues(provider.config).length === 0) {
         return { tone: 'warn', label: '空壳' };
       }
@@ -429,7 +429,7 @@ function providerPane(list, selected, current) {
       el('div', { class: 'provider-item-type' },
         el('span', { text: meta.label || providerLabel(provider.type) }),
         el('span', { class: 'dot-sep', text: '·' }),
-        el('span', { text: provider.accounts.length ? `${provider.accounts.length} 账号` : (meta.account_mode === 'apikey' ? '密钥型' : '0 账号') }),
+        el('span', { text: provider.accounts.length ? `${provider.accounts.length} 账号` : (isKeyBasedProvider(meta) ? '密钥型' : '0 账号') }),
       ),
       el('div', { class: 'provider-item-meta' },
         statusDot(status.tone, status.label),
@@ -590,7 +590,8 @@ function overviewTab(provider, meta, current, models) {
     }));
   }
 
-  if (meta.type === 'opencode' || provider.type === 'opencode') {
+  // 额度卡片由描述符声明：哪个类型声明了 quota 动作，概览页就渲染额度卡片。
+  if (actionIds(meta).has('quota')) {
     wrap.appendChild(quotaCard(provider, current));
   }
 
@@ -845,7 +846,7 @@ function addAccountPanel(provider, meta, current) {
       ? el('button', {
         class: 'btn btn-ghost btn-sm', type: 'button', dataset: { action: 'login-wizard', provider: provider.name },
       }, icon('login', 14), '改用登录向导')
-      : badge(meta.account_mode === 'cookie' ? 'Cookie 账号' : (meta.account_mode === 'oauth' ? 'OAuth 账号' : '登录账号'), 'info'),
+      : badge(meta.login?.kind === 'paste' ? 'Cookie 账号' : (meta.login?.kind === 'oauth' ? 'OAuth 账号' : '登录账号'), 'info'),
     body: el('div', {},
       form.el,
       errorBox,
@@ -979,10 +980,11 @@ function keysTab(provider, meta, current) {
       body: table.el,
     }));
   } else if (keyFields.length) {
-    wrap.appendChild(notice('muted', '暂无密钥健康数据', '密钥池只有 openai/newapi 等 api_keys 类型会进入自动禁用与清理。'));
+    wrap.appendChild(notice('muted', '暂无密钥健康数据', '只有配置了上游密钥池（api_keys / zen_keys / go_keys）的供应商会进入自动禁用与清理。'));
   }
 
-  if (provider.type === 'opencode') {
+  // 同上：额度卡片只看描述符是否声明了 quota，不再认类型名。
+  if (actionIds(meta).has('quota')) {
     wrap.appendChild(quotaCard(provider, current));
   }
   return wrap;

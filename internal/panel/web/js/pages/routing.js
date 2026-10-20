@@ -8,8 +8,8 @@ import {
   el, card, badge, statusDot, emptyState, loadingBlock, icon, debounce,
 } from '../core/dom.js';
 import {
-  BUILTIN_PROVIDER_TYPES, healthOfAccount, normalizeKeyList, normalizeProviderTypes,
-  parseDate, prettyJSON, providerLabel,
+  BUILTIN_PROVIDER_TYPES, healthOfAccount, isKeyBasedProvider, normalizeKeyList,
+  normalizeProviderTypes, parseDate, prettyJSON, providerLabel,
 } from '../core/format.js';
 import { openModal, confirmDialog } from '../components/modal.js';
 import { toastError, toastSuccess, toastWarn } from '../components/toast.js';
@@ -182,7 +182,7 @@ function providerHealth(name) {
   if (!accounts.length) {
     const provider = providerList().find((p) => p.name === name);
     const meta = typeMeta(provider?.type);
-    if (meta.account_mode === 'apikey' || provider?.type === 'openai' || provider?.type === 'opencode') {
+    if (isKeyBasedProvider(meta)) {
       return { tone: hasProviderKeys(provider?.config) ? 'ok' : 'warn', label: hasProviderKeys(provider?.config) ? '供应商密钥' : '无可用密钥' };
     }
     return { tone: 'warn', label: '无账号' };
@@ -798,7 +798,7 @@ function pickAccount(providerName) {
   const accounts = accountsFor(providerName);
   const meta = typeMeta(provider?.type);
   if (!accounts.length) {
-    if (meta.account_mode === 'apikey' || provider?.type === 'openai' || provider?.type === 'opencode') {
+    if (isKeyBasedProvider(meta)) {
       if (hasProviderKeys(provider?.config)) return { label: '供应商密钥', healthy: true };
       return null;
     }

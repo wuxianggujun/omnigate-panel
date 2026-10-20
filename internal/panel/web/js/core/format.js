@@ -626,6 +626,16 @@ export function findProviderType(types, type) {
   return list.find((item) => item.type === type) || null;
 }
 
+// 密钥型供应商（凭证在供应商级，没有账号记录）。
+//
+// account_mode 有两套历史词汇：后端插件描述符用 SPI 的 none/pool/dynamic，
+// 内置兜底元数据用 apikey/oauth/cookie/login。判断入口只此一处，两种都认，
+// 避免新增密钥型插件被界面误判成「空壳 / 无账号」。
+export function isKeyBasedProvider(meta) {
+  const mode = String(meta?.account_mode || '').toLowerCase();
+  return mode === 'none' || mode === 'apikey';
+}
+
 function normalizeSchemaField(field) {
   if (!field || typeof field !== 'object') return null;
   const name = field.name || field.key || field.id;

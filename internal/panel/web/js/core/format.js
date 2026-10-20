@@ -32,6 +32,7 @@ export const LOGIN_KIND_LABELS = Object.freeze({
 });
 
 export const CAPABILITY_LABELS = Object.freeze({
+  // 模型能力（模型目录条目）
   chat: '对话',
   stream: '流式',
   tools: '工具',
@@ -41,6 +42,18 @@ export const CAPABILITY_LABELS = Object.freeze({
   embedding: '向量',
   audio: '音频',
   code: '代码',
+  // 供应商能力（插件描述符 capabilities）
+  accounts: '账号池',
+  upstream_keys: '密钥池',
+  balance: '余额',
+  checkin: '签到',
+  quota: '额度',
+  login: '登录',
+  fingerprint: '指纹',
+  models: '模型目录',
+  refresh: '刷新',
+  attachments: '附件',
+  cookie_rotation: 'Cookie 轮换',
 });
 
 export const ROLE_LABELS = Object.freeze({
@@ -636,15 +649,40 @@ export function isKeyBasedProvider(meta) {
   return mode === 'none' || mode === 'apikey';
 }
 
+function normalizeCondition(condition) {
+  if (Array.isArray(condition)) return condition.map(normalizeCondition);
+  if (!condition || typeof condition !== 'object') return condition;
+  // 描述符用 { key, equals }；表单求值器用 { field, equals }。
+  if (condition.key && !condition.field) return { ...condition, field: condition.key };
+  return condition;
+}
+
+const GROUP_LABELS = Object.freeze({
+  basic: '基础',
+  connection: '连接',
+  credentials: '凭据',
+  models: '模型',
+  behavior: '行为',
+  advanced: '高级',
+  fingerprint: '指纹',
+});
+
 function normalizeSchemaField(field) {
   if (!field || typeof field !== 'object') return null;
   const name = field.name || field.key || field.id;
   if (!name) return null;
+  // 描述符用 key / kind / enum / show_if / item_kind；表单用
+  // name / type / options / visible_if / item_type。
+  const kind = field.type || field.kind || 'text';
   return {
     ...field,
     name: String(name),
     label: String(field.label || field.title || name),
-    type: String(field.type || 'text').toLowerCase(),
+    type: String(kind).toLowerCase(),
+    options: field.options || field.enum || undefined,
+    visible_if: normalizeCondition(field.visible_if ?? field.show_if),
+    item_type: field.item_type || field.item_kind,
+    group: GROUP_LABELS[field.group] || field.group,
   };
 }
 
@@ -658,11 +696,21 @@ export function normalizeProviderTypes(payload) {
     const mode = String(item.account_mode || item.accountMode || 'mixed').toLowerCase();
     out.push({
       type: String(item.type),
-      label: String(item.label || providerLabel(item.type)),
+      label: String(item.label || item.display_name || providerLabel(item.type)),
       account_mode: modeMap[mode] || mode,
       capabilities: Array.isArray(item.capabilities) ? item.capabilities.map(String) : [],
       actions: Array.isArray(item.actions)
-        ? item.actions.map((a) => (typeof a === 'string' ? { id: a, label: a } : { id: String(a.id || ''), label: String(a.label || a.id || '') }))
+        ? item.actions.map((a) => {
+          if (typeof a === 'string') return { id: a, label: a };
+          const id = a.id || a.name || '';
+          return {
+            id: String(id),
+            label: String(a.label || id),
+            scope: a.scope,
+            confirm: !!a.confirm,
+            help: a.help,
+          };
+        }).filter((a) => a.id)
         : [],
       config_schema: (Array.isArray(item.config_schema) ? item.config_schema : (Array.isArray(item.configSchema) ? item.configSchema : []))
         .map(normalizeSchemaField).filter(Boolean),

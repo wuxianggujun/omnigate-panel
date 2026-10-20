@@ -92,6 +92,9 @@ type Field struct {
 	Min         *float64     `json:"min,omitempty"`
 	Max         *float64     `json:"max,omitempty"`
 	ShowIf      *Condition   `json:"show_if,omitempty"`
+	// ItemKind, on KindList fields, is the render/parse kind of each item (for
+	// example secret for a key pool). Empty = plain text.
+	ItemKind FieldKind `json:"item_kind,omitempty"`
 }
 
 // Validate checks one field's internal consistency. Referential checks (ShowIf
@@ -105,6 +108,14 @@ func (f Field) Validate() error {
 	}
 	if !f.Kind.Valid() {
 		return fmt.Errorf("字段 %q: 未知 kind %q", f.Key, f.Kind)
+	}
+	if f.ItemKind != "" {
+		if f.Kind != KindList {
+			return fmt.Errorf("字段 %q: item_kind 只能用于 list 字段", f.Key)
+		}
+		if !f.ItemKind.Valid() {
+			return fmt.Errorf("字段 %q: 未知 item_kind %q", f.Key, f.ItemKind)
+		}
 	}
 	if (f.Kind == KindEnum || f.Kind == KindMultiSelect) && len(f.Enum) == 0 {
 		return fmt.Errorf("字段 %q: kind=%s 必须提供 enum", f.Key, f.Kind)

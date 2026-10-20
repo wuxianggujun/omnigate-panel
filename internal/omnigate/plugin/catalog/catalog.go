@@ -227,8 +227,10 @@ func opencodeSpec() plugin.Plugin {
 				placeholder(opencode.DefaultGoBase),
 				help("Go 订阅套餐的地址；留空 = 默认地址。")),
 			field("zen_keys", "Zen 密钥池", plugin.GroupCredentials, plugin.KindList,
+				itemKind(plugin.KindSecret),
 				help("按量付费密钥，一行一个；多把按请求轮询，失败自动冷却。")),
 			field("go_keys", "Go 密钥池", plugin.GroupCredentials, plugin.KindList,
+				itemKind(plugin.KindSecret),
 				help("订阅套餐密钥，一行一个；与 Zen 密钥不通用。")),
 			enumField("tier_prefer", "优先 Tier", plugin.GroupBehavior, opencode.TierGo,
 				plugin.EnumOption{Value: opencode.TierGo, Label: "Go（订阅优先）"},
@@ -341,6 +343,7 @@ func openAISpec() plugin.Plugin {
 			field("api_key", "API Key", plugin.GroupCredentials, plugin.KindSecret,
 				help("单个上游密钥；与 api_keys 二选一。")),
 			field("api_keys", "API Key 池", plugin.GroupCredentials, plugin.KindList,
+				itemKind(plugin.KindSecret),
 				help("一行一个；多把按请求轮询，失败自动冷却。留空 = 用 api_key。")),
 			modelsField("留空 = 自动发现；填写时作为目录不可用时的回退清单。"),
 			systemPromptField(),
@@ -534,6 +537,13 @@ func placeholder(text string) fieldOption {
 func defaultValue(v any) fieldOption {
 	return func(f plugin.Field) plugin.Field {
 		f.Default = v
+		return f
+	}
+}
+
+func itemKind(k plugin.FieldKind) fieldOption {
+	return func(f plugin.Field) plugin.Field {
+		f.ItemKind = k
 		return f
 	}
 }

@@ -103,6 +103,9 @@ func TestFieldValidate(t *testing.T) {
 		{"duplicate enum value", Field{Key: "k", Label: "K", Kind: KindEnum, Enum: []EnumOption{{Value: "a"}, {Value: "a"}}}, true},
 		{"min above max", Field{Key: "k", Label: "K", Kind: KindNumber, Min: ptrFloat(2), Max: ptrFloat(1)}, true},
 		{"bad pattern", Field{Key: "k", Label: "K", Kind: KindText, Pattern: "["}, true},
+		{"valid list item kind", Field{Key: "k", Label: "K", Kind: KindList, ItemKind: KindSecret}, false},
+		{"item kind on non-list", Field{Key: "k", Label: "K", Kind: KindText, ItemKind: KindSecret}, true},
+		{"unknown item kind", Field{Key: "k", Label: "K", Kind: KindList, ItemKind: "bogus"}, true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

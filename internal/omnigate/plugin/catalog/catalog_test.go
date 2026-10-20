@@ -341,6 +341,7 @@ func TestPluginJSONContract(t *testing.T) {
 		t.Fatalf("config_schema = %#v", got["config_schema"])
 	}
 	foundSecret := false
+	foundSecretList := false
 	for _, item := range fields {
 		f, _ := item.(map[string]any)
 		if _, ok := f["key"]; !ok {
@@ -355,9 +356,16 @@ func TestPluginJSONContract(t *testing.T) {
 		if f["key"] == "api_key" && f["kind"] == "secret" {
 			foundSecret = true
 		}
+		// 密钥池的每一项也是密钥：面板据此逐项掩码，而不是明文展示。
+		if f["key"] == "api_keys" && f["kind"] == "list" && f["item_kind"] == "secret" {
+			foundSecretList = true
+		}
 	}
 	if !foundSecret {
 		t.Fatalf("openai config_schema has no secret api_key: %s", raw)
+	}
+	if !foundSecretList {
+		t.Fatalf("openai config_schema api_keys must declare item_kind=secret: %s", raw)
 	}
 	if accounts, ok := got["account_schema"].([]any); !ok || len(accounts) != 0 {
 		t.Fatalf("openai account_schema = %#v, want []", got["account_schema"])

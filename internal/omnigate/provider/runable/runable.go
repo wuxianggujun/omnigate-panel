@@ -437,6 +437,29 @@ func (p *Provider) StreamChat(ctx context.Context, acc *provider.Account, in pro
 	return &stream{rc: rc, sc: provider.NewSSEScanner(rc)}, nil
 }
 
+// QueryBalance implements provider.BalanceReader. Runable's daily and monthly
+// credits both reset upstream, so each bucket carries its cadence.
+func (p *Provider) QueryBalance(ctx context.Context, acc *provider.Account) (*provider.Balance, error) {
+	if acc == nil || acc.Cookie == "" {
+		return nil, fmt.Errorf("没有可用 Cookie，请先在 runable.com 登录后粘贴")
+	}
+	cr := p.client.FetchCredits(ctx, acc.Cookie)
+	if !cr.OK {
+		if cr.Error == "" {
+			cr.Error = "读取积分失败"
+		}
+		return nil, fmt.Errorf("%s", cr.Error)
+	}
+	return &provider.Balance{
+		Available: cr.Total,
+		Unit:      "积分",
+		Wallets: []provider.BalanceWallet{
+			{Type: "daily_credits", DisplayName: "每日额度", Amount: cr.Daily, Resets: provider.ResetDaily},
+			{Type: "monthly_credits", DisplayName: "每月额度", Amount: cr.Monthly, Resets: provider.ResetMonthly},
+		},
+	}, nil
+}
+
 type stream struct {
 	rc io.ReadCloser
 	sc *provider.SSEScanner

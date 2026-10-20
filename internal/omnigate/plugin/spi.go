@@ -509,20 +509,20 @@ type TokenRefresher interface {
 	Unauthorized(err error) bool
 }
 
-// Balance is a provider-neutral account balance snapshot.
-type Balance struct {
-	Available float64        `json:"available"`
-	Total     float64        `json:"total,omitempty"`
-	Unit      string         `json:"unit,omitempty"`
-	Message   string         `json:"message,omitempty"`
-	Extra     map[string]any `json:"extra,omitempty"`
-}
+// BalanceReader is an optional capability: the upstream exposes a queryable
+// account balance (raccoon/runable). Re-exported from provider.
+type BalanceReader = provider.BalanceReader
 
-// BalanceReader is an optional capability for providers with a queryable
-// balance (raccoon/runable/trae/newapi).
-type BalanceReader interface {
-	QueryBalance(ctx context.Context, acc *Account) (*Balance, error)
-}
+// Balance is a provider-neutral account balance snapshot. Re-exported from
+// provider.
+type Balance = provider.Balance
+
+// BalanceWallet is one bucket of a Balance. Re-exported from provider.
+type BalanceWallet = provider.BalanceWallet
+
+// ResetCadence is the upstream clearing cadence of a balance bucket.
+// Re-exported from provider.
+type ResetCadence = provider.ResetCadence
 
 // ActionRequest is one invocation of a declared Action. Account is nil for a
 // provider-scoped action such as opencode quota.

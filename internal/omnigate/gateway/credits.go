@@ -30,9 +30,9 @@ import (
 type creditKind int
 
 const (
-	creditNone creditKind = iota // 无已知到期（奖励积分 / 充值积分）
-	creditDaily                  // 每日重置
-	creditMonthly                // 每月重置
+	creditNone    creditKind = iota // 无已知到期（奖励积分 / 充值积分）
+	creditDaily                     // 每日重置
+	creditMonthly                   // 每月重置
 )
 
 // creditWallet 一个钱包的金额与时效类别。
@@ -204,6 +204,29 @@ func runableWallets(cr runable.Credits) []creditWallet {
 	}
 }
 
+// creditKindOf 把上游声明的重置节奏映射成选号用的时效类别。
+func creditKindOf(reset provider.ResetCadence) creditKind {
+	switch reset {
+	case provider.ResetDaily:
+		return creditDaily
+	case provider.ResetMonthly:
+		return creditMonthly
+	}
+	return creditNone
+}
+
+// balanceWallets 把 provider-neutral 的余额明细映射成 creditWallet。
+func balanceWallets(bal *provider.Balance) []creditWallet {
+	if bal == nil {
+		return nil
+	}
+	out := make([]creditWallet, 0, len(bal.Wallets))
+	for _, w := range bal.Wallets {
+		out = append(out, creditWallet{Kind: creditKindOf(w.Resets), Amount: w.Amount})
+	}
+	return out
+}
+
 // noteCredits 记下一个账号的最新余额快照（供快过期优先选号与面板角标）。
 func (g *Gateway) noteCredits(prov, label string, available int64, wallets []creditWallet) {
 	if g.credits == nil || label == "" {
@@ -259,49 +282,37 @@ func (g *Gateway) ensureCredits(name string) {
 	}()
 }
 
-// refreshCredits 查上游余额并把结果写进缓存。只覆盖支持余额的 provider 类型；
-// 不支持的类型静默跳过（选号自动退化为旧行为）。
+// refreshCredits 查上游余额并把结果写进缓存。能力接口驱动：provider 实现
+// provider.BalanceReader 就走通用路径（token 型凭据顺带续期），未实现的类型
+// 静默跳过（选号自动退化为旧行为）。
 func (g *Gateway) refreshCredits(ctx context.Context, name string) {
-	switch g.ProviderType(name) {
-	case "raccoon":
-		rp, err := g.raccoonProvider(name)
-		if err != nil {
-			return
+	prov := g.providers[name]
+	br, ok := prov.(provider.BalanceReader)
+	if !ok {
+		return
+	}
+	tr, canRefresh := prov.(TokenRefresher)
+	for _, acc := range g.Accounts(name) {
+		if acc.Cookie == "" {
+			continue
 		}
-		for _, acc := range g.Accounts(name) {
+		// token 型凭据在余额查询前先续期（与请求路径同一套 TokenRefresher）。
+		if canRefresh && tr.TokenExpired(acc) {
+			if rerr := g.refreshToken(ctx, name, tr, acc); rerr != nil {
+				g.log.Warn("账号「%s」刷新 token 失败: %v", acc.Label, rerr)
+			}
 			if acc.Cookie == "" {
 				continue
 			}
-			g.ensureRaccoonToken(ctx, name, rp, acc)
-			if acc.Cookie == "" {
-				continue
-			}
-			bctx, cancel := context.WithTimeout(ctx, 20*time.Second)
-			bal, berr := rp.Client().QueryBalance(bctx, acc.Cookie)
-			cancel()
-			if berr != nil {
-				g.credits.put(creditKey(name, acc.Label), creditSnapshot{At: time.Now(), Err: berr.Error()})
-				continue
-			}
-			g.noteCredits(name, acc.Label, bal.Available, raccoonWallets(bal))
 		}
-	case "runable":
-		rp, ok := g.providers[name].(*runable.Provider)
-		if !ok {
-			return
+		bctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+		bal, berr := br.QueryBalance(bctx, acc)
+		cancel()
+		if berr != nil {
+			g.credits.put(creditKey(name, acc.Label), creditSnapshot{At: time.Now(), Err: berr.Error()})
+			continue
 		}
-		for _, acc := range g.Accounts(name) {
-			if acc.Cookie == "" {
-				continue
-			}
-			bctx, cancel := context.WithTimeout(ctx, 20*time.Second)
-			cr := rp.Client().FetchCredits(bctx, acc.Cookie)
-			cancel()
-			if !cr.OK {
-				continue
-			}
-			g.noteCredits(name, acc.Label, cr.Total, runableWallets(cr))
-		}
+		g.noteCredits(name, acc.Label, bal.Available, balanceWallets(bal))
 	}
 }
 

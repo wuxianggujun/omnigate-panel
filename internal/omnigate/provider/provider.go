@@ -213,6 +213,44 @@ type CookieRotator interface {
 	RotatesCookie() bool
 }
 
+// ResetCadence is the upstream clearing cadence of a balance bucket. The
+// gateway serves accounts whose credits reset soonest first, so credits that
+// would otherwise be wasted are spent before they expire.
+type ResetCadence string
+
+const (
+	// ResetNever: the bucket does not expire (reward / top-up points).
+	ResetNever ResetCadence = ""
+	// ResetDaily: the bucket is cleared at the next local midnight.
+	ResetDaily ResetCadence = "daily"
+	// ResetMonthly: the bucket is cleared at the start of the next month.
+	ResetMonthly ResetCadence = "monthly"
+)
+
+// BalanceWallet is one bucket of an account balance.
+type BalanceWallet struct {
+	Type        string       `json:"type"`
+	DisplayName string       `json:"displayName"`
+	Amount      int64        `json:"amount"`
+	Resets      ResetCadence `json:"resets,omitempty"`
+}
+
+// Balance is a provider-neutral account balance snapshot. Available is the
+// spendable total in Unit; Wallets optionally breaks it down by bucket.
+type Balance struct {
+	Available int64           `json:"available"`
+	Unit      string          `json:"unit,omitempty"`
+	Wallets   []BalanceWallet `json:"wallets,omitempty"`
+}
+
+// BalanceReader is an optional Provider capability: the upstream exposes a
+// queryable account balance. The gateway uses it to refresh the credit-routing
+// cache (accounts whose daily/monthly credits expire soon are served first),
+// so a balance-bearing provider needs no type-specific branch in the gateway.
+type BalanceReader interface {
+	QueryBalance(ctx context.Context, acc *Account) (*Balance, error)
+}
+
 // imageBaseKey carries the public address the caller used to reach the gateway.
 type imageBaseKey struct{}
 

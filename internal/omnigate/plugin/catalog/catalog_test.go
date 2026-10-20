@@ -34,6 +34,9 @@ var (
 
 	_ plugin.CookieRotator = (*geminiweb.Provider)(nil)
 
+	_ plugin.BalanceReader = (*raccoon.Provider)(nil)
+	_ plugin.BalanceReader = (*runable.Provider)(nil)
+
 	_ plugin.TokenRefresher = (*raccoon.Provider)(nil)
 	_ plugin.TokenRefresher = (*newapi.Provider)(nil)
 	_ plugin.TokenRefresher = (*geminiweb.Provider)(nil)

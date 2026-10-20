@@ -1037,3 +1037,38 @@ func (p *Provider) RefreshAccount(ctx context.Context, acc *provider.Account) er
 // Unauthorized reports whether err is an auth failure (implements the gateway's
 // generic TokenRefresher, so openStream can refresh any token-based provider).
 func (p *Provider) Unauthorized(err error) bool { return Unauthorized(err) }
+
+// QueryBalance implements provider.BalanceReader. It reports the account's
+// points breakdown, tagging the daily/monthly buckets with their reset cadence
+// so the gateway can prefer accounts whose credits expire soonest.
+func (p *Provider) QueryBalance(ctx context.Context, acc *provider.Account) (*provider.Balance, error) {
+	if acc == nil || acc.Cookie == "" {
+		return nil, fmt.Errorf("没有可用 access_token，请先登录")
+	}
+	bal, err := p.client.QueryBalance(ctx, acc.Cookie)
+	if err != nil {
+		return nil, err
+	}
+	out := &provider.Balance{Available: bal.Available, Unit: bal.Unit}
+	for _, w := range bal.Wallets {
+		out.Wallets = append(out.Wallets, provider.BalanceWallet{
+			Type:        w.Type,
+			DisplayName: w.DisplayName,
+			Amount:      w.Balance,
+			Resets:      walletCadence(w.Type),
+		})
+	}
+	return out, nil
+}
+
+// walletCadence maps raccoon's wallet type to its reset cadence. reward_points
+// and topup_points never expire, so they are left at ResetNever.
+func walletCadence(typ string) provider.ResetCadence {
+	switch typ {
+	case "daily_points":
+		return provider.ResetDaily
+	case "monthly_points":
+		return provider.ResetMonthly
+	}
+	return provider.ResetNever
+}

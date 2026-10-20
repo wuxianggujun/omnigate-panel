@@ -1270,6 +1270,15 @@ code, pre, .mono { font-family: var(--mono); font-variant-ligatures: none; }
 /* ---------------------------------------------------------------- requests & drawer */
 
 .request-table-card .data-table td { padding-top: 8px; padding-bottom: 8px; }
+.request-summary {
+  display: flex; align-items: center; gap: 6px 14px; flex-wrap: wrap;
+  padding: 8px 2px 2px; font-size: 11px; color: var(--text-2);
+}
+.request-summary-label { color: var(--text-3); }
+.request-summary-tokens { color: var(--text); font-size: 11px; }
+.request-summary-link { margin-left: auto; color: var(--accent); text-decoration: none; font-size: 11px; }
+.request-summary-link:hover { text-decoration: underline; }
+.token-sub { color: var(--text-2); font-size: 10px; white-space: nowrap; max-width: 100%; }
 .drawer-overlay {
   position: fixed; inset: 0; z-index: 110;
   background: var(--overlay);
@@ -1312,6 +1321,10 @@ code, pre, .mono { font-family: var(--mono); font-variant-ligatures: none; }
 }
 .drawer-error > .icon { flex: none; margin-top: 1px; }
 .detail-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; border: 1px solid var(--border); border-radius: 9px; overflow: hidden; background: var(--border); }
+.detail-token-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; border: 1px solid var(--border); border-radius: 9px; overflow: hidden; background: var(--border); }
+.detail-token-stat { display: flex; flex-direction: column; gap: 2px; padding: 9px 11px; background: var(--panel-2); min-width: 0; }
+.detail-token-label { font-size: 9.5px; color: var(--text-3); }
+.detail-token-value { font-size: 15px; color: var(--text); font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
 .detail-fact { display: flex; flex-direction: column; gap: 2px; padding: 8px 10px; background: var(--panel-2); min-width: 0; }
 .detail-fact .fact-value { font-size: 10.5px; word-break: break-word; white-space: normal; }
 .drawer-logs { display: flex; flex-direction: column; gap: 10px; }
@@ -1534,6 +1547,8 @@ code, pre, .mono { font-family: var(--mono); font-variant-ligatures: none; }
   .provider-detail-head { padding: 13px; }
   .kpi-value { font-size: 19px; }
   .facts-grid { grid-template-columns: 1fr 1fr; }
+  .detail-token-stat { padding: 7px 8px; }
+  .detail-token-value { font-size: 13px; }
   .health-summary { align-items: flex-start; }
   .health-legend { min-width: 72px; }
   .account-metrics { grid-template-columns: 1fr 1fr; }

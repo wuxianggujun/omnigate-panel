@@ -6,7 +6,7 @@ import {
   el, card, badge, statusDot, emptyState, loadingBlock, icon, copyText, debounce, isAbortError,
 } from '../core/dom.js';
 import {
-  fmtDateTime, fmtDuration, fmtInt, fmtRelative, fmtTime, outcomeLabel, prettyJSON, truncate,
+  fmtCompact, fmtDateTime, fmtDuration, fmtInt, fmtRelative, fmtTime, outcomeLabel, prettyJSON, truncate,
 } from '../core/format.js';
 import { createTable } from '../components/table.js';
 import { openDrawer } from '../components/drawer.js';
@@ -221,6 +221,19 @@ function render() {
     ));
   }
 
+  if (ui.entries.length) {
+    const totals = tokenTotals(ui.entries);
+    page.appendChild(el('div', { class: 'request-summary' },
+      el('span', { class: 'request-summary-label', text: `当前列表 ${fmtInt(ui.entries.length)} 条` }),
+      el('span', {
+        class: 'request-summary-tokens mono',
+        text: `入 ${fmtCompact(totals.prompt)} · 出 ${fmtCompact(totals.completion)} · 共 ${fmtCompact(totals.total)} tokens`,
+        title: `Prompt ${fmtInt(totals.prompt)} · Completion ${fmtInt(totals.completion)} · Total ${fmtInt(totals.total)}`,
+      }),
+      el('a', { class: 'request-summary-link', href: '#/usage' }, '完整用量 →'),
+    ));
+  }
+
   const tableHost = el('div', { class: 'table-card request-table-card' });
   if (ui.loading && !ui.entries.length) {
     tableHost.appendChild(loadingBlock('加载请求归档'));
@@ -243,6 +256,13 @@ function render() {
           render: (row) => el('div', { class: 'result-cell' },
             badge(row.status || '—', row.ok ? 'ok' : (row.status === 429 ? 'warn' : 'danger')),
             el('span', { class: 'cell-sub', text: outcomeLabel(row.outcome) }),
+            rowTokenSummary(row)
+              ? el('span', {
+                class: 'cell-sub token-sub mobile-only',
+                text: rowTokenSummary(row),
+                title: rowTokenTitle(row),
+              })
+              : null,
           ),
         },
         {
@@ -270,7 +290,9 @@ function render() {
           label: 'Tokens',
           align: 'right',
           hideOnMobile: true,
-          render: (row) => (row.total_tokens ? fmtInt(row.total_tokens) : '—'),
+          render: (row) => (row.total_tokens
+            ? el('span', { text: fmtInt(row.total_tokens), title: rowTokenTitle(row) })
+            : '—'),
         },
         {
           key: 'client_ip',
@@ -299,6 +321,41 @@ function render() {
     el('span', { text: '归档上限 1000 条/次；筛选为包含匹配。' }),
   ));
   rootEl.replaceChildren(page);
+}
+
+function tokenTotals(entries) {
+  const totals = { prompt: 0, completion: 0, total: 0 };
+  for (const row of entries) {
+    const prompt = Number(row.prompt_tokens || 0);
+    const completion = Number(row.completion_tokens || 0);
+    const total = Number(row.total_tokens || 0) || (prompt + completion);
+    totals.prompt += prompt;
+    totals.completion += completion;
+    totals.total += total;
+  }
+  return totals;
+}
+
+function rowTokenSummary(row) {
+  const prompt = Number(row.prompt_tokens || 0);
+  const completion = Number(row.completion_tokens || 0);
+  const total = Number(row.total_tokens || 0) || (prompt + completion);
+  if (!total) return '';
+  return `↑${fmtCompact(prompt)} ↓${fmtCompact(completion)}`;
+}
+
+function rowTokenTitle(row) {
+  const prompt = Number(row.prompt_tokens || 0);
+  const completion = Number(row.completion_tokens || 0);
+  const total = Number(row.total_tokens || 0) || (prompt + completion);
+  return `Prompt ${fmtInt(prompt)} · Completion ${fmtInt(completion)} · Total ${fmtInt(total)}`;
+}
+
+function detailTokenStat(label, value) {
+  return el('div', { class: 'detail-token-stat' },
+    el('span', { class: 'detail-token-label', text: label }),
+    el('span', { class: 'detail-token-value mono', text: fmtInt(value || 0) }),
+  );
 }
 
 function textFilter(placeholder, value, onChange) {
@@ -409,6 +466,11 @@ function renderDetailPanel() {
       }, icon('copy', 14), '复制 ID'),
     ),
     row.error ? el('div', { class: 'drawer-error' }, icon('alert', 15), el('span', { text: row.error })) : null,
+    el('div', { class: 'detail-token-stats' },
+      detailTokenStat('输入 Prompt', row.prompt_tokens),
+      detailTokenStat('输出 Completion', row.completion_tokens),
+      detailTokenStat('合计 Total', row.total_tokens || (Number(row.prompt_tokens || 0) + Number(row.completion_tokens || 0))),
+    ),
     el('div', { class: 'detail-facts' }, facts.map(([label, value]) => el('div', { class: 'detail-fact' },
       el('span', { class: 'fact-label', text: label }),
       el('span', { class: 'fact-value mono', text: value, title: String(value) }),

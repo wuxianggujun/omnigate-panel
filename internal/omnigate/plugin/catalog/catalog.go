@@ -140,10 +140,12 @@ func runableSpec() plugin.Plugin {
 		},
 		ConfigFields: []plugin.Field{
 			field("base_url", "Base URL", plugin.GroupConnection, plugin.KindURL,
-				placeholder("https://api.runable.com"),
+				defaultValue(runable.DefaultBaseURL),
+				placeholder(runable.DefaultBaseURL),
 				help("留空 = https://api.runable.com。")),
 			field("device_header", "Device Header", plugin.GroupConnection, plugin.KindText,
 				advanced(),
+				defaultValue(runable.DefaultDeviceHeader),
 				help("上游要求的设备标识；留空 = 内置默认值。")),
 			field("max_prompt_chars", "单条 Prompt 上限", plugin.GroupAdvanced, plugin.KindNumber,
 				advanced(),

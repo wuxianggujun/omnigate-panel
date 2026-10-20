@@ -23,6 +23,16 @@ import (
 
 const userAgent = provider.BrowserUA
 
+// Upstream defaults. They live here (not in config) so the provider works the
+// same whether it was built from a hand-written config, the panel, or a test,
+// and so the plugin descriptor can publish them as schema defaults.
+const (
+	// DefaultBaseURL is the API origin used when base_url is empty.
+	DefaultBaseURL = "https://api.runable.com"
+	// DefaultDeviceHeader mirrors the value hard-coded in the original APK.
+	DefaultDeviceHeader = "dweb/a69d4f72ddd711c660237adaf5c76287ac5473f5"
+)
+
 // MaxPromptChars 是上游对「单条 prompt」的字符数硬上限。实测：/api/chat/text、
 // /api/chat/incognito、/api/chat/agent 三种模式同一个闸（在模式分发之前就拦），
 // 且与模型自报的上下文窗口无关（1M 窗口的 glm-5.3-flash 也一样）——8000 字符
@@ -39,6 +49,12 @@ type Client struct {
 
 // New builds a Runable client.
 func New(baseURL, deviceHeader string) *Client {
+	if strings.TrimSpace(baseURL) == "" {
+		baseURL = DefaultBaseURL
+	}
+	if strings.TrimSpace(deviceHeader) == "" {
+		deviceHeader = DefaultDeviceHeader
+	}
 	return &Client{
 		baseURL:      strings.TrimRight(baseURL, "/"),
 		deviceHeader: deviceHeader,

@@ -11,10 +11,8 @@ import (
 	"time"
 
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/plugin"
+	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/plugin/catalog"
 )
-
-// DefaultDeviceHeader mirrors the value hard-coded in the original APK.
-const DefaultDeviceHeader = "dweb/a69d4f72ddd711c660237adaf5c76287ac5473f5"
 
 // Config is the root configuration object.
 type Config struct {
@@ -609,43 +607,9 @@ func (c *Config) applyDefaults() {
 		if p.Name == "" {
 			p.Name = p.Type
 		}
-		switch p.Type {
-		case "runable":
-			if p.DeviceHeader == "" {
-				p.DeviceHeader = DefaultDeviceHeader
-			}
-			if p.BaseURL == "" {
-				p.BaseURL = "https://api.runable.com"
-			}
-		case "openai":
-			if p.BaseURL == "" {
-				p.BaseURL = "https://api.openai.com/v1"
-			}
-		case "raccoon":
-			if p.MainOrigin == "" {
-				p.MainOrigin = "https://xiaohuanxiong.com"
-			}
-			if p.BaseURL == "" {
-				p.BaseURL = p.MainOrigin
-			}
-			if p.LLMBase == "" {
-				p.LLMBase = p.MainOrigin + "/api/web/llm/v2"
-			}
-			if p.AuthBase == "" {
-				p.AuthBase = p.MainOrigin + "/api/web/auth/v1"
-			}
-		case "trae":
-			// Hosts default inside the provider; nothing to fill here.
-		case "newapi":
-			// BaseURL 必填（每个 New API 站点不同，例如 https://api.justwoker.icu），
-			// 没有通用缺省，留空由 provider 自身报错。
-		case "geminiweb":
-			// 无 BaseURL：客户端固定打 gemini.google.com；账号凭证是 Google Cookie。
-		case "opencode":
-			// 两个 tier 的地址由 provider 包提供缺省值（DefaultZenBase /
-			// DefaultGoBase），这里只在用户显式写了 base_url 时把它当作 zen 的
-			// 覆盖（Go 另用 go_base_url）。不填就走缺省，与上游实测一致。
-		}
+		// 连接类默认值由插件描述符声明（与面板共用同一份 schema），新增类型
+		// 不需要在这里加分支。
+		applyFieldDefaults(p, descriptorOf(p.Type))
 		// 上游密钥池：去掉空白项与重复项（前端整份回传容易带出空行），全空 = 没配。
 		// opencode 的两个池（zen/go）走同一套清理规则。
 		p.APIKeys = normalizeKeys(p.APIKeys)
@@ -716,7 +680,8 @@ func (c *Config) validate() error {
 		// opencode 的密钥池必须两边分开填：go 订阅 key 打 zen 接口只会拿到
 		// Invalid credential，而两边的问题串一模一样，事后很难查。顺手把
 		// 「同一把 key 同时出现在两个池里」也拦下来——一定有一个池填错了。
-		if p.Type == "opencode" {
+		// 用 schema 判断该类型是否真有两套池，而不是认类型名。
+		if desc := descriptorOf(p.Type); fieldExists(desc.ConfigFields, "zen_keys") && fieldExists(desc.ConfigFields, "go_keys") {
 			for _, k := range p.ZenKeys {
 				for _, g := range p.GoKeys {
 					if k == g {
@@ -784,14 +749,82 @@ func (c *Config) validate() error {
 // Register，就能直接出现在配置里；内置类型即使注册表尚未初始化也保持可用，
 // 让配置校验不再依赖调用方的启动顺序。
 func validateProviderType(typ string) error {
-	if _, err := plugin.Get(typ); err == nil {
-		return nil
-	}
-	switch typ {
-	case "runable", "openai", "raccoon", "trae", "newapi", "geminiweb", "opencode":
+	if descriptorOf(typ).Type != "" {
 		return nil
 	}
 	return fmt.Errorf("unknown type %q", typ)
+}
+
+// descriptorOf returns the descriptor for typ: the live registry first, then the
+// built-in catalog. The catalog fallback keeps config validation and defaults
+// independent of startup order (tests and embedded callers may Load before
+// catalog.Register).
+func descriptorOf(typ string) plugin.Plugin {
+	if d, err := plugin.Get(typ); err == nil {
+		return d
+	}
+	for _, d := range catalog.All() {
+		if d.Type == typ {
+			return d
+		}
+	}
+	return plugin.Plugin{}
+}
+
+// applyFieldDefaults materializes the string defaults a descriptor declares for
+// its configuration schema. The schema is the single source of truth shared with
+// the panel, so adding a provider type needs no branch here.
+//
+// Only string defaults are applied: booleans and numbers keep their "zero means
+// default" semantics inside the provider, where an explicit false/0 stays
+// meaningful (e.g. opencode anonymous=false).
+func applyFieldDefaults(p *ProviderConfig, desc plugin.Plugin) {
+	for _, f := range desc.ConfigFields {
+		def, ok := f.Default.(string)
+		if !ok {
+			continue
+		}
+		switch f.Key {
+		case "base_url":
+			if p.BaseURL == "" {
+				p.BaseURL = def
+			}
+		case "go_base_url":
+			if p.GoBaseURL == "" {
+				p.GoBaseURL = def
+			}
+		case "main_origin":
+			if p.MainOrigin == "" {
+				p.MainOrigin = def
+			}
+		case "device_header":
+			if p.DeviceHeader == "" {
+				p.DeviceHeader = def
+			}
+		case "agent_host":
+			if p.AgentHost == "" {
+				p.AgentHost = def
+			}
+		case "ug_host":
+			if p.UgHost == "" {
+				p.UgHost = def
+			}
+		case "oauth_host":
+			if p.OAuthHost == "" {
+				p.OAuthHost = def
+			}
+		}
+	}
+}
+
+// fieldExists reports whether the schema declares key.
+func fieldExists(fields []plugin.Field, key string) bool {
+	for _, f := range fields {
+		if f.Key == key {
+			return true
+		}
+	}
+	return false
 }
 
 // keyLabel 给密钥条目一个可读标签用于报错（绝不回显密钥本身）。

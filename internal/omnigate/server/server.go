@@ -990,20 +990,21 @@ func (s *Server) handleModelMapping(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// geminiWebProviderOrDefault resolves the provider for /admin/geminiweb/*: an
-// explicit name wins, otherwise prefer the default provider when it is a
-// geminiweb one, otherwise the first geminiweb provider configured.
-func (s *Server) geminiWebProviderOrDefault(name string) string {
+// providerOrDefault resolves the provider for a per-type admin route: an
+// explicit name wins, otherwise prefer the default provider when it has the
+// requested type, otherwise the first configured provider of that type,
+// otherwise the first configured provider.
+func (s *Server) providerOrDefault(name, typ string) string {
 	if name != "" {
 		return name
 	}
 	if s.cfg.DefaultProvider != "" {
-		if p := s.cfg.Provider(s.cfg.DefaultProvider); p != nil && p.Type == "geminiweb" {
+		if p := s.cfg.Provider(s.cfg.DefaultProvider); p != nil && p.Type == typ {
 			return s.cfg.DefaultProvider
 		}
 	}
 	for _, p := range s.cfg.Providers {
-		if p.Type == "geminiweb" {
+		if p.Type == typ {
 			return p.Name
 		}
 	}
@@ -1011,6 +1012,11 @@ func (s *Server) geminiWebProviderOrDefault(name string) string {
 		return s.cfg.Providers[0].Name
 	}
 	return ""
+}
+
+// geminiWebProviderOrDefault resolves the provider for /admin/geminiweb/*.
+func (s *Server) geminiWebProviderOrDefault(name string) string {
+	return s.providerOrDefault(name, "geminiweb")
 }
 
 // handleRaccoonRedirect is the unauthenticated browser callback for the
@@ -1088,27 +1094,9 @@ func htmlEscape(s string) string {
 	return strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", "\"", "&quot;").Replace(s)
 }
 
-// raccoonProviderOrDefault resolves the provider for /admin/raccoon/*: an
-// explicit name wins, otherwise prefer the default provider when it is a
-// raccoon one, otherwise the first raccoon provider configured.
+// raccoonProviderOrDefault resolves the provider for /admin/raccoon/*.
 func (s *Server) raccoonProviderOrDefault(name string) string {
-	if name != "" {
-		return name
-	}
-	if s.cfg.DefaultProvider != "" {
-		if p := s.cfg.Provider(s.cfg.DefaultProvider); p != nil && p.Type == "raccoon" {
-			return s.cfg.DefaultProvider
-		}
-	}
-	for _, p := range s.cfg.Providers {
-		if p.Type == "raccoon" {
-			return p.Name
-		}
-	}
-	if len(s.cfg.Providers) > 0 {
-		return s.cfg.Providers[0].Name
-	}
-	return ""
+	return s.providerOrDefault(name, "raccoon")
 }
 
 // handleTraeAdmin serves /admin/trae/* — the browser-login flow (open the URL,
@@ -1192,27 +1180,9 @@ func (s *Server) handleTraeAdmin(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// traeProviderOrDefault resolves the provider for /admin/trae/*: an explicit name
-// wins, otherwise prefer the default provider when it is a trae one, otherwise
-// the first trae provider configured.
+// traeProviderOrDefault resolves the provider for /admin/trae/*.
 func (s *Server) traeProviderOrDefault(name string) string {
-	if name != "" {
-		return name
-	}
-	if s.cfg.DefaultProvider != "" {
-		if p := s.cfg.Provider(s.cfg.DefaultProvider); p != nil && p.Type == "trae" {
-			return s.cfg.DefaultProvider
-		}
-	}
-	for _, p := range s.cfg.Providers {
-		if p.Type == "trae" {
-			return p.Name
-		}
-	}
-	if len(s.cfg.Providers) > 0 {
-		return s.cfg.Providers[0].Name
-	}
-	return ""
+	return s.providerOrDefault(name, "trae")
 }
 
 func (s *Server) writeValue(w http.ResponseWriter, status int, v any) {

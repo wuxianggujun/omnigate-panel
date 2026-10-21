@@ -59,6 +59,12 @@ export function openModal({
       if (shouldClose) close();
     },
   } }, panel);
+  // 兜底：若在遮罩之外松开（例如松开点落在 body、或拖出浏览器窗口后回来），
+  // 遮罩上的 mouseup 不会触发，pressedOnOverlay 会残留为 true。这里在冒泡阶段
+  // （遮罩自身处理器之后）统一复位，并监听 blur，避免下次误关。
+  const resetPressed = () => { pressedOnOverlay = false; };
+  window.addEventListener('mouseup', resetPressed);
+  window.addEventListener('blur', resetPressed);
 
   let closed = false;
   const onKeydown = (event) => {
@@ -74,6 +80,8 @@ export function openModal({
     if (closed) return;
     closed = true;
     document.removeEventListener('keydown', onKeydown, true);
+    window.removeEventListener('mouseup', resetPressed);
+    window.removeEventListener('blur', resetPressed);
     overlay.remove();
     const idx = stack.indexOf(entry);
     if (idx >= 0) stack.splice(idx, 1);

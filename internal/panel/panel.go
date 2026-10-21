@@ -24,6 +24,9 @@ import (
 	"github.com/wuxianggujun/omnigate-panel/internal/usage"
 )
 
+// recentOverviewLimit 总览「近期请求」卡片展示的条数（前端也是按 8 条渲染）。
+const recentOverviewLimit = 8
+
 // Config 面板依赖（main 装配注入）。
 type Config struct {
 	APIKey  string // 网关密钥（仅用于展示；面板鉴权只认会话）
@@ -258,6 +261,28 @@ func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
 		"build":         panelBuild,
 		"auth_required": p.apiKey() != "",
 	}
+	// 近期请求：直接取请求归档的最近 8 条（多租户下按归属过滤，与 /panel/api/request_logs
+	// 同一可见性口径）。此前是单引擎重构遗留的 `[]any{}` 桩，导致总览「近期请求」永远为空。
+	// 趋势序列不在这里返回：前端已回落到 /panel/api/usage 的 series（同一次加载里就有）。
+	// 放在 OmniAccounts 早退之前，保证没装配账号回调时（如精简部署）也照常返回。
+	if p.cfg.RequestLog != nil {
+		rows, err := p.cfg.RequestLog.ReadArchive(recentOverviewLimit, reqlog.Filter{})
+		if err == nil {
+			if visible, all := p.reqlogVisible(r); !all {
+				filtered := make([]reqlog.Event, 0, len(rows))
+				for _, e := range rows {
+					if visible(e) {
+						filtered = append(filtered, e)
+					}
+				}
+				rows = filtered
+			}
+			if rows == nil {
+				rows = []reqlog.Event{}
+			}
+			body["recent"] = rows
+		}
+	}
 	if p.cfg.OmniAccounts == nil {
 		writeJSON(w, http.StatusOK, body)
 		return
@@ -336,8 +361,6 @@ func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	body["storage"] = storage
-	body["recent"] = []any{}
-	body["series"] = []any{}
 	writeJSON(w, http.StatusOK, body)
 }
 

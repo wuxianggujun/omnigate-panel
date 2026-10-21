@@ -7,7 +7,7 @@ import {
 } from '../core/dom.js';
 import {
   fmtCompact, fmtCredits, fmtDuration, fmtInt, fmtPercent, fmtRelative, fmtTime,
-  fmtUptime, isKeyBasedProvider, outcomeLabel, parseDate, providerLabel, roleLabel,
+  fmtUptime, isKeyBasedProvider, outcomeLabel, parseDate, providerLabel,
 } from '../core/format.js';
 import { toastError, toastSuccess } from '../components/toast.js';
 import { createTable } from '../components/table.js';
@@ -115,16 +115,19 @@ function render(root, ctx, { loading = false } = {}) {
     ),
   ));
 
-  if (state.authenticated) {
-    page.appendChild(el('div', { class: 'context-strip' },
-      el('span', { class: 'context-item' }, icon('user', 14), state.username),
-      badge(roleLabel(state.role), state.role === 'admin' ? 'accent' : (state.role === 'viewer' ? 'info' : 'muted')),
-      state.role === 'user'
-        ? el('span', { class: 'context-note', text: '账号池与用量仅显示归属你的部分（provider/label）' })
-        : null,
-      data.mock ? badge('Mock 数据', 'warn') : null,
+  // 身份信息（用户名 + 角色）已由外壳常驻展示：右上角 #session-chip 与侧边栏底部
+  // #sidebar-session（见 main.js renderShellSession）。总览这里再放一条同样的
+  // context-strip 属于重复，已移除；仅保留 Mock 数据提示。
+  if (data.mock) {
+    page.appendChild(el('div', { class: 'notice notice-warn' },
+      icon('alert', 16),
+      el('div', { class: 'notice-content' },
+        el('strong', { text: 'Mock 数据' }),
+        el('span', { text: '当前展示的是本地示例数据，未连接真实引擎。' }),
+      ),
     ));
-  } else {
+  }
+  if (!state.authenticated) {
     page.appendChild(el('div', { class: 'notice notice-info' },
       icon('info', 16),
       el('div', { class: 'notice-content' },

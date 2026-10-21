@@ -1193,9 +1193,28 @@ code, pre, .mono { font-family: var(--mono); font-variant-ligatures: none; }
 .mapping-arrow { color: var(--border-strong); font-size: 11px; }
 .mapping-actions { display: flex; align-items: center; gap: 2px; flex: none; }
 .mapping-form { display: flex; flex-direction: column; gap: 14px; }
-.mapping-picker { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
-.mapping-picker .select { flex: 1 1 170px; min-width: 0; }
-.mapping-picker .btn { flex: none; }
+
+/* 映射目标链：有序列表，顺序即回退优先级。 */
+.chain-list {
+  display: flex; flex-direction: column; gap: 4px;
+  border: 1px solid var(--border); border-radius: 9px;
+  padding: 6px; background: var(--panel-2);
+  max-height: 260px; overflow: auto;
+}
+.chain-empty { padding: 10px 8px; font-size: 11px; color: var(--text-3); text-align: center; }
+.chain-row {
+  display: flex; align-items: center; gap: 9px;
+  padding: 6px 7px; border-radius: 7px; background: var(--panel);
+  border: 1px solid var(--border);
+}
+.chain-rank { flex: none; font-size: 10px; color: var(--text-3); min-width: 16px; }
+.chain-main { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; min-width: 0; flex: 1; }
+.chain-target { font-size: 11.5px; color: var(--text); overflow-wrap: anywhere; }
+.chain-provider { font-size: 9.5px; color: var(--text-3); }
+.chain-actions { display: flex; align-items: center; gap: 1px; flex: none; }
+.chain-picker { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.chain-picker .select, .chain-picker .input { flex: 1 1 170px; min-width: 0; }
+.chain-picker .btn { flex: none; }
 
 .scope-body { display: flex; flex-direction: column; gap: 7px; }
 .scope-key-card {

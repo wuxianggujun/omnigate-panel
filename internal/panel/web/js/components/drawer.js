@@ -44,6 +44,11 @@ export function openDrawer({
       if (shouldClose) close();
     },
   } }, panel);
+  // 兜底：松开点落在遮罩之外（body、或拖出浏览器窗口后回来）时遮罩收不到
+  // mouseup，pressedOnOverlay 会残留。这里统一复位，避免下次误关。
+  const resetPressed = () => { pressedOnOverlay = false; };
+  window.addEventListener('mouseup', resetPressed);
+  window.addEventListener('blur', resetPressed);
 
   let closed = false;
   const onKeydown = (event) => {
@@ -56,6 +61,8 @@ export function openDrawer({
     if (closed) return;
     closed = true;
     document.removeEventListener('keydown', onKeydown, true);
+    window.removeEventListener('mouseup', resetPressed);
+    window.removeEventListener('blur', resetPressed);
     overlay.remove();
     const idx = stack.findIndex((x) => x.overlay === overlay);
     if (idx >= 0) stack.splice(idx, 1);

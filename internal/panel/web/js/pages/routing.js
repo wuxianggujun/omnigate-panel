@@ -914,16 +914,81 @@ function openMappingModal(alias) {
   const aliasOptions = el('datalist', { id: 'mapping-alias-options' },
     aliasSuggestions().map((value) => el('option', { value })),
   );
-  const targetsInput = el('textarea', {
-    class: 'input textarea mono', rows: 4,
-    value: editing ? (ui.mappings[alias] || []).join('\n') : '',
-    placeholder: 'provider/model，每行一个；自上而下构成回退链\n例如 atria/Atria-Dawn-Preview\ncline-pass/deepseek-v4.1-flash',
-  });
   const enabledInput = el('input', { type: 'checkbox', checked: editing ? !ui.disabled[alias] : true });
   const errorBox = el('p', { class: 'form-error', attrs: { role: 'alert' } });
 
-  // 列表选择：先选供应商，再从它的目录模型里挑目标，点「加入目标链」追加到下方文本框。
-  // 文本框保留手动输入，两种方式写的是同一份目标链。
+  // 目标链用**列表**编辑（顺序即回退优先级：首项为主目标，往下依次回退）。
+  // 列表项可直接上移 / 下移 / 删除——「同一个模型想优先走某个供应商」就是把它
+  // 拖到第一位。选择器与手动输入都只往这份列表里追加，不再维护自由文本。
+  let targets = editing ? (ui.mappings[alias] || []).slice() : [];
+  const chainList = el('div', { class: 'chain-list' });
+
+  const addTarget = (target) => {
+    const value = String(target || '').trim();
+    if (!value) {
+      errorBox.textContent = '目标不能为空';
+      return false;
+    }
+    if (!/^[^/\s]+\/.+/.test(value)) {
+      errorBox.textContent = '目标需为 provider/model 形式';
+      return false;
+    }
+    if (targets.includes(value)) {
+      errorBox.textContent = '目标链中已存在该模型';
+      return false;
+    }
+    targets.push(value);
+    errorBox.textContent = '';
+    renderChain();
+    return true;
+  };
+  const moveTarget = (index, delta) => {
+    const next = index + delta;
+    if (next < 0 || next >= targets.length) return;
+    const tmp = targets[index];
+    targets[index] = targets[next];
+    targets[next] = tmp;
+    renderChain();
+  };
+
+  function renderChain() {
+    chainList.replaceChildren();
+    if (!targets.length) {
+      chainList.appendChild(el('p', { class: 'chain-empty', text: '还没有目标。用下面的选择器添加，或手动输入任意 provider/model。' }));
+      return;
+    }
+    targets.forEach((target, index) => {
+      const slash = target.indexOf('/');
+      const provider = slash > 0 ? target.slice(0, slash) : '';
+      chainList.appendChild(el('div', { class: 'chain-row' },
+        el('span', { class: 'chain-rank mono', text: String(index + 1).padStart(2, '0') }),
+        el('div', { class: 'chain-main' },
+          el('span', { class: 'chain-target mono', text: target }),
+          index === 0 ? badge('主目标', 'accent') : badge('回退', 'muted'),
+          provider ? el('span', { class: 'chain-provider', text: providerLabel(providerTypeOf(provider)) }) : null,
+        ),
+        el('div', { class: 'chain-actions' },
+          el('button', {
+            class: 'btn btn-icon btn-ghost btn-sm', type: 'button', title: '上移（提高优先级）',
+            disabled: index === 0, attrs: { 'aria-label': '上移' },
+            on: { click: () => moveTarget(index, -1) },
+          }, icon('arrowUp', 14)),
+          el('button', {
+            class: 'btn btn-icon btn-ghost btn-sm', type: 'button', title: '下移（降低优先级）',
+            disabled: index === targets.length - 1, attrs: { 'aria-label': '下移' },
+            on: { click: () => moveTarget(index, 1) },
+          }, icon('arrowDown', 14)),
+          el('button', {
+            class: 'btn btn-icon btn-ghost btn-sm', type: 'button', title: '移出目标链',
+            attrs: { 'aria-label': '移出目标链' },
+            on: { click: () => { targets.splice(index, 1); errorBox.textContent = ''; renderChain(); } },
+          }, icon('close', 14)),
+        ),
+      ));
+    });
+  }
+
+  // 列表选择：先选供应商，再从它的目录模型里挑目标，点「加入」追加到目标链列表。
   const providers = providerList();
   const providerSelect = el('select', { class: 'input select' },
     el('option', { value: '', text: '选择供应商…' }),
@@ -954,23 +1019,34 @@ function openMappingModal(alias) {
       errorBox.textContent = '请先选择供应商与模型';
       return;
     }
-    const target = `${name}/${model}`;
-    const lines = targetsInput.value.split(/\r?\n|,/).map((s) => s.trim()).filter(Boolean);
-    if (lines.includes(target)) {
-      errorBox.textContent = '目标链中已存在该模型';
-      return;
-    }
-    lines.push(target);
-    targetsInput.value = lines.join('\n');
-    errorBox.textContent = '';
+    addTarget(`${name}/${model}`);
   });
+
+  // 手动输入：目录里没有的模型（或需要任意 provider/model）走这里。
+  const manualInput = el('input', {
+    class: 'input mono', type: 'text', placeholder: '手动输入 provider/model 后回车',
+    autocomplete: 'off', spellcheck: 'false',
+  });
+  const manualAddBtn = el('button', { class: 'btn btn-ghost', type: 'button' }, icon('plus', 14), '添加');
+  const manualAdd = () => {
+    if (addTarget(manualInput.value)) manualInput.value = '';
+  };
+  manualAddBtn.addEventListener('click', manualAdd);
+  manualInput.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      manualAdd();
+    }
+  });
+
+  renderChain();
 
   const saveBtn = el('button', { class: 'btn btn-primary', type: 'button' }, editing ? '保存映射' : '添加映射');
   const cancelBtn = el('button', { class: 'btn btn-ghost', type: 'button' }, '取消');
 
   const modal = openModal({
     title: editing ? `编辑映射 ${alias}` : '添加模型别名',
-    subtitle: '别名为客户端可见模型名；目标链从上到下依次回退。',
+    subtitle: '别名为客户端可见模型名；目标链从上到下依次回退，第一位优先。',
     size: 'md',
     body: el('div', { class: 'mapping-form' },
       el('div', { class: 'field' },
@@ -980,32 +1056,35 @@ function openMappingModal(alias) {
         el('p', { class: 'field-help', text: editing ? '编辑时不允许改名；如需新名字请删除后重新添加。' : '建议使用客户端现有的模型名；输入框支持从模型目录补全。' }),
       ),
       el('div', { class: 'field' },
-        el('label', { class: 'field-label' }, '从模型列表选择目标'),
-        el('div', { class: 'mapping-picker' }, providerSelect, modelSelect, addTargetBtn),
-        el('p', { class: 'field-help', text: '选好供应商与模型后点「加入目标链」；也可以在下方手动输入任意 provider/model。' }),
-      ),
-      el('div', { class: 'field' },
         el('label', { class: 'field-label' }, '目标链', el('span', { class: 'required-mark', text: '*' })),
-        targetsInput,
-        el('p', { class: 'field-help', text: '每行一个 provider/model；首项为主目标，后续为自动回退。' }),
+        chainList,
+        el('div', { class: 'chain-picker' },
+          providerSelect,
+          modelSelect,
+          addTargetBtn,
+        ),
+        el('div', { class: 'chain-picker' },
+          manualInput,
+          manualAddBtn,
+        ),
+        el('p', { class: 'field-help', text: '顺序即优先级：第一位是主目标，后面的依次在失败 / 额度耗尽时回退。用 ↑↓ 调整顺序。' }),
       ),
       el('label', { class: 'check-inline' }, enabledInput, el('span', { text: '启用该映射' })),
       errorBox,
     ),
     footer: [cancelBtn, saveBtn],
-    initialFocus: editing ? targetsInput : aliasInput,
+    initialFocus: editing ? manualInput : aliasInput,
   });
   cancelBtn.addEventListener('click', () => modal.close());
   saveBtn.addEventListener('click', async () => {
     errorBox.textContent = '';
     const name = aliasInput.value.trim();
-    const targets = targetsInput.value.split(/\r?\n|,/).map((s) => s.trim()).filter(Boolean);
     if (!name) { errorBox.textContent = '别名不能为空'; return; }
-    if (!targets.length) { errorBox.textContent = '至少填写一个目标'; return; }
+    if (!targets.length) { errorBox.textContent = '至少添加一个目标'; return; }
     if (!(await requireAdmin())) return;
     saveBtn.disabled = true;
     try {
-      await api.mapping.set({ alias: name, targets, enabled: enabledInput.checked });
+      await api.mapping.set({ alias: name, targets: targets.slice(), enabled: enabledInput.checked });
       toastSuccess('映射已保存');
       modal.close();
       await refreshMappings();
@@ -1014,6 +1093,11 @@ function openMappingModal(alias) {
       saveBtn.disabled = false;
     }
   });
+}
+
+// providerTypeOf 反查某供应商名对应的 type（用于目标链里显示类型标签）。
+function providerTypeOf(name) {
+  return providerList().find((p) => p.name === name)?.type || '';
 }
 
 async function toggleMapping(alias) {

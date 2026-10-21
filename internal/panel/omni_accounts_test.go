@@ -169,6 +169,45 @@ func TestOmniAccountLoginNotEnabled(t *testing.T) {
 	}
 }
 
+// 匿名/普通用户过滤账号明细时必须保留 provider 级的接入模式与密钥数量，
+// 否则总览会把「密钥型供应商」误判成没有账号的空壳。
+func TestFilterOmniAccountListKeepsProviderMode(t *testing.T) {
+	d := map[string]any{"providers": []any{
+		map[string]any{
+			"name": "yijia", "type": "openai", "account_mode": "none", "keys": 2,
+			"accounts": []any{
+				map[string]any{"label": "other", "has_token": true},
+			},
+		},
+	}}
+	out := filterOmniAccountList(d, map[string]bool{})
+	raw, err := json.Marshal(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Providers []struct {
+			Name        string           `json:"name"`
+			AccountMode string           `json:"account_mode"`
+			Keys        int              `json:"keys"`
+			Accounts    []map[string]any `json:"accounts"`
+		} `json:"providers"`
+	}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Providers) != 1 {
+		t.Fatalf("providers=%d want 1", len(got.Providers))
+	}
+	p := got.Providers[0]
+	if p.Name != "yijia" || p.AccountMode != "none" || p.Keys != 2 {
+		t.Fatalf("provider mode lost: %+v", p)
+	}
+	if len(p.Accounts) != 0 {
+		t.Fatalf("未归属账号应被过滤，got %+v", p.Accounts)
+	}
+}
+
 // 统一账号池端点：只读默认公开（GET → 200），写接口未鉴权一律 401。
 func TestOmniAccountEndpointsUnauthorized(t *testing.T) {
 	p := New(Config{Version: "test", APIKey: "k", OmniAccounts: func(bool) (any, error) { return nil, nil }})

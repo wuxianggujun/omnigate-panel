@@ -7,7 +7,7 @@ import {
 } from '../core/dom.js';
 import {
   fmtCompact, fmtCredits, fmtDuration, fmtInt, fmtPercent, fmtRelative, fmtTime,
-  fmtUptime, healthOfAccount, outcomeLabel, parseDate, providerLabel, roleLabel,
+  fmtUptime, isKeyBasedProvider, outcomeLabel, parseDate, providerLabel, roleLabel,
 } from '../core/format.js';
 import { toastError, toastSuccess } from '../components/toast.js';
 import { createTable } from '../components/table.js';
@@ -79,6 +79,12 @@ function render(root, ctx, { loading = false } = {}) {
   const usage = localState.usage || {};
   const providerRows = providerRowsOf(data, accountsPayload);
   const totals = computeTotals(data, usage, providerRows);
+  const noAccounts = totals.accounts === 0;
+  const supplierBits = [];
+  if (totals.keyReady) supplierBits.push(`${fmtInt(totals.keyReady)} 个密钥直连`);
+  if (totals.keyEmpty) supplierBits.push(`${fmtInt(totals.keyEmpty)} 个密钥待配置`);
+  if (totals.accountProviders) supplierBits.push(`${fmtInt(totals.accountProviders)} 个账号型`);
+  const supplierMeta = supplierBits.join(' · ') || '暂无可用凭证';
   const recent = Array.isArray(data.recent) ? data.recent : [];
   const series = Array.isArray(data.series) && data.series.length ? data.series : (Array.isArray(usage.series) ? usage.series : []);
 
@@ -101,7 +107,7 @@ function render(root, ctx, { loading = false } = {}) {
         'ENGINE OVERVIEW',
       ),
       el('h1', { class: 'page-title', text: '总览' }),
-      el('p', { class: 'page-subtitle', text: '内置 OmniGate 引擎的实时健康、账号与近 24 小时负载。' }),
+      el('p', { class: 'page-subtitle', text: '内置 OmniGate 引擎的实时健康、供应商与近 24 小时负载。' }),
     ),
     el('div', { class: 'page-actions' },
       el('span', { class: 'auto-refresh-note', text: '每 15 秒自动刷新' }),
@@ -114,7 +120,7 @@ function render(root, ctx, { loading = false } = {}) {
       el('span', { class: 'context-item' }, icon('user', 14), state.username),
       badge(roleLabel(state.role), state.role === 'admin' ? 'accent' : (state.role === 'viewer' ? 'info' : 'muted')),
       state.role === 'user'
-        ? el('span', { class: 'context-note', text: '账号与用量仅显示归属你的部分（provider/label）' })
+        ? el('span', { class: 'context-note', text: '账号池与用量仅显示归属你的部分（provider/label）' })
         : null,
       data.mock ? badge('Mock 数据', 'warn') : null,
     ));
@@ -156,7 +162,11 @@ function render(root, ctx, { loading = false } = {}) {
 
   page.appendChild(el('div', { class: 'kpi-grid' },
     kpiCard('服务状态', data.version ? '运行中' : (loading ? '连接中' : '未知'), data.version ? `版本 ${data.version}` : '', data.version ? 'ok' : 'muted', { iconName: 'power', tone: data.version ? 'ok' : 'muted' }),
-    kpiCard('账号健康', `${fmtInt(totals.healthy)} / ${fmtInt(totals.accounts)}`, healthMeta(totals), totals.failed ? 'warn' : 'ok', { iconName: 'shield' }),
+    kpiCard(noAccounts ? '供应商' : '账号健康',
+      noAccounts ? fmtInt(totals.providers) : `${fmtInt(totals.healthy)} / ${fmtInt(totals.accounts)}`,
+      noAccounts ? supplierMeta : healthMeta(totals),
+      noAccounts ? 'muted' : (totals.failed ? 'warn' : 'ok'),
+      { iconName: noAccounts ? 'key' : 'shield' }),
     kpiCard('近 24h 请求', fmtCompact(totals.requests), totals.requests ? `成功率 ${fmtPercent(totals.successRate)}` : '暂无流量', 'accent', { iconName: 'activity' }),
     kpiCard('近 24h Tokens', fmtCompact(totals.tokens), `平均延迟 ${fmtDuration(totals.avgLatency)}`, 'muted', { iconName: 'models' }),
     kpiCard('近 24h 积分', fmtCredits(totals.credits), '按上游回传的 credit 统计', 'muted', { iconName: 'usage' }),
@@ -169,7 +179,7 @@ function render(root, ctx, { loading = false } = {}) {
 
   page.appendChild(el('div', { class: 'overview-main-grid' },
     trendCard(series, ctx),
-    locksCard(data.model_locks || []),
+    locksCard(data.model_locks || [], totals),
   ));
 
   page.appendChild(providerCard(providerRows, ctx));
@@ -215,11 +225,17 @@ function providerRowsOf(data, accountsPayload) {
   if (Array.isArray(data.providers)) {
     for (const item of data.providers) {
       if (!item || !item.name) continue;
+      const accounts = Number(item.accounts ?? item.account_count ?? 0);
+      const keys = Number(item.keys ?? 0);
+      const keyBased = isKeyBasedProvider({ account_mode: item.account_mode }) || (accounts === 0 && keys > 0);
       seen.set(item.name, rows.length);
       rows.push({
         name: item.name,
         type: item.type || '',
-        accounts: Number(item.accounts ?? item.account_count ?? 0),
+        accountMode: item.account_mode || '',
+        keyBased,
+        keys,
+        accounts,
         healthy: Number(item.healthy ?? 0),
         cooling: Number(item.cooling ?? 0),
         failed: Number(item.failed ?? item.disabled ?? 0),
@@ -238,10 +254,16 @@ function providerRowsOf(data, accountsPayload) {
       else if (parseDate(account.cooling_until)?.getTime() > Date.now()) cooling += 1;
       else if (account.has_token !== false) healthy += 1;
     }
+    const accounts = (provider.accounts || []).length;
+    const keys = Number(provider.keys ?? 0);
+    const keyBased = isKeyBasedProvider({ account_mode: provider.account_mode }) || (accounts === 0 && keys > 0);
     if (seen.has(provider.name)) {
       const row = rows[seen.get(provider.name)];
       row.type = row.type || provider.type || '';
-      row.accounts = Math.max(row.accounts, (provider.accounts || []).length);
+      row.accountMode = row.accountMode || provider.account_mode || '';
+      row.keyBased = row.keyBased || keyBased;
+      row.keys = Math.max(row.keys || 0, keys);
+      row.accounts = Math.max(row.accounts, accounts);
       row.healthy = Math.max(row.healthy, healthy);
       row.cooling = Math.max(row.cooling, cooling);
       row.failed = Math.max(row.failed, failed);
@@ -250,7 +272,10 @@ function providerRowsOf(data, accountsPayload) {
     rows.push({
       name: provider.name,
       type: provider.type || '',
-      accounts: (provider.accounts || []).length,
+      accountMode: provider.account_mode || '',
+      keyBased,
+      keys,
+      accounts,
       healthy,
       cooling,
       failed,
@@ -272,9 +297,15 @@ function computeTotals(data, usage, providerRows) {
   const errors = Number(u.errors ?? 0);
   let successRate = Number(t.success_rate ?? NaN);
   if (!Number.isFinite(successRate)) successRate = requests ? ((requests - errors) / requests) * 100 : 0;
+  const keyProviders = providerRows.filter((p) => p.keyBased).length;
+  const keyReady = providerRows.filter((p) => p.keyBased && p.keys > 0).length;
   return {
     accounts, healthy, cooling, failed,
     providers: providerRows.length,
+    keyProviders,
+    keyReady,
+    keyEmpty: keyProviders - keyReady,
+    accountProviders: providerRows.length - keyProviders,
     requests,
     tokens: Number(t.tokens_24h ?? u.total_tokens ?? 0),
     credits: Number(t.credits_24h ?? u.credits ?? 0),
@@ -307,6 +338,7 @@ function healthMeta(totals) {
   const bits = [`正常 ${totals.healthy}`];
   if (totals.cooling) bits.push(`冷却 ${totals.cooling}`);
   if (totals.failed) bits.push(`异常 ${totals.failed}`);
+  if (totals.keyProviders) bits.push(`${totals.keyProviders} 个密钥型`);
   return bits.join(' · ');
 }
 
@@ -322,7 +354,9 @@ function engineCard(data, totals, context) {
     ),
     el('div', { class: 'engine-facts' },
       fact('供应商', fmtInt(totals.providers || context.providers || 0)),
-      fact('健康账号', `${fmtInt(totals.healthy)} / ${fmtInt(totals.accounts)}`),
+      totals.accounts
+        ? fact('健康账号', `${fmtInt(totals.healthy)} / ${fmtInt(totals.accounts)}`)
+        : fact('密钥直连', totals.keyReady ? `${fmtInt(totals.keyReady)} 个供应商` : '未配置'),
       fact('成功请求率', fmtPercent(totals.successRate)),
       fact('平均延迟', fmtDuration(totals.avgLatency)),
     ),
@@ -344,6 +378,7 @@ function fact(label, value) {
 }
 
 function healthCard(totals, providerRows) {
+  if (!totals.accounts) return supplierCard(totals, providerRows);
   const total = Math.max(1, totals.accounts);
   const segments = [
     { key: 'healthy', value: totals.healthy, tone: 'ok', label: '正常' },
@@ -393,6 +428,53 @@ function healthCard(totals, providerRows) {
   });
 }
 
+// 密钥型供应商（openai/opencode 等 AccountModeNone）没有账号池：总览不再用
+// 「账号健康 0/0」和「空壳」来描述它们，改为展示供应商与上游密钥状态。
+function supplierCard(totals, providerRows) {
+  const keyCount = providerRows.filter((row) => row.keyBased).length;
+  const rows = providerRows.slice(0, 6);
+  const legend = (tone, label, value) => el('div', { class: 'legend-row' },
+    el('span', { class: `legend-dot health-${tone}`, 'aria-hidden': 'true' }),
+    el('span', { class: 'legend-label', text: label }),
+    el('span', { class: 'legend-value', text: String(value) }),
+  );
+  return card({
+    title: '供应商状态',
+    subtitle: '当前使用供应商级密钥直连，不维护账号池',
+    body: el('div', {},
+      el('div', { class: 'health-summary' },
+        el('div', { class: 'health-number' },
+          el('span', { class: 'health-big', text: fmtInt(totals.providers) }),
+          el('span', { class: 'health-caption', text: '供应商' }),
+        ),
+        el('div', { class: 'health-legend' },
+          legend('ok', '密钥直连', keyCount),
+          providerRows.length - keyCount ? legend('empty', '账号型', providerRows.length - keyCount) : null,
+        ),
+      ),
+      rows.length
+        ? el('div', { class: 'health-list' }, rows.map((row) => {
+          let tone = 'muted';
+          let text = '未配置账号';
+          if (row.keyBased) {
+            tone = row.keys ? 'ok' : 'warn';
+            text = row.keys ? `${row.keys} 把上游密钥` : '未配置密钥';
+          } else if (row.accounts) {
+            tone = row.failed ? 'danger' : (row.cooling ? 'warn' : 'ok');
+            text = `${row.healthy} / ${row.accounts} 账号`;
+          }
+          return el('a', { class: 'health-row', href: `#/providers?name=${encodeURIComponent(row.name)}` },
+            el('span', { class: 'health-provider', text: row.name }),
+            el('span', { class: 'health-type', text: providerLabel(row.type) }),
+            statusDot(tone, text),
+          );
+        }))
+        : emptyState('暂无供应商', '配置供应商后会在这里显示密钥与接入状态。'),
+    ),
+    actions: el('a', { class: 'btn btn-ghost btn-sm', href: '#/providers' }, '管理供应商'),
+  });
+}
+
 function trendCard(series, ctx) {
   const points = series.slice(-32).map((p) => ({
     t: p.t,
@@ -429,10 +511,11 @@ function trendCard(series, ctx) {
   });
 }
 
-function locksCard(locks) {
+function locksCard(locks, totals) {
+  const hasAccounts = totals?.accounts > 0;
   return card({
     title: '模型锁与冷却',
-    subtitle: '账号级限流、额度耗尽与恢复时间',
+    subtitle: hasAccounts ? '账号与密钥的限流、额度耗尽与恢复时间' : '上游密钥的限流、额度耗尽与恢复时间',
     body: locks.length
       ? el('div', { class: 'lock-list' }, locks.map((lock) => el('div', { class: 'lock-row' },
         el('div', { class: 'lock-main' },
@@ -440,16 +523,18 @@ function locksCard(locks) {
           badge(lock.kind === 'quota' ? '额度' : (lock.kind === 'rate_limit' ? '限流' : (lock.kind || '锁定')), lock.kind === 'quota' ? 'warn' : 'danger'),
         ),
         el('div', { class: 'lock-meta' },
-          el('span', { text: lock.accounts != null ? `${lock.accounts} 个账号` : '' }),
+          el('span', { text: lock.accounts != null ? `${lock.accounts} 个账号` : (hasAccounts ? '' : '密钥') }),
           lock.until ? el('span', { text: `恢复 ${fmtRelative(lock.until)}` }) : null,
         ),
         lock.reason ? el('p', { class: 'lock-reason', text: lock.reason }) : null,
       )))
-      : emptyState('没有模型锁', '当前没有账号处于限流或额度耗尽状态。'),
+      : emptyState('没有模型锁', hasAccounts ? '当前没有账号或密钥处于限流、额度耗尽状态。' : '当前没有密钥处于限流、额度耗尽状态。'),
   });
 }
 
 function providerCard(rows, ctx) {
+  const hasAccounts = rows.some((row) => row.accounts > 0);
+  const hasKeys = rows.some((row) => row.keyBased);
   const table = createTable({
     columns: [
       {
@@ -462,15 +547,26 @@ function providerCard(rows, ctx) {
       },
       {
         key: 'accounts',
-        label: '账号',
+        label: hasAccounts ? (hasKeys ? '账号 / 接入' : '账号') : '接入方式',
         align: 'right',
-        render: (row) => `${fmtInt(row.healthy)} / ${fmtInt(row.accounts)}`,
+        render: (row) => {
+          if (row.keyBased) {
+            return el('span', { class: 'mono', text: row.keys ? `${row.keys} 把密钥` : '密钥未配置' });
+          }
+          if (!row.accounts) return el('span', { class: 'muted', text: '未配置' });
+          return `${fmtInt(row.healthy)} / ${fmtInt(row.accounts)}`;
+        },
       },
       {
         key: 'health',
         label: '健康',
-        render: (row) => statusDot(row.failed ? 'danger' : (row.cooling ? 'warn' : (row.accounts ? 'ok' : 'muted')),
-          row.accounts ? `${row.healthy} 正常${row.cooling ? ` · ${row.cooling} 冷却` : ''}` : '空壳'),
+        render: (row) => {
+          if (row.keyBased) {
+            return statusDot(row.keys ? 'ok' : 'warn', row.keys ? '密钥直连' : '未配置密钥');
+          }
+          return statusDot(row.failed ? 'danger' : (row.cooling ? 'warn' : (row.accounts ? 'ok' : 'muted')),
+            row.accounts ? `${row.healthy} 正常${row.cooling ? ` · ${row.cooling} 冷却` : ''}` : '空壳');
+        },
       },
       {
         key: 'requests',
@@ -489,6 +585,11 @@ function providerCard(rows, ctx) {
     body: table.el,
     actions: el('a', { class: 'btn btn-ghost btn-sm', href: '#/providers' }, '管理供应商'),
   });
+}
+
+function requestSource(account) {
+  const value = String(account || '').trim();
+  return (!value || value === 'api-key') ? '密钥直连' : value;
 }
 
 function recentCard(recent, ctx, state) {
@@ -510,10 +611,10 @@ function recentCard(recent, ctx, state) {
       { key: 'time', label: '时间', render: (row) => fmtTime(row.time), width: '96px' },
       {
         key: 'provider',
-        label: '供应商 / 账号',
+        label: '供应商 / 来源',
         render: (row) => el('div', { class: 'cell-title' },
           el('span', { class: 'mono', text: row.provider || '—' }),
-          el('span', { class: 'cell-sub', text: row.account || '供应商密钥' }),
+          el('span', { class: 'cell-sub', text: requestSource(row.account) }),
         ),
       },
       { key: 'model', label: '模型', render: (row) => el('span', { class: 'mono truncate', text: row.model || '—' }) },

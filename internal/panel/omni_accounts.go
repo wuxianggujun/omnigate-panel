@@ -48,9 +48,11 @@ func filterOmniAccountList(d any, owned map[string]bool) any {
 	}
 	var m struct {
 		Providers []struct {
-			Name     string           `json:"name"`
-			Type     string           `json:"type"`
-			Accounts []map[string]any `json:"accounts"`
+			Name        string           `json:"name"`
+			Type        string           `json:"type"`
+			AccountMode string           `json:"account_mode,omitempty"`
+			Keys        int              `json:"keys,omitempty"`
+			Accounts    []map[string]any `json:"accounts"`
 		} `json:"providers"`
 	}
 	if err := json.Unmarshal(raw, &m); err != nil {

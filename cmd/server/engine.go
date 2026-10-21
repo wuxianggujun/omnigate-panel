@@ -704,10 +704,14 @@ func (m *omniManager) ImportAccountsRaw(raw json.RawMessage) (imported, skipped 
 // ---------------------------------------------------------------------------
 
 // omniProviderAccounts 是归一化后的「一个 provider 一组账号」视图。
+// AccountMode/Keys 让面板区分「账号池」与「供应商级密钥直连」两种形态：
+// openai 等密钥型 provider 的 accounts 恒为空，但 keys 可能多把轮询。
 type omniProviderAccounts struct {
-	Name     string           `json:"name"`
-	Type     string           `json:"type"`
-	Accounts []map[string]any `json:"accounts"`
+	Name        string           `json:"name"`
+	Type        string           `json:"type"`
+	AccountMode string           `json:"account_mode,omitempty"`
+	Keys        int              `json:"keys,omitempty"`
+	Accounts    []map[string]any `json:"accounts"`
 }
 
 // Accounts 汇总全部 provider 的账号（归一化），供面板统一账号池展示。
@@ -729,7 +733,24 @@ func (m *omniManager) Accounts(ctx context.Context, withBalance bool) (any, erro
 				meta[d.Label] = d
 			}
 		}
-		pa := omniProviderAccounts{Name: name, Type: typ, Accounts: []map[string]any{}}
+		mode := ""
+		if desc, err := plugin.Get(typ); err == nil {
+			mode = string(desc.AccountMode)
+		}
+		keys := 0
+		if rt.cfg != nil {
+			if pc := rt.cfg.Provider(name); pc != nil {
+				if typ == "opencode" {
+					keys = len(pc.ZenKeys) + len(pc.GoKeys)
+				} else {
+					keys = len(pc.ProviderKeys())
+				}
+			}
+		}
+		pa := omniProviderAccounts{
+			Name: name, Type: typ, AccountMode: mode, Keys: keys,
+			Accounts: []map[string]any{},
+		}
 		rows, err := rt.gw.Ops(name).ListAccounts(ctx, name, withBalance)
 		if err != nil {
 			return nil, err

@@ -238,9 +238,11 @@ type omniAccountRow struct {
 }
 
 type omniProviderRow struct {
-	Name     string           `json:"name"`
-	Type     string           `json:"type"`
-	Accounts []omniAccountRow `json:"accounts"`
+	Name        string           `json:"name"`
+	Type        string           `json:"type"`
+	AccountMode string           `json:"account_mode,omitempty"`
+	Keys        int              `json:"keys,omitempty"`
+	Accounts    []omniAccountRow `json:"accounts"`
 }
 
 func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
@@ -288,6 +290,7 @@ func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
 		if !anon {
 			rows = append(rows, map[string]any{
 				"name": prov.Name, "type": prov.Type,
+				"account_mode": prov.AccountMode, "keys": prov.Keys,
 				"accounts": len(prov.Accounts), "healthy": ph,
 				"cooling": pc, "failed": pf,
 			})

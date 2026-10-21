@@ -185,6 +185,9 @@ docker compose exec omnigate-panel /app/omnigate-panel \
   -config /app/config.json -set-admin-password -admin-user admin
 ```
 
+> ⚠️ **反向代理必须放宽超时**，否则会出现「后端已计费、客户端却收到 504 并重试」
+> 的 token 浪费。见下文[反向代理部署](#反向代理部署)。
+
 ## 开发
 
 ```bash
@@ -210,6 +213,71 @@ Windows 上可能因文件句柄未释放而报 cleanup 错误；在 Linux/macOS
 
 升级前请先整目录备份；新版本首次启动会自动导入旧配置，并把原文件备份到
 `data/backups/config-migration-*`。
+
+## 反向代理部署
+
+本服务是**流式**接口：长 prompt + 长输出的真实响应时间经常达到 30～60s 甚至更久
+（实测有 156s 的正常请求）。因此放在 Nginx / OpenResty 后面时，`location` 里**必须**
+放宽超时并关闭缓冲：
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:7863;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+
+    # SSE 流式响应：关闭缓冲并放宽超时
+    proxy_buffering off;
+    proxy_cache off;
+    proxy_read_timeout 300s;
+    proxy_send_timeout 300s;
+}
+```
+
+改完校验并热加载：
+
+```bash
+nginx -t && nginx -s reload
+# 确认实际加载的配置里包含这几行
+nginx -T | grep -E 'proxy_read_timeout|proxy_send_timeout|proxy_buffering'
+```
+
+### 为什么必须这么做
+
+nginx 的 `proxy_read_timeout` **默认只有 60s**。超过后反代会主动断开并返回
+**504**，但此时上游（本服务）已经把请求处理完并产生了 token 消耗——客户端没拿到
+结果，于是重试，**同一份 prompt 被反复计费**。
+
+需要特别强调的是：**本服务自身从不返回 504**。代码里唯一的 `504` 字面量是
+`internal/gemini/gemini.go` 的状态码→名称映射。`/v1/chat/completions` 只会返回：
+
+| 状态码 | 含义 |
+|---|---|
+| `400` | 请求体读取失败 / JSON 非法 |
+| `403` | 客户端密钥 scope 不允许该模型 |
+| `502` | 上游错误，或上游返回空响应/空流 |
+| `503` | 流式失败（仅用于请求记录的观测状态码，HTTP 头已发 200） |
+
+所以**看到 504 一定是中间层（反代 / CDN）发出的**，不是本服务。
+
+### 排障速查
+
+出现 504 时按这个顺序定位：
+
+1. **看反代的 access log 状态码分布**，确认 504 是反代发出的。
+2. **看反代的 error log**，找 `upstream timed out (110: Connection timed out)`，
+   它会写明是哪个 upstream 超时。
+3. **对比同一个后端不同 vhost 的 proxy 配置**。从静态站模板复制来的 `location`
+   块很容易漏掉 SSE 相关的 `proxy_buffering` / `proxy_read_timeout`。
+4. **用「取消传播方向」判断谁先超时**：如果上游侧日志出现
+   `client_gone` / `context canceled`，说明是外层先断的，不是内层超时。
+
+> 💡 改这类配置的两个坑：一是别用 `sed -i` 插入含引号的行（引号会被外层 shell
+> 吃掉），整文件替换最稳；二是别用中文注释经 PowerShell/SSH 管道传输（编码会被
+> 破坏，把下一行指令吞进注释里），用 ASCII 注释或直接 `scp` 传文件。
 
 ## License
 

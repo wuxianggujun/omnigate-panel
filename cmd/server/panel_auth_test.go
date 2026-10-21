@@ -1,8 +1,6 @@
 package main
 
 import (
-	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/wuxianggujun/omnigate-panel/internal/panelauth"
@@ -48,69 +46,5 @@ func TestPanelAuthNormalize(t *testing.T) {
 	badRole := []byte(`{"panel_auth":{"users":[{"username":"x","role":"root","password_hash":"` + hash + `"}]}}`)
 	if _, err := ParseConfig(badRole); err == nil {
 		t.Fatal("bad role should be rejected")
-	}
-}
-
-// 命令行设密往返：写文件 → 重新 Load → 账号与哈希可用；保留文件中其它字段与账号。
-func TestSetAdminPasswordRoundTrip(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.json")
-	if _, err := WriteDefault(path); err != nil {
-		t.Fatal(err)
-	}
-	// 记下一个非 panel_auth 字段，验证写入不丢字段。
-	before, err := Load(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if err := SetAdminPassword(path, "admin", panelauth.RoleAdmin, "Sup3rSecret!"); err != nil {
-		t.Fatalf("SetAdminPassword: %v", err)
-	}
-	// 再加一个 viewer。
-	if err := SetAdminPassword(path, "guest", panelauth.RoleViewer, "viewerpw1"); err != nil {
-		t.Fatalf("SetAdminPassword guest: %v", err)
-	}
-	c, err := Load(path)
-	if err != nil {
-		t.Fatalf("reload: %v", err)
-	}
-	if c.APIKey != before.APIKey {
-		t.Errorf("api_key changed by panel auth write (%q → %q)", before.APIKey, c.APIKey)
-	}
-	if c.Listen != before.Listen {
-		t.Errorf("listen changed by panel auth write (%q → %q)", before.Listen, c.Listen)
-	}
-	if len(c.PanelAuth.Users) != 2 {
-		t.Fatalf("users=%d want 2", len(c.PanelAuth.Users))
-	}
-	admin, _, ok := panelauth.FindUser(c.PanelAuth.Users, "admin")
-	if !ok || !panelauth.VerifyPassword(admin.PasswordHash, "Sup3rSecret!") {
-		t.Fatal("admin password not persisted/verifiable")
-	}
-	guest, _, ok := panelauth.FindUser(c.PanelAuth.Users, "guest")
-	if !ok || guest.Role != panelauth.RoleViewer || !panelauth.VerifyPassword(guest.PasswordHash, "viewerpw1") {
-		t.Fatal("guest not persisted correctly")
-	}
-
-	// 重置 admin 密码，不改账号数量。
-	if err := SetAdminPassword(path, "admin", panelauth.RoleAdmin, "Rotated!Pass9"); err != nil {
-		t.Fatal(err)
-	}
-	c, _ = Load(path)
-	if len(c.PanelAuth.Users) != 2 {
-		t.Fatalf("users=%d want 2 after reset", len(c.PanelAuth.Users))
-	}
-	admin, _, _ = panelauth.FindUser(c.PanelAuth.Users, "admin")
-	if !panelauth.VerifyPassword(admin.PasswordHash, "Rotated!Pass9") {
-		t.Fatal("reset password not applied")
-	}
-	if panelauth.VerifyPassword(admin.PasswordHash, "Sup3rSecret!") {
-		t.Fatal("old password still valid after reset")
-	}
-
-	// 文件权限应收紧为 0600（Linux）。
-	if fi, err := os.Stat(path); err == nil && fi.Mode().Perm()&0o077 != 0 {
-		t.Logf("note: config perms = %v (expected 0600 on Linux)", fi.Mode().Perm())
 	}
 }

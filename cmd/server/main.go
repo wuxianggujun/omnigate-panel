@@ -32,7 +32,7 @@ import (
 const appVersion = "2.0.0-refactor"
 
 func main() {
-	cfgPath := flag.String("config", "config.json", "配置文件路径（默认当前目录 config.json；不存在时自动生成推荐配置）")
+	cfgPath := flag.String("config", "config.json", "bootstrap 配置路径（只含 PostgreSQL DSN）")
 	setAdminPW := flag.Bool("set-admin-password", false, "交互设置/重置面板账号密码后退出")
 	adminUser := flag.String("admin-user", "admin", "配合 -set-admin-password：目标账号名")
 	adminRole := flag.String("admin-role", "admin", "配合 -set-admin-password：角色（admin/viewer）")
@@ -42,43 +42,47 @@ func main() {
 	// 新增插件只要在启动早期 Register 即可直接写进配置。
 	catalog.Register()
 
+	// config.json 现在只是 bootstrap：必须提供 PostgreSQL DSN。其余配置全部
+	// 从数据库读取；数据库不可用时直接启动失败，不再回落到本地 JSON。
+	boot, err := Load(*cfgPath)
+	if err != nil && errors.Is(err, fs.ErrNotExist) && os.Getenv("OMNIGATE_STORAGE_DSN") != "" {
+		boot, err = Load("")
+	}
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			log.Fatalf("缺少 bootstrap 配置 %s：请写入 {\"storage\":{\"driver\":\"postgres\",\"dsn\":\"...\"}}，或设置 OMNIGATE_STORAGE_DSN", *cfgPath)
+		}
+		log.Fatalf("load bootstrap config: %v", err)
+	}
+	if !boot.Storage.UsePostgres() {
+		log.Fatalf("配置已迁移到 PostgreSQL：请在 %s 设置 storage.driver=postgres 与 storage.dsn（或设置 OMNIGATE_STORAGE_DSN）", *cfgPath)
+	}
+
+	pg, err := pgstore.Open(context.Background(), boot.Storage.DSN)
+	if err != nil {
+		log.Fatalf("PostgreSQL 连接失败（配置存储依赖数据库，无法启动）: %v", err)
+	}
+	defer pg.Close()
+	log.Printf("[storage] 配置与状态后端 = postgres (%s)", pg.Label())
+
+	store, err := loadConfigStore(pg, boot, *cfgPath)
+	if err != nil {
+		log.Fatalf("加载 PostgreSQL 配置失败: %v", err)
+	}
+	cfg := store.Main()
+	// 面板账号：panel_users 表是唯一权威。首次从旧配置迁移时导入一次；必须在
+	// -set-admin-password 之前完成，否则命令行设密会把旧账号覆盖掉。
+	panelUsers, err := ensurePanelUsers(pg, cfg.PanelAuth.Users)
+	if err != nil {
+		log.Fatalf("%v", err)
+	}
+	cfg.PanelAuth.Users = panelUsers
+	store.SetUsers(panelUsers)
 	if *setAdminPW {
-		if err := runSetAdminPassword(*cfgPath, *adminUser, *adminRole); err != nil {
+		if err := runSetAdminPassword(pg, *adminUser, *adminRole); err != nil {
 			log.Fatalf("set-admin-password: %v", err)
 		}
 		return
-	}
-
-	cfg, err := Load(*cfgPath)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			if key, werr := WriteDefault(*cfgPath); werr == nil {
-				log.Printf("config %s 不存在，已生成推荐配置（api_key=%s）", *cfgPath, key)
-				cfg, err = Load(*cfgPath)
-			}
-			if err != nil {
-				log.Printf("config %s not found (auto-generate failed), using defaults: %v", *cfgPath, err)
-				cfg, err = Load("")
-			}
-		}
-		if err != nil {
-			log.Fatalf("load config: %v", err)
-		}
-	}
-
-	// 状态存储后端：PostgreSQL 可选，文件为兜底。
-	var pg *pgstore.Store
-	if cfg.Storage.UsePostgres() {
-		st, err := pgstore.Open(context.Background(), cfg.Storage.DSN)
-		if err != nil {
-			log.Printf("WARN: [storage] PostgreSQL 不可用，状态回落本地文件: %v", err)
-		} else {
-			pg = st
-			defer pg.Close()
-			log.Printf("[storage] 状态存储后端 = postgres (%s)", st.Label())
-		}
-	} else {
-		log.Printf("[storage] 状态存储后端 = file (%s)", cfg.DataDir)
 	}
 	if err := os.MkdirAll(cfg.DataDir, 0o755); err != nil {
 		log.Fatalf("create data dir: %v", err)
@@ -129,29 +133,13 @@ func main() {
 	defer obRT.Close()
 
 	// 插件注册表在 main 入口已显式注册；这里不再重复。
-	omni := newOmniManager(cfg, cfg.DataDir, requestLog, rec, func() bool {
+	omni := newOmniManager(cfg, cfg.DataDir, store.Omni(), requestLog, rec, func() bool {
 		return live.Load().RecordClientInfo
-	}, obRT, kvBackend(pg))
+	}, obRT, store, kvBackend(pg))
 	if omni.Enabled() {
 		defer omni.Stop()
 	}
 
-	// 面板账号：库为权威，config.json 作镜像。
-	panelUsers := cfg.PanelAuth.Users
-	if pg != nil {
-		users, have, err := pg.LoadPanelUsers(context.Background())
-		switch {
-		case err != nil:
-			log.Printf("WARN: [storage] 读 PostgreSQL 面板账号失败，本次用 config.json 镜像: %v", err)
-		case have:
-			panelUsers = users
-			log.Printf("[storage] 已从 PostgreSQL 载入 %d 个面板账号", len(users))
-		default:
-			if err := pg.SavePanelUsers(context.Background(), cfg.PanelAuth.Users); err != nil {
-				log.Printf("WARN: [storage] 首次导入面板账号失败: %v", err)
-			}
-		}
-	}
 	authStore := panelauth.New(panelUsers, cfg.PanelAuth.SessionTTL(),
 		cfg.PanelAuth.MaxFail(), cfg.PanelAuth.LockDuration())
 	if err := authStore.EnableSessionBackend(kvBackend(pg), "panel_sessions",
@@ -160,13 +148,28 @@ func main() {
 	}
 
 	pcfg := panel.Config{
-		APIKey:           cfg.APIKey,
-		Version:          appVersion,
-		Live:             live,
-		ConfigPath:       *cfgPath,
-		DataDir:          cfg.DataDir,
-		LoadConfig:       func() (any, error) { return Load(*cfgPath) },
-		SaveConfig:       func(raw []byte) ([]string, error) { return saveConfig(raw, *cfgPath, live, obRT, omni) },
+		APIKey:       cfg.APIKey,
+		Version:      appVersion,
+		Live:         live,
+		ConfigPath:   configStoreRef,
+		DataDir:      cfg.DataDir,
+		LoadConfig:   func() (any, error) { return store.Main(), nil },
+		SaveConfig:   func(raw []byte) ([]string, error) { return saveConfig(raw, store, live, obRT, omni) },
+		LoadOutbound: func() (any, error) { return store.Main().Outbound, nil },
+		SaveOutbound: func(raw []byte) ([]string, error) {
+			var oc outbound.Config
+			if err := json.Unmarshal(raw, &oc); err != nil {
+				return nil, fmt.Errorf("解析出站代理配置失败: %w", err)
+			}
+			if err := oc.Normalize(); err != nil {
+				return nil, err
+			}
+			wrapped, err := json.Marshal(map[string]any{"outbound": oc})
+			if err != nil {
+				return nil, err
+			}
+			return saveConfig(wrapped, store, live, obRT, omni)
+		},
 		Usage:            rec,
 		RequestLog:       requestLog,
 		OwnershipFile:    filepath.Join(cfg.DataDir, "ownership.json"),
@@ -174,13 +177,14 @@ func main() {
 		OwnershipKey:     "ownership",
 		PanelAuth:        authStore,
 		LoadPanelAuth: func() (panel.PanelAuthSection, error) {
-			c, err := Load(*cfgPath)
-			if err != nil {
-				return panel.PanelAuthSection{}, err
-			}
+			c := store.Main()
 			users := c.PanelAuth.Users
 			if pg != nil {
-				if got, have, err := pg.LoadPanelUsers(context.Background()); err == nil && have {
+				got, have, err := pg.LoadPanelUsers(context.Background())
+				if err != nil {
+					return panel.PanelAuthSection{}, fmt.Errorf("读取 PostgreSQL 面板账号失败: %w", err)
+				}
+				if have {
 					users = got
 				}
 			}
@@ -205,13 +209,17 @@ func main() {
 			if err != nil {
 				return nil, err
 			}
-			if _, err := saveConfig(wrapped, *cfgPath, live, obRT, omni); err != nil {
+			if _, err := saveConfig(wrapped, store, live, obRT, omni); err != nil {
 				return nil, err
 			}
-			if c, err := Load(*cfgPath); err == nil {
-				authStore.Reconfigure(c.PanelAuth.Users, c.PanelAuth.SessionTTL(),
-					c.PanelAuth.MaxFail(), c.PanelAuth.LockDuration())
+			ac := PanelAuthConfig{
+				SessionHours: section.SessionHours,
+				MaxFailures:  section.MaxFailures,
+				LockMinutes:  section.LockMinutes,
 			}
+			authStore.Reconfigure(section.Users, ac.SessionTTL(),
+				ac.MaxFail(), ac.LockDuration())
+			store.SetUsers(section.Users)
 			return nil, nil
 		},
 		RegenerateKey: func() (string, error) {
@@ -223,7 +231,7 @@ func main() {
 			if err != nil {
 				return "", err
 			}
-			if _, err := saveConfig(wrapped, *cfgPath, live, obRT, omni); err != nil {
+			if _, err := saveConfig(wrapped, store, live, obRT, omni); err != nil {
 				return "", err
 			}
 			if err := omni.SetAPIKey(key); err != nil {
@@ -233,7 +241,7 @@ func main() {
 		},
 	}
 	if omni.Enabled() {
-		pcfg.OmniConfigPath = cfg.OmnigateConfig
+		pcfg.OmniConfigPath = configStoreRef + "#omnigate"
 		pcfg.LoadOmniConfig = omni.Load
 		pcfg.SaveOmniConfig = omni.Save
 		pcfg.ExportOmniAccounts = omni.ExportAccountsRaw
@@ -336,11 +344,37 @@ func kvBackend(pg *pgstore.Store) kv.Backend {
 	return pg
 }
 
-// saveConfig 面板保存配置：校验 → 落盘 → 热应用 → 返回需重启字段列表。
-func saveConfig(raw []byte, path string, live *livecfg.Holder, obRT *outbound.Runtime, omni *omniManager) ([]string, error) {
-	oldRaw, err := os.ReadFile(path)
+// ensurePanelUsers 读取权威账号表；表为空时把迁移带入的旧账号导入一次。
+func ensurePanelUsers(pg *pgstore.Store, fallback []panelauth.User) ([]panelauth.User, error) {
+	if pg == nil {
+		return nil, errors.New("PostgreSQL 未连接，无法读取面板账号")
+	}
+	users, have, err := pg.LoadPanelUsers(context.Background())
 	if err != nil {
-		return nil, fmt.Errorf("read current config: %w", err)
+		return nil, fmt.Errorf("读取 PostgreSQL 面板账号失败: %w", err)
+	}
+	if have {
+		log.Printf("[storage] 已从 PostgreSQL 载入 %d 个面板账号", len(users))
+		return users, nil
+	}
+	if len(fallback) > 0 {
+		if err := pg.SavePanelUsers(context.Background(), fallback); err != nil {
+			return nil, fmt.Errorf("首次导入面板账号失败: %w", err)
+		}
+		log.Printf("[storage] 已把 %d 个面板账号导入 PostgreSQL", len(fallback))
+	}
+	return fallback, nil
+}
+
+// saveConfig 面板保存配置：校验 → 写 PostgreSQL → 热应用 → 返回需重启字段列表。
+func saveConfig(raw []byte, store *configStore, live *livecfg.Holder, obRT *outbound.Runtime, omni *omniManager) ([]string, error) {
+	if store == nil {
+		return nil, errors.New("配置存储未初始化")
+	}
+	curCfg := store.Main()
+	oldRaw, err := json.Marshal(curCfg)
+	if err != nil {
+		return nil, fmt.Errorf("encode current config: %w", err)
 	}
 	var cur, incoming map[string]any
 	if err := json.Unmarshal(oldRaw, &cur); err != nil {
@@ -349,40 +383,31 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, obRT *outbound.Ru
 	if err := json.Unmarshal(raw, &incoming); err != nil {
 		return nil, fmt.Errorf("parse submitted config: %w", err)
 	}
+	// storage 是 bootstrap 字段：DSN 只能在 config.json / OMNIGATE_STORAGE_DSN
+	// 里改，写进数据库等于把“连接数据库的凭据”放进它自己连不上的地方。
+	if v, ok := incoming["storage"]; ok {
+		b, _ := json.Marshal(v)
+		var submitted StorageConfig
+		if err := json.Unmarshal(b, &submitted); err != nil {
+			return nil, fmt.Errorf("parse storage: %w", err)
+		}
+		boot := store.BootstrapStorage()
+		if submitted.Driver != boot.Driver || submitted.DSN != boot.DSN {
+			return nil, errors.New("storage 是启动引导配置，不能通过面板修改；请编辑 config.json 或 OMNIGATE_STORAGE_DSN 后重启")
+		}
+	}
 	merged := mergeConfigMaps(cur, incoming)
 	newCfg, err := ParseConfig(mergedJSON(merged))
 	if err != nil {
 		return nil, err
 	}
-	out, err := json.MarshalIndent(merged, "", "  ")
-	if err != nil {
-		return nil, fmt.Errorf("marshal config: %w", err)
-	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, out, 0o600); err != nil {
-		return nil, fmt.Errorf("write config: %w", err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		if !errors.Is(err, syscall.EBUSY) {
-			return nil, fmt.Errorf("replace config: %w", err)
-		}
-		f, openErr := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0o600)
-		if openErr != nil {
-			_ = os.Remove(tmp)
-			return nil, fmt.Errorf("replace config (bind mount fallback): %w", openErr)
-		}
-		_, writeErr := f.Write(out)
-		if writeErr == nil {
-			writeErr = f.Sync()
-		}
-		closeErr := f.Close()
-		if writeErr != nil {
-			return nil, fmt.Errorf("replace config (bind mount fallback, 完整新内容保留在 %s): %w", tmp, writeErr)
-		}
-		_ = os.Remove(tmp)
-		if closeErr != nil {
-			return nil, fmt.Errorf("replace config (bind mount fallback): %w", closeErr)
-		}
+	newCfg.Storage = store.BootstrapStorage()
+	newCfg.OmnigateConfig = configStoreRef + "#omnigate"
+	// 面板账号由 panel_users 表与专用鉴权接口管理；主配置表单里回传的是掩码
+	// 哈希，不能写回运行时快照。账号集合由 configStore 统一维护。
+	newCfg.PanelAuth.Users = store.Users()
+	if err := store.SaveMain(newCfg); err != nil {
+		return nil, err
 	}
 	live.Store(livecfg.Snapshot{
 		APIKey:           newCfg.APIKey,
@@ -401,7 +426,7 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, obRT *outbound.Ru
 
 func restartRequiredFields(c *Config) []string {
 	out := []string{
-		"listen", "data_dir", "omnigate_config", "storage",
+		"listen", "data_dir",
 		"server.read_timeout",
 		"logging.request_archive_enabled", "logging.request_retention_days",
 		"logging.request_archive_max_mb",

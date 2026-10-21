@@ -1,10 +1,9 @@
 # 服务名 / 容器名 = omnigate-panel。
 #
 # 单二进制：内置 OmniGate 引擎 + Web 面板，不再有 auths/ 账号目录或独立工具二进制。
-# 首次启动前复制配置：
+# 首次启动前复制 bootstrap 配置并填写 PostgreSQL DSN：
 #   cp config.example.json config.json
-# 引擎配置默认放在 data/omnigate.json（由 OMNIGATE_CONFIG 指向），首次启动自动生成，
-# 也可以在面板「供应商」页添加后自动写入。
+# config.json 只保存数据库连接；供应商、路由、面板账号等全部在 PostgreSQL 中。
 services:
   omnigate-panel:
     build: .
@@ -17,12 +16,10 @@ services:
     user: "${PUID:-10001}:${PGID:-10001}"
     environment:
       - TZ=Asia/Shanghai
-      # 引擎配置放进 data/，避免单文件 bind mount 的「缺文件变目录」问题。
-      - OMNIGATE_CONFIG=/app/data/omnigate.json
     ports:
       - "7863:7863"
     volumes:
       - ./data:/app/data
       # 宿主机必须先有 config.json（cp config.example.json config.json）。
-      # 面板「系统」页需要写回此文件，故不挂 :ro。
+      # 只含 storage.dsn；配置保存不会写这个文件。
       - ./config.json:/app/config.json

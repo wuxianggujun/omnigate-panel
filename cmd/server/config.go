@@ -1,4 +1,5 @@
-// config.go 加载 JSON 配置 + 环境变量覆盖。
+// config.go 加载 bootstrap 配置（PostgreSQL DSN）+ 环境变量覆盖，并定义运行时
+// 主配置结构。除 DSN 外的实际配置值来自 PostgreSQL panel_config。
 package main
 
 import (
@@ -9,14 +10,15 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/wuxianggujun/omnigate-panel/internal/outbound"
 	"github.com/wuxianggujun/omnigate-panel/internal/panelauth"
 )
 
-// PanelAuthConfig config.json 的 panel_auth 段：面板账号（用户名 + 密码哈希 +
-// 角色）与会话/限流参数。与网关 api_key 完全独立。
+// PanelAuthConfig 面板鉴权参数；运行时账号哈希在 PostgreSQL panel_users，
+// 这里只持久化会话/限流/注册开关。与网关 api_key 完全独立。
 type PanelAuthConfig struct {
 	SessionHours      int              `json:"session_hours"`
 	MaxFailures       int              `json:"max_failures"`
@@ -56,14 +58,18 @@ func (p PanelAuthConfig) LockDuration() time.Duration {
 	return time.Duration(m) * time.Minute
 }
 
-// StorageConfig 状态存储后端。
+// StorageConfig 状态存储后端。配置存储强制要求 PostgreSQL；Driver 为空时
+// 只要 DSN 非空也视为 PostgreSQL（便于仅用 OMNIGATE_STORAGE_DSN 启动）。
 type StorageConfig struct {
-	Driver string `json:"driver"` // "file"（缺省）或 "postgres"
+	Driver string `json:"driver"` // "postgres"
 	DSN    string `json:"dsn"`
 }
 
 // UsePostgres 是否启用 PostgreSQL 后端。
-func (s StorageConfig) UsePostgres() bool { return s.Driver == "postgres" }
+func (s StorageConfig) UsePostgres() bool {
+	return strings.EqualFold(strings.TrimSpace(s.Driver), "postgres") ||
+		(strings.TrimSpace(s.Driver) == "" && strings.TrimSpace(s.DSN) != "")
+}
 
 // LoggingConfig 请求归档与来源记录。
 type LoggingConfig struct {
@@ -81,14 +87,14 @@ type Config struct {
 	// DataDir 持久化根目录（usage / request-logs / ownership / panel_sessions 等）。
 	DataDir string `json:"data_dir"`
 
-	// OmnigateConfig 引擎配置（供应商 / 账号 / 路由 / 签到）路径。文件缺失时自动
-	// 生成一份空引擎配置，面板可以直接添加供应商。
+	// OmnigateConfig 旧版引擎配置文件路径，只在首次迁移时用于定位 omnigate.json；
+	// 运行时始终使用 PostgreSQL panel_config#omnigate。
 	OmnigateConfig string `json:"omnigate_config"`
 
-	Storage   StorageConfig     `json:"storage"`
-	Outbound  outbound.Config   `json:"outbound"`
-	Logging   LoggingConfig     `json:"logging"`
-	PanelAuth PanelAuthConfig   `json:"panel_auth"`
+	Storage   StorageConfig   `json:"storage"`
+	Outbound  outbound.Config `json:"outbound"`
+	Logging   LoggingConfig   `json:"logging"`
+	PanelAuth PanelAuthConfig `json:"panel_auth"`
 
 	Server struct {
 		ReadTimeout string `json:"read_timeout"`
@@ -105,7 +111,6 @@ func Default() *Config {
 		DataDir:        "./data",
 		OmnigateConfig: "omnigate.json",
 	}
-	c.Storage.Driver = "file"
 	c.Server.ReadTimeout = "300s"
 	c.Logging.RequestArchiveEnabled = true
 	c.Logging.RequestRetentionDays = 7
@@ -117,14 +122,15 @@ func Default() *Config {
 	return c
 }
 
-// Load 从文件读，再用 OMNIGATE_* env 覆盖。
+// Load 从 bootstrap 文件读，再用 OMNIGATE_* env 覆盖。返回值只保证 Storage 是
+// 权威 bootstrap；其它字段来自文件默认值/旧版迁移输入。
 func Load(path string) (*Config, error) {
 	c := Default()
 	if path != "" {
 		if st, statErr := os.Stat(path); statErr == nil && st.IsDir() {
 			return nil, fmt.Errorf("config %s 是目录而非文件——"+
 				"Docker 部署时若宿主机缺少 config.json，bind mount 会创建同名目录。"+
-				"请先 `cp config.example.json config.json` 或删除该目录（程序会自动生成配置）", path)
+				"请先 `cp config.example.json config.json` 并填写 PostgreSQL DSN", path)
 		}
 		raw, err := os.ReadFile(path)
 		if err != nil {
@@ -137,6 +143,9 @@ func Load(path string) (*Config, error) {
 	applyEnv(c)
 	if err := c.normalize(); err != nil {
 		return nil, err
+	}
+	if c.Storage.UsePostgres() && strings.TrimSpace(c.Storage.Driver) == "" {
+		c.Storage.Driver = "postgres"
 	}
 	return c, nil
 }
@@ -164,37 +173,6 @@ func GenerateAPIKey() (string, error) {
 		return "", fmt.Errorf("gen api_key: %w", err)
 	}
 	return "sk-" + base64.RawURLEncoding.EncodeToString(raw), nil
-}
-
-// WriteDefault 在 path 落一份推荐配置（首次运行自动生成）。
-func WriteDefault(path string) (string, error) {
-	key, err := GenerateAPIKey()
-	if err != nil {
-		return "", err
-	}
-	c := Default()
-	c.APIKey = key
-	if err := c.normalize(); err != nil {
-		return "", err
-	}
-	out, err := json.MarshalIndent(c, "", "  ")
-	if err != nil {
-		return "", fmt.Errorf("marshal config: %w", err)
-	}
-	if dir := filepath.Dir(path); dir != "" && dir != "." {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return "", fmt.Errorf("mkdir config dir: %w", err)
-		}
-	}
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		return "", fmt.Errorf("write config: %w", err)
-	}
-	defer f.Close()
-	if _, err := f.Write(out); err != nil {
-		return "", fmt.Errorf("write config: %w", err)
-	}
-	return key, nil
 }
 
 func applyEnv(c *Config) {

@@ -700,7 +700,7 @@ function storageTab() {
   wrap.appendChild(card({
     title: '文件与归档',
     body: el('div', { class: 'facts-grid' },
-      fact('配置文件', storage.config_path || ui.configPath || '—'),
+      fact('配置存储', storage.config_path || ui.configPath || '—'),
       fact('数据目录', storage.data_dir || ui.config?.data_dir || '—'),
       fact('用量文件', storage.usage_file_bytes != null ? fmtBytes(storage.usage_file_bytes) : '—'),
       fact('请求归档', storage.request_archive_files != null ? `${fmtInt(storage.request_archive_files)} 个文件` : '—'),
@@ -711,7 +711,7 @@ function storageTab() {
   wrap.appendChild(card({
     title: '运维提示',
     body: el('div', { class: 'storage-tips' },
-      el('p', { text: '供应商与面板账号配置保存时会热重载运行时；模型目录、密钥健康与全局映射会落库/落盘。' }),
+      el('p', { text: '供应商、面板账号与网关配置保存在 PostgreSQL；保存后热重载运行时，模型目录、密钥健康与全局映射同样落库。' }),
       el('p', { text: '用量与请求归档按引擎的保留策略滚动清理；面板不提供直接删除按钮。' }),
       el('div', { class: 'quick-actions' },
         el('a', { class: 'btn btn-ghost btn-sm', href: '#/usage' }, '查看用量'),

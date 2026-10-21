@@ -1,6 +1,6 @@
 // omniconfig.go OmniGate 供应商配置页接口：读取 / 校验 / 保存内置 OmniGate 引擎
-// 的供应商配置（omnigate.json），保存后由 main 注入的 SaveOmniConfig 闭包完成
-// 进程内热重载（无需重启）。
+// 的供应商配置（PostgreSQL panel_config），保存后由 main 注入的 SaveOmniConfig
+// 闭包完成进程内热重载（无需重启）。
 //
 // 分工与 config.go 一致：面板只做 HTTP 编排，校验/落盘/热重载都在 main。
 package panel

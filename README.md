@@ -18,8 +18,8 @@
 - **Web 面板**：原生 ES Module、零 npm、零构建，`go:embed` 进二进制；七页信息
   架构（总览 / 供应商 / 模型 / 路由 / 用量 / 请求 / 系统）。
 - **多租户**：admin / viewer / user 三种角色；user 只能看到并运维归属自己的账号。
-- **可选 PostgreSQL**：面板账号、会话、归属、用量、请求记录与引擎状态可落库，
-  文件作为断库兜底。
+- **PostgreSQL 配置中心**：供应商、路由、网关密钥、面板账号、会话、归属、用量、
+  请求记录与引擎状态全部落库；`config.json` 只保留数据库 DSN。
 - **安全默认**：配置 0600 原子写、面板会话鉴权、CSRF 同源校验、密钥脱敏、
   管理端点拒绝收窄密钥。
 
@@ -28,7 +28,7 @@
 ```
 cmd/server                 唯一入口：配置 → 引擎 → 面板 → HTTP
 internal/omnigate/
-  config/                  引擎配置（omnigate.json）
+  config/                  引擎配置模型（数据存 PostgreSQL panel_config）
   gateway/                 选号、冷却、密钥池、模型目录、路由
   provider/                上游实现 + 插件描述符
   plugin/                  SPI（Plugin / Factory / Field / 能力接口）
@@ -53,13 +53,14 @@ internal/{pgstore,kv,reqlog,usage,outbound,panelauth}/  共享基础设施
 ## 快速开始
 
 ```bash
-# 1) 配置（config.json 不存在时会自动生成，并打印随机 api_key）
+# 1) bootstrap：填好 PostgreSQL DSN
 cp config.example.json config.json
+#    也可以不建文件，直接设置 OMNIGATE_STORAGE_DSN
 
 # 2) 构建
 go build -o bin/omnigate-panel ./cmd/server
 
-# 3) 设置第一个面板管理员
+# 3) 设置第一个面板管理员（账号写 PostgreSQL panel_users）
 ./bin/omnigate-panel -config config.json -set-admin-password -admin-user admin
 
 # 4) 启动
@@ -67,8 +68,9 @@ go build -o bin/omnigate-panel ./cmd/server
 # 面板： http://127.0.0.1:7863/panel/
 ```
 
-引擎配置默认是 `omnigate.json`，不存在时会自动生成一份空配置；直接在面板
-「供应商」页添加第一家上游即可。所有供应商、账号、路由、签到配置都写入这个文件，
+首次启动会把旧版 `config.json` 的配置段与 `omnigate.json` 一次性导入 PostgreSQL
+的 `panel_config` 行，然后把 `config.json` 收缩为 DSN bootstrap、把旧引擎配置备份到
+`data/backups/config-migration-*`。之后供应商、账号、路由、签到配置全部直接读写数据库，
 保存后进程内热重载，无需重启。
 
 ## 面板
@@ -116,37 +118,39 @@ plugin.MustRegister(plugin.Plugin{
 
 ## 配置
 
-### config.json
+### config.json（仅 bootstrap）
 
 ```json
 {
-  "listen": ":7863",
-  "api_key": "sk-...",
-  "data_dir": "./data",
-  "omnigate_config": "./omnigate.json",
-  "storage": { "driver": "file", "dsn": "" },
-  "outbound": { "proxies": [], "routes": {} },
-  "panel_auth": { "session_hours": 72, "max_failures": 5, "lock_minutes": 15, "users": [] },
-  "server": { "read_timeout": "300s" },
-  "logging": { "request_archive_enabled": true, "request_retention_days": 7, "request_archive_max_mb": 100, "request_client_info": true }
+  "storage": {
+    "driver": "postgres",
+    "dsn": "postgres://omnigate:change-me@127.0.0.1:5432/omnigate_panel?sslmode=disable"
+  }
 }
 ```
 
-- `data_dir`：用量、请求归档、面板会话、归属表、引擎状态与生成图片的根目录。
-- `storage.driver=postgres`：数据库为权威，本地文件作为镜像与断库兜底。
-- `outbound`：命名代理 + 「目标 → 代理」路由，支持 http/https/socks5 与代理池。
-- `panel_auth`：面板只认密码登录；`users` 为空时须用 `-set-admin-password` 引导。
+- `storage.driver` 必须是 `postgres`；`storage.dsn` 是连接数据库的唯一 bootstrap
+  信息，不能用面板修改（数据库无法自己提供自己的地址）。也可用
+  `OMNIGATE_STORAGE_DSN` 环境变量替代文件。
+- 其余参数（`listen`、`data_dir`、`api_key`、`outbound`、`panel_auth`、`logging`、
+  `server`）在首次迁移后保存在 PostgreSQL `panel_config` 行，面板「系统」页直接读写。
+- `data_dir`：请求归档、生成图片等本地运行数据的根目录；请求/用量/会话/账号等
+  状态的主存储在 PostgreSQL。
+- `panel_auth`：面板只认密码登录；账号哈希保存在 `panel_users` 表，`users` 为空时
+  用 `-set-admin-password` 引导。
 
-### omnigate.json
+### PostgreSQL `panel_config`
 
-包含 `providers`、`api_keys`、`default_provider/model`、`routing.prefer`、
-`credit_routing`、`checkin`、`rate_limit`、`fallback`、`fingerprint` 等引擎参数。
-完整样例见 `omnigate.example.json`。
+一个版本化 JSON 文档，包含主配置和 OmniGate 引擎配置（供应商、`api_keys`、
+`default_provider/model`、`routing.prefer`、`credit_routing`、`checkin`、
+`rate_limit`、`fallback`、`fingerprint` 等）。保存时先写上一版到
+`panel_config_previous`，再覆盖当前行；当前行损坏时启动自动回退到上一版。
+引擎配置结构参考 `omnigate.example.json`，但运行时不再读取该文件。
 
 ## 客户端密钥
 
-`api_key` 是面板自己的全量密钥（不写入 `omnigate.json`）。面向客户端的密钥放在
-`omnigate.json` 的 `api_keys`：
+`api_key` 是面板自己的全量密钥。面向客户端的密钥放在 PostgreSQL `panel_config`
+的引擎配置 `api_keys`：
 
 ```json
 "api_keys": [
@@ -173,8 +177,8 @@ mkdir -p data
 docker compose up -d --build
 ```
 
-引擎配置通过 `OMNIGATE_CONFIG=/app/data/omnigate.json` 放进数据卷，避免单文件
-bind mount 的「缺文件变目录」问题。首次启动自动生成引擎配置，面板密码用：
+`config.json` 只填 PostgreSQL DSN；首次启动会建表、迁移旧配置并写入
+`panel_config`。面板密码用：
 
 ```bash
 docker compose exec omnigate-panel /app/omnigate-panel \
@@ -199,11 +203,13 @@ Windows 上可能因文件句柄未释放而报 cleanup 错误；在 Linux/macOS
 
 本分支不做兼容：
 
+- 配置以 PostgreSQL 为唯一权威；`omnigate.json` 只在首次迁移时读取一次；
 - `auths/`、`data/state.json`、旧 `config.json` 中的 WorkBuddy 字段不再读取；
 - 旧 `/omni/*` 路径不再保留，网关直接在 `/v1/*`；
 - 旧面板 URL 的 hash 路由（`#accounts` 等）不再映射。
 
-如需保留旧数据，请先整目录备份；新版本从空白供应商配置开始。
+升级前请先整目录备份；新版本首次启动会自动导入旧配置，并把原文件备份到
+`data/backups/config-migration-*`。
 
 ## License
 

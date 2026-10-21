@@ -45,10 +45,12 @@ type omniRuntime struct {
 // omniManager 持有当前运行时并负责热重载。enabled=false 时面板自动跳过 OmniGate。
 type omniManager struct {
 	enabled bool
-	path    string
 	dataDir string
 	apiKey  string
 	logger  *omnilogx.Logger
+
+	// store 是 PostgreSQL 配置存储；供应商配置的唯一写入路径。
+	store *configStore
 
 	mu  sync.Mutex // 串行化重载
 	st  *omnistate.State
@@ -66,7 +68,7 @@ type omniManager struct {
 	obRT *outbound.Runtime
 
 	// reqlog 是进程内共享的请求记录器（面板「请求」页）。
-	reqlog *reqlog.Recorder
+	reqlog     *reqlog.Recorder
 	clientInfo func() bool
 
 	// usageRec 是进程内共享的用量记录器（面板「用量」页）。nil = 不计入。
@@ -77,12 +79,11 @@ type omniManager struct {
 	pg kv.Backend
 }
 
-// newOmniManager 按 cfg.OmnigateConfig 装配 OmniGate。配置文件缺失/解析失败时
-// 返回未启用的 manager（不报错，面板其余功能照常）。requestLog / usageRec 为共享
-// 记录器（可为 nil）；clientInfo 报告是否记录调用来源（可为 nil）。
-func newOmniManager(cfg *Config, dataDir string, requestLog *reqlog.Recorder, usageRec *usage.Recorder, clientInfo func() bool, obRT *outbound.Runtime, pg kv.Backend) *omniManager {
+// newOmniManager 用来自 PostgreSQL 的 ocfg 装配 OmniGate。引擎配置损坏时返回
+// 未启用的 manager（面板其余功能照常），但不会回落到 omnigate.json。
+// requestLog / usageRec 为共享记录器（可为 nil）；clientInfo 报告是否记录调用来源。
+func newOmniManager(cfg *Config, dataDir string, ocfg *omniconfig.Config, requestLog *reqlog.Recorder, usageRec *usage.Recorder, clientInfo func() bool, obRT *outbound.Runtime, store *configStore, pg kv.Backend) *omniManager {
 	m := &omniManager{
-		path:       cfg.OmnigateConfig,
 		dataDir:    dataDir,
 		apiKey:     cfg.APIKey,
 		logger:     omnilogx.New(300),
@@ -91,30 +92,15 @@ func newOmniManager(cfg *Config, dataDir string, requestLog *reqlog.Recorder, us
 		reqlog:     requestLog,
 		usageRec:   usageRec,
 		clientInfo: clientInfo,
+		store:      store,
 		pg:         pg,
 	}
-	if m.path == "" {
-		m.path = "omnigate.json"
+	if ocfg == nil {
+		log.Printf("[omnigate] 未启用：PostgreSQL 中没有引擎配置")
+		return m
 	}
-	if _, err := os.Stat(m.path); err != nil {
-		if os.IsNotExist(err) {
-			if dir := filepath.Dir(m.path); dir != "" && dir != "." {
-				_ = os.MkdirAll(dir, 0o755)
-			}
-			if werr := os.WriteFile(m.path, []byte("{\n  \"providers\": []\n}\n"), 0o600); werr != nil {
-				log.Printf("WARN: [omnigate] 无法生成 %s: %v", m.path, werr)
-				return m
-			}
-			log.Printf("[omnigate] 未找到 %s，已生成空引擎配置（在面板添加供应商即可）", m.path)
-		}
-		if _, statErr := os.Stat(m.path); statErr != nil {
-			log.Printf("[omnigate] 未启用：配置文件 %s 不存在: %v", m.path, statErr)
-			return m
-		}
-	}
-	ocfg, err := omniconfig.Load(m.path)
-	if err != nil {
-		log.Printf("WARN: [omnigate] 加载 %s 失败，已跳过：%v", m.path, err)
+	if err := ocfg.Normalize(); err != nil {
+		log.Printf("WARN: [omnigate] 引擎配置校验失败，已跳过：%v", err)
 		return m
 	}
 	if ocfg.DataDir == "" || ocfg.DataDir == "data" {
@@ -151,7 +137,7 @@ func (m *omniManager) build(cfg *omniconfig.Config) (*omniRuntime, error) {
 	// 面板 api_key 复用为网关密钥（面板与客户端共用同一把全量钥匙；收窄密钥
 	// 走 api_keys，不会混进这里）。
 	// 它走独立的 PanelKey（不落盘、恒全量），刻意不混进面向客户端的 api_keys：
-	// 混进去会被写进 omnigate.json，轮换 api_key 后旧钥匙仍残留在文件里继续可用，
+	// 混进去会被写进数据库配置，轮换 api_key 后旧钥匙仍残留并继续可用，
 	// 而且它会出现在面板的「网关密钥」卡里、被误当成一把可删的客户端密钥。
 	cfg.PanelKey = m.apiKey
 	// 兼容历史形态：早期版本把面板密钥写进了 api_keys（当时「api_keys 为空才注入」，而
@@ -413,19 +399,19 @@ func (m *omniManager) saveLocked(raw []byte) ([]string, error) {
 	if err := cfg.Normalize(); err != nil {
 		return nil, err
 	}
-	pretty, err := json.MarshalIndent(&cfg, "", "  ")
-	if err != nil {
-		return nil, err
-	}
-	// 先构建成功再写盘：构建失败时磁盘上的旧配置保持原样，不会出现「文件已换、
-	// 运行时还是旧的」半截状态。
+	// 先构建成功再写库：构建失败时数据库里的旧配置保持原样，不会出现
+	// 「数据库已换、运行时还是旧的」半截状态。
 	rt, err := m.build(&cfg)
 	if err != nil {
 		return nil, err
 	}
-	if err := writeConfigFile(m.path, pretty, 0o600); err != nil {
+	if m.store == nil {
 		rt.sched.Stop()
-		return nil, fmt.Errorf("写入 %s 失败: %w", m.path, err)
+		return nil, errors.New("配置存储未初始化")
+	}
+	if err := m.store.SaveOmni(&cfg); err != nil {
+		rt.sched.Stop()
+		return nil, fmt.Errorf("写入 PostgreSQL 引擎配置失败: %w", err)
 	}
 	old := m.cur.Swap(rt)
 	if old != nil {
@@ -483,14 +469,15 @@ func (m *omniManager) cleanupOnce() {
 		return
 	}
 	for _, line := range removed {
-		log.Printf("[omnigate] 自动清理额度耗尽密钥：%s（已备份为 %s.bak-auto-cleanup-*）", line, m.path)
+		log.Printf("[omnigate] 自动清理额度耗尽密钥：%s（上一版配置已保存在 PostgreSQL %s）", line, configStoreBackupKey)
 	}
 }
 
 // CleanupDeadKeys 自动清理「长期额度耗尽」的池内密钥：连续额度错误达到阈值
 // （keyAutoCleanupStrikes）且首见超出窗口（keyAutoCleanupAfter）的 key 从
-// omnigate.json 摘除并热重载（死 key 立即退出轮换）。摘除前整文件备份；池内若
-// 只剩这类 key 则跳过——摘完这家就没密钥可用了，留给人工。返回被摘除描述行。
+// PostgreSQL 配置中摘除并热重载（死 key 立即退出轮换）。保存时 configStore
+// 自动把上一版完整配置写入 panel_config_previous；池内若只剩这类 key 则跳过
+// ——摘完这家就没密钥可用了，留给人工。返回被摘除描述行。
 func (m *omniManager) CleanupDeadKeys(now time.Time) ([]string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -505,13 +492,9 @@ func (m *omniManager) CleanupDeadKeys(now time.Time) ([]string, error) {
 	if len(snap) == 0 {
 		return nil, nil
 	}
-	raw0, err := os.ReadFile(m.path)
-	if err != nil {
-		return nil, err
-	}
-	var fileCfg omniconfig.Config
-	if err := json.Unmarshal(raw0, &fileCfg); err != nil {
-		return nil, fmt.Errorf("解析 %s 失败: %w", m.path, err)
+	fileCfg := cloneOmniConfig(rt.cfg)
+	if fileCfg == nil {
+		return nil, errors.New("引擎配置为空")
 	}
 	var removed []string
 	changed := false
@@ -551,16 +534,11 @@ func (m *omniManager) CleanupDeadKeys(now time.Time) ([]string, error) {
 	if !changed {
 		return nil, nil
 	}
-	// 备份原文件（整文件、含所有密钥字段）——出问题用 .bak-auto-cleanup-* 回滚。
-	bak := fmt.Sprintf("%s.bak-auto-cleanup-%s", m.path, now.Format("20060102-150405"))
-	if err := os.WriteFile(bak, raw0, 0o600); err != nil {
-		return nil, fmt.Errorf("备份 %s 失败，取消本次清理: %w", bak, err)
-	}
-	pretty, err := json.MarshalIndent(&fileCfg, "", "  ")
+	raw, err := json.Marshal(fileCfg)
 	if err != nil {
 		return nil, err
 	}
-	if _, err := m.saveLocked(pretty); err != nil {
+	if _, err := m.saveLocked(raw); err != nil {
 		return nil, err
 	}
 	return removed, nil
@@ -578,13 +556,9 @@ func (m *omniManager) KeyHealthReport() (any, error) {
 		return nil, errors.New("omnigate 未启用")
 	}
 	snap := rt.gw.KeyHealthSnapshot()
-	raw0, err := os.ReadFile(m.path)
-	if err != nil {
-		return nil, err
-	}
-	var fileCfg omniconfig.Config
-	if err := json.Unmarshal(raw0, &fileCfg); err != nil {
-		return nil, fmt.Errorf("解析 %s 失败: %w", m.path, err)
+	fileCfg := cloneOmniConfig(rt.cfg)
+	if fileCfg == nil {
+		return nil, errors.New("引擎配置为空")
 	}
 	type keyRow struct {
 		Key       string `json:"key"` // 掩码形态
@@ -632,7 +606,7 @@ func (m *omniManager) KeyHealthReport() (any, error) {
 }
 
 // ExportAccountsRaw 导出运行时添加的账号（state.json 的 dyn_accounts 段），按
-// provider 分组返回原始 JSON。仅含运行时账号；配置里声明的账号在 omnigate.json。
+// provider 分组返回原始 JSON。仅含运行时账号；配置里声明的账号在 PostgreSQL。
 func (m *omniManager) ExportAccountsRaw() (json.RawMessage, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -878,7 +852,7 @@ func (m *omniManager) CheckinAll(ctx context.Context) (any, error) {
 // LoginRunable 校验 runable 账号：用粘贴的 session_token Cookie（或邮箱/密码）做一次
 // 服务端会话探测，返回账号身份与当前积分。供面板「浏览器登录」使用——runable 只支持
 // Google/Facebook 登录，且会话是 httpOnly Cookie（网页读不到），面板无法自动抓取，
-// 只能由用户粘贴。仅校验，不落盘；账号由面板随后写入 omnigate.json 并热生效。
+// 只能由用户粘贴。仅校验，不落盘；账号由面板随后写入数据库配置并热生效。
 func (m *omniManager) LoginRunable(provider, email, password, cookie string) (any, error) {
 	rt := m.cur.Load()
 	if rt == nil {

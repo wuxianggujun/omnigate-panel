@@ -1,29 +1,6 @@
 {
-  "listen": ":7863",
-  "api_key": "sk-replace-with-a-random-key",
-  "data_dir": "./data",
-  "omnigate_config": "./omnigate.json",
   "storage": {
-    "driver": "file",
-    "dsn": ""
-  },
-  "outbound": {
-    "proxies": [],
-    "routes": {}
-  },
-  "panel_auth": {
-    "session_hours": 72,
-    "max_failures": 5,
-    "lock_minutes": 15,
-    "users": []
-  },
-  "server": {
-    "read_timeout": "300s"
-  },
-  "logging": {
-    "request_archive_enabled": true,
-    "request_retention_days": 7,
-    "request_archive_max_mb": 100,
-    "request_client_info": true
+    "driver": "postgres",
+    "dsn": "postgres://omnigate:change-me@127.0.0.1:5432/omnigate_panel?sslmode=disable"
   }
 }

@@ -1,4 +1,4 @@
-// outbound.go 出站代理配置页接口：读写 config.json 的 outbound 段（命名代理 +
+// outbound.go 出站代理配置页接口：读写 PostgreSQL 主配置的 outbound 段（命名代理 +
 // 「目标 → 代理」路由）。保存后由 main 注入的 SaveOutbound 闭包完成进程内热应用
 // （面板上游 Transport 与内置 OmniGate 各供应商即时生效，无需重启）。
 //

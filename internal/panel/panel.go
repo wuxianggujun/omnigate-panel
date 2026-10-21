@@ -32,7 +32,7 @@ type Config struct {
 	// Live 运行期可变配置（网关密钥热更新）。
 	Live *livecfg.Holder
 
-	// ConfigPath config.json 路径与读写器（系统设置页）。
+	// ConfigPath 配置位置（PostgreSQL panel_config）与读写器（系统设置页）。
 	ConfigPath string
 	// DataDir 持久化根目录（用于「存储」页展示）。
 	DataDir       string
@@ -49,7 +49,7 @@ type Config struct {
 	OwnershipBackend kv.Backend
 	OwnershipKey     string
 
-	// OmniConfigPath 引擎配置（omnigate.json）与热重载读写器。
+	// OmniConfigPath 引擎配置位置（PostgreSQL panel_config#omnigate）与热重载读写器。
 	OmniConfigPath string
 	LoadOmniConfig func() (any, error)
 	SaveOmniConfig func(raw []byte) (restartRequired []string, err error)

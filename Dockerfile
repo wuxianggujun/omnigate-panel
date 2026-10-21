@@ -17,7 +17,7 @@ RUN apk add --no-cache wget ca-certificates tzdata \
  && chown -R app:app /app
 WORKDIR /app
 COPY --from=build /out/omnigate-panel /app/omnigate-panel
-COPY config.example.json omnigate.example.json /app/
+COPY config.example.json /app/
 USER app
 EXPOSE 7863
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s \

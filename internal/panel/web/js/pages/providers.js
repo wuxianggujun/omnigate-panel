@@ -379,7 +379,7 @@ function render() {
   page.appendChild(layout);
 
   page.appendChild(el('div', { class: 'page-footer-note' },
-    el('span', { text: ui.configPath ? `配置文件 ${ui.configPath}` : '配置文件路径不可见' }),
+    el('span', { text: ui.configPath ? `配置存储 ${ui.configPath}` : '配置存储不可见' }),
     ui.configError ? el('span', { class: 'text-warn', text: ui.configError }) : null,
     el('span', { text: '账号余额来自上游实时查询，可能因网络或风控延迟。' }),
   ));

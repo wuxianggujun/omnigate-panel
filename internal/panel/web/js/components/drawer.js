@@ -33,9 +33,17 @@ export function openDrawer({
     footer ? el('div', { class: 'drawer-footer' }, footer) : null,
   );
 
-  const overlay = el('div', { class: 'drawer-overlay', on: { click: (e) => {
-    if (e.target === overlay) close();
-  } } }, panel);
+  // 同 modal.js：用 mousedown+mouseup 判断，避免在抽屉里选中文本、拖到遮罩上
+  // 松开时被 click 的公共祖先语义误判成「点击了遮罩」而关闭。
+  let pressedOnOverlay = false;
+  const overlay = el('div', { class: 'drawer-overlay', on: {
+    mousedown: (e) => { pressedOnOverlay = e.target === overlay; },
+    mouseup: (e) => {
+      const shouldClose = pressedOnOverlay && e.target === overlay;
+      pressedOnOverlay = false;
+      if (shouldClose) close();
+    },
+  } }, panel);
 
   let closed = false;
   const onKeydown = (event) => {

@@ -47,9 +47,18 @@ export function openModal({
   panel.appendChild(bodyWrap);
   if (footer) panel.appendChild(el('div', { class: 'modal-footer' }, footer));
 
-  const overlay = el('div', { class: 'modal-overlay', on: { click: (e) => {
-    if (dismissible && e.target === overlay) close();
-  } } }, panel);
+  // 只有「按下」和「松开」都发生在遮罩本身时才关闭。不能用 click：
+  // click 的 target 是按下点与松开点的最近公共祖先——在表单里选中文本后把
+  // 鼠标拖到面板外的遮罩上松开，target 会变成遮罩，导致填了一半的表单被关掉。
+  let pressedOnOverlay = false;
+  const overlay = el('div', { class: 'modal-overlay', on: {
+    mousedown: (e) => { pressedOnOverlay = e.target === overlay; },
+    mouseup: (e) => {
+      const shouldClose = dismissible && pressedOnOverlay && e.target === overlay;
+      pressedOnOverlay = false;
+      if (shouldClose) close();
+    },
+  } }, panel);
 
   let closed = false;
   const onKeydown = (event) => {

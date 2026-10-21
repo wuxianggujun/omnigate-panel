@@ -263,6 +263,8 @@ func main() {
 			return omni.CheckinAll(ctx)
 		}
 		pcfg.OmniModels = omni.Models
+		pcfg.OmniProbeModels = omni.ProbeModels
+		pcfg.OmniRefreshModels = omni.RefreshModels
 		pcfg.OmniQuota = func(provider string) (any, error) {
 			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 			defer cancel()

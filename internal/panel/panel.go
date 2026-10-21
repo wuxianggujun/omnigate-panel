@@ -74,9 +74,13 @@ type Config struct {
 	OmniCheckinAll func() (any, error)
 	OmniModels     func(ctx context.Context) (any, error)
 	OmniQuota      func(provider string) (any, error)
-	OmniKeyHealth  func() (any, error)
-	OmniLogin      func(provider, email, password, cookie string) (any, error)
-	OmniAdmin      http.Handler
+	// OmniProbeModels 用一份尚未保存的供应商配置探测上游模型目录（添加供应商）。
+	// OmniRefreshModels 绕过 TTL 重新拉取已有供应商的上游目录。
+	OmniProbeModels   func(raw json.RawMessage) (any, error)
+	OmniRefreshModels func(provider string) (any, error)
+	OmniKeyHealth     func() (any, error)
+	OmniLogin         func(provider, email, password, cookie string) (any, error)
+	OmniAdmin         http.Handler
 	// OmniProviderTypes 返回插件注册表的元数据（类型 / 字段 schema / 能力 / 动作）。
 	OmniProviderTypes func() any
 	// OmniAdminKinds 返回走 /omni/admin/<type>/* 代理的供应商类型（即描述符里
@@ -178,6 +182,8 @@ func (p *Panel) routes() {
 	// 模型与路由。
 	p.mux.HandleFunc("GET /panel/api/omni/models", p.read(p.omniModels))
 	p.mux.HandleFunc("GET /panel/api/models", p.read(p.omniModels))
+	p.mux.HandleFunc("POST /panel/api/omni/provider-models/probe", p.admin(p.omniProbeModels))
+	p.mux.HandleFunc("POST /panel/api/omni/provider-models/refresh", p.admin(p.omniRefreshModels))
 	p.mux.HandleFunc("GET /panel/api/omni/model-mapping", p.privileged(p.omniModelMapProxy))
 	p.mux.HandleFunc("POST /panel/api/omni/model-mapping", p.admin(p.omniModelMapProxy))
 	p.mux.HandleFunc("DELETE /panel/api/omni/model-mapping/", p.admin(p.omniModelMapProxy))

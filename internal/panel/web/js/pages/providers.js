@@ -16,7 +16,7 @@ import {
 } from '../core/dom.js';
 import {
   BUILTIN_PROVIDER_TYPES, accountBalance, accountError, capsOfModel, capabilityLabel,
-  deepClone, fmtChartTime, fmtCredits, fmtDateTime, fmtDuration, fmtInt, fmtNum, fmtPercent,
+  deepClone, fmtChartTime, fmtCompact, fmtCredits, fmtDateTime, fmtDuration, fmtInt, fmtNum, fmtPercent,
   fmtRelative, fmtRemaining, fmtTime, fmtTokenPrice, fmtUptime, healthOfAccount,
   isKeyBasedProvider, normalizeProviderTypes, parseDate, prettyJSON, providerLabel, truncate, uniqueBy,
 } from '../core/format.js';
@@ -53,6 +53,10 @@ function initialState() {
     revealedSecrets: {},
     balanceLoading: false,
     balanceError: '',
+    // modelRefresh / modelRefreshError 按供应商名记录「刷新上游目录」的进行态与
+    // 错误，避免整页重渲染时丢状态。
+    modelRefresh: {},
+    modelRefreshError: {},
     selected: '',
     tab: 'overview',
     addOpen: false,
@@ -464,13 +468,18 @@ function providerDetail(provider, current) {
   const status = providerStatus(provider);
   const rank = routeRank(provider);
   const models = providerModels(provider);
+  // 密钥型供应商（account_mode=none/apikey）的凭证在供应商级，没有账号记录：
+  // 不显示「账号」Tab，避免空壳 / 0 账号的误导。账号型供应商始终保留 Tab——第一
+  // 个账号的添加入口就在里面，隐藏了就没地方加。
+  const showAccounts = !isKeyBasedProvider(meta);
+  if (!showAccounts && ui.tab === 'accounts') ui.tab = 'overview';
   const tabItems = [
     { id: 'overview', label: '概览' },
-    { id: 'accounts', label: '账号', count: provider.accounts.length },
+    showAccounts ? { id: 'accounts', label: '账号', count: provider.accounts.length } : null,
     { id: 'keys', label: '上游密钥', count: keyFieldValues(provider.config).length },
     { id: 'models', label: '模型', count: models.length },
     { id: 'advanced', label: '高级' },
-  ];
+  ].filter(Boolean);
   const tabs = createTabs({
     items: tabItems,
     value: ui.tab,
@@ -526,16 +535,22 @@ function overviewTab(provider, meta, current, models) {
   const status = providerStatus(provider);
   const credits = providerCredits(provider);
   const rank = routeRank(provider);
+  const keyBased = isKeyBasedProvider(meta);
+  const keyCount = keyFieldValues(provider.config).length;
   const fields = [
     ['供应商类型', meta.label || providerLabel(provider.type)],
     ['运行状态', status.label],
-    ['账号数', String(provider.accounts.length)],
+    // 密钥型供应商没有账号记录，显示「账号数 0」是误导：改成展示凭证形态。
+    keyBased
+      ? ['凭证', keyCount ? `上游密钥 ${keyCount} 组` : '未配置']
+      : ['账号数', String(provider.accounts.length)],
     ['额度合计', credits != null ? `${fmtCredits(credits)} 积分` : '未知'],
     ['路由顺位', rank ? `第 ${rank} 顺位` : '未参与路由'],
     ['默认供应商', ui.config?.default_provider === provider.name ? '是' : '否'],
     ['模型数量', String(models.length)],
-    ['上游密钥', keyFieldValues(provider.config).length ? `${keyFieldValues(provider.config).length} 组` : '未配置'],
-  ];
+    // 密钥型供应商上面已有「凭证」一行，不再重复。
+    keyBased ? null : ['上游密钥', keyCount ? `${keyCount} 组` : '未配置'],
+  ].filter(Boolean);
   const facts = el('div', { class: 'facts-grid' });
   for (const [label, value] of fields) {
     facts.appendChild(el('div', { class: 'fact' },
@@ -599,34 +614,119 @@ function overviewTab(provider, meta, current, models) {
     wrap.appendChild(quotaCard(provider, current));
   }
 
-  const accounts = provider.accounts || [];
-  const table = createTable({
-    columns: [
-      {
-        key: 'label', label: '账号',
-        render: (row) => el('div', { class: 'cell-title' },
-          el('span', { class: 'mono', text: row.label }),
-          el('span', { class: 'cell-sub', text: row.name || row.email || '—' }),
-        ),
-      },
-      { key: 'status', label: '状态', render: (row) => statusDot(healthOfAccount(row).tone, healthOfAccount(row).label) },
-      { key: 'balance', label: '额度', align: 'right', render: (row) => (accountBalance(row) != null ? fmtCredits(accountBalance(row)) : '—') },
-      { key: 'expires', label: '到期', render: (row) => (row.expires_at ? fmtRelative(row.expires_at) : '—') },
-      { key: 'error', label: '最近错误', render: (row) => (accountError(row) ? el('span', { class: 'text-warn truncate', text: truncate(accountError(row), 48) }) : '—') },
-    ],
-    rows: accounts,
-    empty: current.authenticated ? '该供应商还没有账号' : '登录后查看账号明细',
-  });
-  wrap.appendChild(card({
-    title: '账号一览',
-    subtitle: '余额为最近一次上游查询结果',
-    body: table.el,
-    actions: el('button', {
-      class: 'btn btn-ghost btn-sm', type: 'button',
-      on: { click: () => { ui.tab = 'accounts'; ui.addOpen = !current.authenticated ? false : ui.addOpen; render(); } },
-    }, '管理账号'),
-  }));
+  // 密钥型供应商没有账号记录：不渲染「账号一览」，改为一句说明，避免空表与
+  // 指向已隐藏 Tab 的「管理账号」按钮。
+  if (!keyBased) {
+    const accounts = provider.accounts || [];
+    const table = createTable({
+      columns: [
+        {
+          key: 'label', label: '账号',
+          render: (row) => el('div', { class: 'cell-title' },
+            el('span', { class: 'mono', text: row.label }),
+            el('span', { class: 'cell-sub', text: row.name || row.email || '—' }),
+          ),
+        },
+        { key: 'status', label: '状态', render: (row) => statusDot(healthOfAccount(row).tone, healthOfAccount(row).label) },
+        { key: 'balance', label: '额度', align: 'right', render: (row) => (accountBalance(row) != null ? fmtCredits(accountBalance(row)) : '—') },
+        { key: 'expires', label: '到期', render: (row) => (row.expires_at ? fmtRelative(row.expires_at) : '—') },
+        { key: 'error', label: '最近错误', render: (row) => (accountError(row) ? el('span', { class: 'text-warn truncate', text: truncate(accountError(row), 48) }) : '—') },
+      ],
+      rows: accounts,
+      empty: current.authenticated ? '该供应商还没有账号' : '登录后查看账号明细',
+    });
+    wrap.appendChild(card({
+      title: '账号一览',
+      subtitle: '余额为最近一次上游查询结果',
+      body: table.el,
+      actions: el('button', {
+        class: 'btn btn-ghost btn-sm', type: 'button',
+        on: { click: () => { ui.tab = 'accounts'; ui.addOpen = !current.authenticated ? false : ui.addOpen; render(); } },
+      }, '管理账号'),
+    }));
+  } else {
+    wrap.appendChild(notice(
+      'muted',
+      '密钥型供应商',
+      '该类型的凭证配置在「上游密钥」，没有账号记录，也无需签到。',
+    ));
+  }
+
+  // 「添加后怎么让供应商被使用」——很多供应商加完却始终不生效，原因是要么没配
+  // 模型目录、要么没进路由。这里把它当前是否参与路由讲清楚，并给一键接入。
+  wrap.appendChild(adoptionCard(provider, models));
   return wrap;
+}
+
+/**
+ * 新供应商接入提示：说明它当前如何被路由命中，未参与路由时给出快捷操作。
+ * 路由规则（与后端 routeResolved 同口径）：
+ *   - 带 `provider/` 前缀的请求直接命中该供应商；
+ *   - 裸模型名按 routing.prefer 顺序选第一个「目录里有该模型」的供应商；
+ *   - 都没命中时回落到 default_provider。
+ */
+function adoptionCard(provider, models) {
+  const config = ui.config || {};
+  const isDefault = config.default_provider === provider.name;
+  const rank = routeRank(provider);
+  const canEdit = isAdmin() && canWrite();
+  const keyBased = isKeyBasedProvider(typeMeta(provider.type));
+
+  const rows = [];
+  rows.push(el('div', { class: 'fact' },
+    el('span', { class: 'fact-label', text: '默认供应商' }),
+    el('span', { class: 'fact-value', text: isDefault ? '是' : '否' }),
+  ));
+  rows.push(el('div', { class: 'fact' },
+    el('span', { class: 'fact-label', text: '路由优先级' }),
+    el('span', { class: 'fact-value', text: rank ? `第 ${rank} 顺位` : '未参与' }),
+  ));
+  rows.push(el('div', { class: 'fact' },
+    el('span', { class: 'fact-label', text: '模型目录' }),
+    el('span', { class: 'fact-value', text: models.length ? `${models.length} 个` : '为空' }),
+  ));
+
+  const actions = [];
+  if (canEdit) {
+    if (!isDefault) {
+      actions.push(el('button', {
+        class: 'btn btn-ghost btn-sm', type: 'button',
+        dataset: { action: 'set-default-provider', provider: provider.name },
+      }, '设为默认供应商'));
+    }
+    if (!rank) {
+      actions.push(el('button', {
+        class: 'btn btn-ghost btn-sm', type: 'button',
+        dataset: { action: 'add-to-prefer', provider: provider.name },
+      }, '加入路由优先级'));
+    }
+  }
+  actions.push(el('a', { class: 'btn btn-ghost btn-sm', href: '#/routing' }, '前往路由设置'));
+
+  const hints = [];
+  hints.push(`带 ${provider.name}/ 前缀的模型请求会直接命中该供应商，无需额外配置。`);
+  if (!isDefault && !rank) {
+    hints.push('裸模型名目前不会路由到它：需要把它设为默认供应商，或加入路由优先级。');
+  } else if (!isDefault && rank) {
+    hints.push('裸模型名会按路由优先级顺序尝试；命中前若前序供应商已提供同名模型，会优先用前序供应商。');
+  } else {
+    hints.push('它是默认供应商：未命中其它规则时，请求会回落到这里。');
+  }
+  if (!models.length) {
+    hints.push(keyBased
+      ? '当前没有模型目录，请在「模型」页刷新上游目录或手动填写模型列表。'
+      : '当前没有模型目录，请先添加账号，再在「模型」页刷新上游目录。');
+  }
+
+  return card({
+    title: '接入路由',
+    subtitle: '新供应商如何被请求命中',
+    actions: actions.length ? actions : null,
+    body: el('div', {},
+      el('div', { class: 'facts-grid compact' }, rows),
+      el('ul', { class: 'hint-list' }, hints.map((t) => el('li', { text: t }))),
+    ),
+  });
 }
 
 function accountsTab(provider, meta, current) {
@@ -883,6 +983,80 @@ async function reloadAfterMutation() {
   render();
 }
 
+/**
+ * 刷新某供应商的上游模型目录（绕过网关 10 分钟缓存）。成功后就地重取模型目录
+ * 并重渲染；失败时保留已有目录，只提示错误。
+ */
+async function refreshProviderModels(providerName) {
+  if (!providerName) return;
+  if (!(await requireAdmin({ message: '刷新上游模型目录需要管理员权限' }))) return;
+  ui.modelRefresh[providerName] = true;
+  delete ui.modelRefreshError[providerName];
+  render();
+  try {
+    const res = await api.providerModels.refresh(providerName, { signal: pageSignal?.signal });
+    const payload = res?.data || res || {};
+    const warning = payload.warning;
+    if (warning) toastWarn(`上游目录已刷新，但上游返回告警：${warning}`);
+    else toastSuccess(`已刷新 ${providerName} 的上游目录`);
+    // 重新拉取全局模型目录（含积分价），页面随之更新。
+    const modelsRes = await api.models.get({ signal: pageSignal?.signal });
+    const p = modelsRes || {};
+    ui.models = Array.isArray(p.data) ? p.data : (Array.isArray(p) ? p : []);
+    ui.modelsError = '';
+  } catch (error) {
+    ui.modelRefreshError[providerName] = describeError(error);
+    toastError(error);
+  } finally {
+    delete ui.modelRefresh[providerName];
+    if (pageSignal && !pageSignal.signal.aborted) render();
+  }
+}
+
+/** 把某供应商设为默认供应商（写 config.default_provider）。 */
+async function setDefaultProvider(providerName) {
+  if (!providerName) return;
+  if (!(await requireAdmin({ message: '修改默认供应商需要管理员权限' }))) return;
+  if (!ui.config) return;
+  const next = deepClone(ui.config);
+  next.default_provider = providerName;
+  try {
+    const res = await api.config.save(next, { signal: pageSignal?.signal });
+    toastSuccess(`已把 ${providerName} 设为默认供应商`);
+    if (Array.isArray(res?.restart_required) && res.restart_required.length) {
+      toastWarn(`以下设置需重启生效：${res.restart_required.join('、')}`, { duration: 7000 });
+    }
+    await loadAll();
+  } catch (error) {
+    toastError(error);
+  }
+}
+
+/** 把某供应商追加到 routing.prefer 末尾（裸模型名的供应商选择顺序）。 */
+async function addProviderToPrefer(providerName) {
+  if (!providerName) return;
+  if (!(await requireAdmin({ message: '修改路由优先级需要管理员权限' }))) return;
+  if (!ui.config) return;
+  const next = deepClone(ui.config);
+  const prefer = Array.isArray(next.routing?.prefer) ? next.routing.prefer.slice() : [];
+  if (prefer.includes(providerName)) {
+    toastWarn(`${providerName} 已在路由优先级中`);
+    return;
+  }
+  prefer.push(providerName);
+  next.routing = { ...(next.routing || {}), prefer };
+  try {
+    const res = await api.config.save(next, { signal: pageSignal?.signal });
+    toastSuccess(`已把 ${providerName} 加入路由优先级（第 ${prefer.length} 顺位）`);
+    if (Array.isArray(res?.restart_required) && res.restart_required.length) {
+      toastWarn(`以下设置需重启生效：${res.restart_required.join('、')}`, { duration: 7000 });
+    }
+    await loadAll();
+  } catch (error) {
+    toastError(error);
+  }
+}
+
 function keysTab(provider, meta, current) {
   const wrap = el('div', { class: 'tab-stack' });
   if (!provider.config) {
@@ -1074,15 +1248,26 @@ function modelsTab(provider, models, current) {
     rows: models,
     empty: '该供应商还没有模型目录；可在「高级」配置 models 或刷新模型列表。',
   });
+  const refreshing = ui.modelRefresh[provider.name];
   wrap.appendChild(el('div', { class: 'section-toolbar' },
     el('div', { class: 'toolbar-title' },
       el('h3', { text: '模型目录' }),
       el('span', { class: 'muted small', text: `${models.length} 个模型；id 形如 供应商/上游模型 ID` }),
     ),
     el('div', { class: 'toolbar-actions' },
+      (isAdmin() && canWrite())
+        ? el('button', {
+          class: 'btn btn-ghost btn-sm', type: 'button',
+          dataset: { action: 'refresh-provider-models', provider: provider.name },
+          disabled: !!refreshing,
+        }, icon('refresh', 15), refreshing ? '拉取中…' : '刷新上游目录')
+        : null,
       el('a', { class: 'btn btn-ghost btn-sm', href: '#/models' }, '全局模型目录'),
     ),
   ));
+  if (ui.modelRefreshError[provider.name]) {
+    wrap.appendChild(notice('warn', '刷新上游目录失败', ui.modelRefreshError[provider.name]));
+  }
   wrap.appendChild(card({ body: table.el, class: 'table-card' }));
   return wrap;
 }
@@ -1250,6 +1435,15 @@ function onClick(event) {
     case 'load-quota':
       loadQuota(target.dataset.provider);
       break;
+    case 'refresh-provider-models':
+      refreshProviderModels(target.dataset.provider);
+      break;
+    case 'set-default-provider':
+      setDefaultProvider(target.dataset.provider);
+      break;
+    case 'add-to-prefer':
+      addProviderToPrefer(target.dataset.provider);
+      break;
     default:
       break;
   }
@@ -1377,6 +1571,8 @@ function openAddProvider() {
   );
   const extra = el('div', { class: 'add-provider-extra' });
   const errorBox = el('p', { class: 'form-error', attrs: { role: 'alert' } });
+  // 模型选择区：点「获取模型列表」后在此列出上游返回的模型，勾选后写入 models 字段。
+  const modelPicker = el('div', { class: 'add-provider-models' });
   let form = null;
 
   function rebuildSchema() {
@@ -1387,12 +1583,100 @@ function openAddProvider() {
       idPrefix: `new-provider-${typeSelect.value}`,
     });
     extra.replaceChildren(form.el);
+    modelPicker.replaceChildren();
   }
   typeSelect.addEventListener('change', rebuildSchema);
   rebuildSchema();
 
+  // hasModelsField：该类型的 schema 是否声明了 models 字段（有的类型没有，如
+  // raccoon/trae 靠账号自动发现），没有就不显示「获取模型列表」。
+  function hasModelsField() {
+    const meta = typeMeta(typeSelect.value);
+    return (meta.config_schema || []).some((f) => f.name === 'models');
+  }
+
+  function currentValues() {
+    const values = form ? form.getValues() : {};
+    // 探测用的供应商配置：名称缺省时给个占位（探测不落库，名称只用于日志）。
+    // 刻意清空 models —— 上游后端在 models 非空时会当成白名单直接返回、不再请求
+    // 上游；若不清空，用户「再点一次获取」只会拿回上一次勾选的结果。
+    return { name: nameInput.value.trim() || 'probe', type: typeSelect.value, ...values, models: [] };
+  }
+
+  async function fetchModels() {
+    if (!(await requireAdmin())) return;
+    const provider = currentValues();
+    fetchBtn.disabled = true;
+    const original = fetchBtn.textContent;
+    fetchBtn.textContent = '获取中…';
+    modelPicker.replaceChildren(el('p', { class: 'field-help', text: '正在向该上游拉取模型目录…' }));
+    try {
+      const res = await api.providerModels.probe(provider, { signal: pageSignal?.signal });
+      const payload = res?.data || res || {};
+      const models = Array.isArray(payload.models) ? payload.models : [];
+      renderModelPicker(models, payload.warning);
+    } catch (error) {
+      modelPicker.replaceChildren(el('p', { class: 'form-error', text: describeError(error) }));
+    } finally {
+      fetchBtn.disabled = false;
+      fetchBtn.textContent = original;
+    }
+  }
+
+  function renderModelPicker(models, warning) {
+    modelPicker.replaceChildren();
+    if (warning) {
+      modelPicker.appendChild(el('p', { class: 'field-help text-warn', text: `上游返回告警：${warning}` }));
+    }
+    if (!models.length) {
+      modelPicker.appendChild(el('p', { class: 'field-help', text: '上游没有返回模型；可留空由运行时自动发现，或手动填写 models。' }));
+      return;
+    }
+    const selected = new Set((form.getValues().models || []).map(String));
+    const boxes = [];
+    const list = el('div', { class: 'model-pick-list' });
+    for (const m of models) {
+      const id = String(m.id || '').trim();
+      if (!id) continue;
+      const checked = selected.size ? selected.has(id) : true;
+      const box = el('input', { type: 'checkbox', checked });
+      boxes.push({ id, box });
+      list.appendChild(el('label', { class: 'model-pick-row' },
+        box,
+        el('span', { class: 'mono', text: id }),
+        m.credits != null ? el('span', { class: 'muted small', text: `${fmtNum(m.credits, 2)} 积分` }) : null,
+      ));
+    }
+    const apply = () => {
+      const picked = boxes.filter((b) => b.box.checked).map((b) => b.id);
+      form.setValues({ models: picked });
+      toastSuccess(`已选择 ${picked.length} 个模型`);
+    };
+    const allBtn = el('button', { class: 'btn btn-ghost btn-sm', type: 'button' }, '全选');
+    const noneBtn = el('button', { class: 'btn btn-ghost btn-sm', type: 'button' }, '全不选');
+    const applyBtn = el('button', { class: 'btn btn-primary btn-sm', type: 'button' }, '写入模型字段');
+    allBtn.addEventListener('click', () => boxes.forEach((b) => { b.box.checked = true; }));
+    noneBtn.addEventListener('click', () => boxes.forEach((b) => { b.box.checked = false; }));
+    applyBtn.addEventListener('click', apply);
+    modelPicker.appendChild(el('div', { class: 'model-pick-head' },
+      el('span', { class: 'muted small', text: `上游返回 ${boxes.length} 个模型` }),
+      el('div', { class: 'model-pick-actions' }, allBtn, noneBtn, applyBtn),
+    ));
+    modelPicker.appendChild(list);
+  }
+
+  const fetchBtn = el('button', { class: 'btn btn-ghost', type: 'button' }, icon('models', 15), '获取模型列表');
+  fetchBtn.addEventListener('click', fetchModels);
+
   const saveBtn = el('button', { class: 'btn btn-primary', type: 'button' }, '保存并热重载');
   const cancelBtn = el('button', { class: 'btn btn-ghost', type: 'button' }, '取消');
+
+  // 类型切换后按 schema 决定是否显示「获取模型列表」。
+  typeSelect.addEventListener('change', () => {
+    fetchBtn.hidden = !hasModelsField();
+    modelPicker.replaceChildren();
+  });
+  fetchBtn.hidden = !hasModelsField();
 
   const modal = openModal({
     title: '添加供应商',
@@ -1411,9 +1695,10 @@ function openAddProvider() {
         ),
       ),
       extra,
+      modelPicker,
       errorBox,
     ),
-    footer: [cancelBtn, saveBtn],
+    footer: [fetchBtn, cancelBtn, saveBtn],
     initialFocus: nameInput,
   });
   cancelBtn.addEventListener('click', () => modal.close());
@@ -1441,7 +1726,7 @@ function openAddProvider() {
         toastWarn(`以下设置需重启生效：${res.restart_required.join('、')}`);
       }
       ui.selected = name;
-      ui.tab = 'overview';
+      ui.tab = Array.isArray(values.models) && values.models.length ? 'models' : 'overview';
       history.replaceState(null, '', `#/providers?name=${encodeURIComponent(name)}`);
       modal.close();
       await loadAll();

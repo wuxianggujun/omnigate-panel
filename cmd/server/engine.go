@@ -260,6 +260,58 @@ func (m *omniManager) Quota(ctx context.Context, provider string) (any, error) {
 	return res.Data, nil
 }
 
+// ProbeModels 用一份尚未保存的供应商配置探测上游模型目录（面板「获取模型列表」）。
+// 输入是面板按表单拼出的单个 provider 配置 JSON；走与网关构造运行时相同的工厂
+// 路径，因此「探测得到」等价于「保存后也拉得到」。
+func (m *omniManager) ProbeModels(raw json.RawMessage) (any, error) {
+	rt := m.cur.Load()
+	if rt == nil {
+		return nil, errors.New("omnigate 未就绪")
+	}
+	var pc omniconfig.ProviderConfig
+	if err := json.Unmarshal(raw, &pc); err != nil {
+		return nil, fmt.Errorf("解析供应商配置失败: %w", err)
+	}
+	// 用一次性 Config 套默认值 + 校验：与保存路径同口径（base_url 缺省、类型是否
+	// 注册、URL 是否合法），否则探测用的地址可能与保存后的实际地址不一致。
+	probe := &omniconfig.Config{Providers: []omniconfig.ProviderConfig{pc}}
+	if err := probe.Normalize(); err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	models, err := rt.gw.ProbeProvider(ctx, probe.Providers[0])
+	if err != nil {
+		// 探测失败但仍拿到降级目录（账号型上游无账号时的内置表）时照常返回，
+		// 由面板提示「不完整」；完全没有结果才当失败。
+		if len(models) == 0 {
+			return nil, err
+		}
+		return map[string]any{"models": models, "warning": err.Error()}, nil
+	}
+	return map[string]any{"models": models}, nil
+}
+
+// RefreshModels 绕过 10 分钟 TTL 重新拉取某供应商的上游目录并刷新缓存（面板
+// 「刷新上游目录」）。刷新失败时返回最近一次成功目录 + warning，避免面板因一次
+// 网络抖动就清空已有目录。
+func (m *omniManager) RefreshModels(provider string) (any, error) {
+	rt := m.cur.Load()
+	if rt == nil {
+		return nil, errors.New("omnigate 未就绪")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	models, err := rt.gw.RefreshModels(ctx, provider)
+	if err != nil {
+		if len(models) == 0 {
+			return nil, err
+		}
+		return map[string]any{"models": models, "warning": err.Error()}, nil
+	}
+	return map[string]any{"models": models}, nil
+}
+
 // SetAPIKey 更新网关 api_key 并热重载（面板「重新生成」密钥后调用，使面板
 // 与网关保持同一把）。未启用时仅记住新值，供后续 build 回填。
 func (m *omniManager) SetAPIKey(key string) error {

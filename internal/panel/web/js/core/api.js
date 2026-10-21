@@ -240,6 +240,12 @@ export const api = {
     get: (opts = {}) => request('/omni/models', { ...opts }),
   },
 
+  // 供应商模型目录：添加供应商时用未保存的配置探测；已有供应商绕过 TTL 刷新。
+  providerModels: {
+    probe: (provider, opts = {}) => request('/omni/provider-models/probe', { method: 'POST', body: { provider }, dedupe: false, ...opts }),
+    refresh: (provider, opts = {}) => request('/omni/provider-models/refresh', { method: 'POST', body: { provider }, dedupe: false, ...opts }),
+  },
+
   mapping: {
     get: (opts = {}) => request('/omni/model-mapping', { ...opts }),
     set: (payload, opts = {}) => request('/omni/model-mapping', { method: 'POST', body: payload, dedupe: false, ...opts }),

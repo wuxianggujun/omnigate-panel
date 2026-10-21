@@ -310,34 +310,11 @@ func New(cfg *config.Config, st *state.State, log *logx.Logger, opts ...Option) 
 	catalog.Register()
 	for i := range cfg.Providers {
 		p := &cfg.Providers[i]
-		desc, err := plugin.Get(p.Type)
+		// 构造走 newProvider（provider_build.go）：与面板「探测模型目录」同一条
+		// 路径，避免出现「探测得到、保存后拉不到」。
+		prov, err := newProvider(p, plugin.Deps{DataDir: cfg.DataDir, Logger: g.log.Warn})
 		if err != nil {
-			return nil, fmt.Errorf("provider %q: %w", p.Name, err)
-		}
-		if desc.Factory == nil {
-			return nil, fmt.Errorf("provider %q: 插件 %q 未提供 Factory", p.Name, p.Type)
-		}
-		prov, err := desc.Factory(plugin.ProviderSpec{
-			Name:         p.Name,
-			BaseURL:      p.BaseURL,
-			DeviceHeader: p.DeviceHeader,
-			APIKey:       p.APIKey,
-			APIKeys:      p.APIKeys,
-			Models:       p.Models,
-			ZenKeys:      p.ZenKeys,
-			GoKeys:       p.GoKeys,
-			TierPrefer:   p.TierPrefer,
-			GoBaseURL:    p.GoBaseURL,
-			Anonymous:    p.AnonymousEnabled(),
-			MainOrigin:   p.MainOrigin,
-			LLMBase:      p.LLMBase,
-			AuthBase:     p.AuthBase,
-			AgentHost:    p.AgentHost,
-			UgHost:       p.UgHost,
-			OAuthHost:    p.OAuthHost,
-		}, plugin.Deps{DataDir: cfg.DataDir, Logger: g.log.Warn})
-		if err != nil {
-			return nil, fmt.Errorf("provider %q: 构建失败: %w", p.Name, err)
+			return nil, err
 		}
 		// Gemini Web 的进程级附属设施（图片存储 / Gem 映射 / 指纹 / 后台维护）
 		// 不属于 provider 协议本身，统一由核心在构造后注入。
@@ -534,6 +511,27 @@ func (g *Gateway) models(ctx context.Context, name string) ([]openai.Model, erro
 	}
 	g.modelMu.Unlock()
 
+	models, err := g.fetchModels(ctx, name)
+	if err != nil {
+		// 拉取失败：优先沿用最近一次成功结果（保留计费价）；没有缓存时才退回上游
+		// 给的降级目录（如内置模型表，无价格）。降级结果绝不写进缓存，避免把
+		// 带价格的目录覆盖掉。
+		if e, ok := g.cachedModels(name); ok {
+			g.log.Warn("刷新 %s 模型失败，沿用缓存: %v", name, err)
+			return e, nil
+		}
+		if len(models) > 0 {
+			g.log.Warn("刷新 %s 模型失败，使用降级目录: %v", name, err)
+			return models, nil
+		}
+		return nil, err
+	}
+	return models, nil
+}
+
+// fetchModels 绕过 TTL 直接向上游拉取某 provider 的模型目录，成功时刷新缓存并
+// 落盘。models()（带 TTL 与缓存兜底）与面板的「刷新上游目录」都经它。
+func (g *Gateway) fetchModels(ctx context.Context, name string) ([]openai.Model, error) {
 	prov := g.providers[name]
 	if prov == nil {
 		return nil, fmt.Errorf("unknown provider %q", name)
@@ -549,18 +547,7 @@ func (g *Gateway) models(ctx context.Context, name string) ([]openai.Model, erro
 		models, err = prov.ListModels(ctx)
 	}
 	if err != nil {
-		// 拉取失败：优先沿用最近一次成功结果（保留计费价）；没有缓存时才退回上游
-		// 给的降级目录（如内置模型表，无价格）。降级结果绝不写进缓存，避免把
-		// 带价格的目录覆盖掉。
-		if e, ok := g.cachedModels(name); ok {
-			g.log.Warn("刷新 %s 模型失败，沿用缓存: %v", name, err)
-			return e, nil
-		}
-		if len(models) > 0 {
-			g.log.Warn("刷新 %s 模型失败，使用降级目录: %v", name, err)
-			return models, nil
-		}
-		return nil, err
+		return models, err
 	}
 	g.modelMu.Lock()
 	g.modelCache[name] = modelEntry{models: models, at: time.Now()}

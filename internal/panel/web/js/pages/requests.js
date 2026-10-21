@@ -3,10 +3,10 @@
 import { api, describeError } from '../core/api.js';
 import { authState, isAuthenticated, openLoginModal } from '../core/auth.js';
 import {
-  el, card, badge, statusDot, emptyState, loadingBlock, icon, copyText, debounce, isAbortError,
+  el, badge, statusDot, loadingBlock, icon, copyText, debounce, isAbortError,
 } from '../core/dom.js';
 import {
-  fmtCompact, fmtDateTime, fmtDuration, fmtInt, fmtRelative, fmtTime, outcomeLabel, prettyJSON, truncate,
+  fmtCompact, fmtDateTime, fmtDuration, fmtInt, fmtRelative, fmtTime, outcomeLabel, prettyJSON,
 } from '../core/format.js';
 import { createTable } from '../components/table.js';
 import { openDrawer } from '../components/drawer.js';
@@ -30,6 +30,12 @@ const OUTCOMES = [
   { value: 'model_error', label: '模型错误' },
   { value: 'no_account', label: '无可用账号' },
 ];
+const AUTO_REFRESH_OPTIONS = [
+  { value: 0, label: '关闭' },
+  { value: 10, label: '10 秒' },
+  { value: 30, label: '30 秒' },
+  { value: 60, label: '1 分钟' },
+];
 
 let pageSignal = null;
 let rootEl = null;
@@ -51,7 +57,9 @@ function initialState() {
     account: '',
     model: '',
     clientIp: '',
-    autoRefresh: false,
+    userAgent: '',
+    advancedFiltersOpen: false,
+    autoRefreshSec: 0,
     lastLoaded: 0,
     fetchedAt: 0,
   };
@@ -84,10 +92,10 @@ function drawclose() {
 function toggleTimer() {
   clearInterval(timer);
   timer = 0;
-  if (ui.autoRefresh) {
+  if (ui.autoRefreshSec > 0) {
     timer = window.setInterval(() => {
       if (!document.hidden) load({ silent: true });
-    }, 10000);
+    }, ui.autoRefreshSec * 1000);
   }
 }
 
@@ -105,6 +113,7 @@ async function load({ silent = false } = {}) {
   if (ui.account) query.account = ui.account.trim();
   if (ui.model) query.model = ui.model.trim();
   if (ui.clientIp) query.client_ip = ui.clientIp.trim();
+  if (ui.userAgent) query.user_agent = ui.userAgent.trim();
   try {
     const res = await api.requestLogs.get(query, { signal: pageSignal.signal });
     if (!pageSignal || pageSignal.signal.aborted || seq !== fetchSeq) return;
@@ -137,38 +146,40 @@ function render() {
     class: 'btn btn-ghost btn-sm', type: 'button',
     on: {
       click: () => {
-        ui.outcome = ''; ui.provider = ''; ui.account = ''; ui.model = ''; ui.clientIp = ''; ui.hours = '24';
+        ui.outcome = ''; ui.provider = ''; ui.account = ''; ui.model = ''; ui.clientIp = ''; ui.userAgent = ''; ui.hours = '24';
+        ui.advancedFiltersOpen = false;
         render();
         load();
       },
     },
   }, '重置');
+  const advancedCount = [ui.provider, ui.account, ui.model, ui.userAgent, ui.clientIp].filter(Boolean).length;
+  const advancedFilters = el('div', {
+    class: `request-filter-advanced ${ui.advancedFiltersOpen ? 'is-open' : ''}`.trim(),
+  },
+    textFilter('供应商', ui.provider, (value) => { ui.provider = value; }, filterRefresh),
+    textFilter('账号', ui.account, (value) => { ui.account = value; }, filterRefresh),
+    textFilter('模型', ui.model, (value) => { ui.model = value; }, filterRefresh),
+    textFilter('客户端 UA', ui.userAgent, (value) => { ui.userAgent = value; }, filterRefresh),
+    textFilter('来源 IP', ui.clientIp, (value) => { ui.clientIp = value; }, filterRefresh),
+  );
+  const moreFilters = el('button', {
+    class: 'btn btn-ghost btn-sm request-filter-more', type: 'button',
+    attrs: { 'aria-expanded': ui.advancedFiltersOpen ? 'true' : 'false' },
+    on: {
+      click: () => {
+        ui.advancedFiltersOpen = advancedFilters.classList.toggle('is-open');
+        moreFilters.setAttribute('aria-expanded', ui.advancedFiltersOpen ? 'true' : 'false');
+        moreFilters.replaceChildren(icon('filter', 14), ui.advancedFiltersOpen ? '收起筛选' : `更多筛选${advancedCount ? ` · ${advancedCount}` : ''}`);
+      },
+    },
+  }, icon('filter', 14), ui.advancedFiltersOpen ? '收起筛选' : `更多筛选${advancedCount ? ` · ${advancedCount}` : ''}`);
 
   page.appendChild(el('div', { class: 'page-head' },
     el('div', {},
       el('div', { class: 'eyebrow', text: 'REQUEST ARCHIVE' }),
       el('h1', { class: 'page-title', text: '请求' }),
-      el('p', { class: 'page-subtitle', text: '归档请求的筛选、详情与运行日志；点击任意行打开抽屉。' }),
-    ),
-    el('div', { class: 'page-actions' },
-      el('label', { class: 'check-inline' },
-        el('input', {
-          type: 'checkbox',
-          checked: ui.autoRefresh,
-          on: {
-            change: (event) => {
-              ui.autoRefresh = event.target.checked;
-              toggleTimer();
-              toast(ui.autoRefresh ? '已开启每 10 秒自动刷新' : '已关闭自动刷新', { type: 'info', duration: 2000 });
-            },
-          },
-        }),
-        el('span', { text: '自动刷新' }),
-      ),
-      el('button', {
-        class: 'btn btn-ghost btn-sm', type: 'button',
-        on: { click: () => load() },
-      }, icon('refresh', 15), '刷新'),
+      el('p', { class: 'page-subtitle', text: '归档请求的筛选、详情与运行日志；点击任意记录查看终端、来源与缓存命中。' }),
     ),
   ));
 
@@ -200,14 +211,12 @@ function render() {
       class: 'input select select-sm',
       on: { change: (event) => { ui.outcome = event.target.value; load(); } },
     }, OUTCOMES.map((out) => el('option', { value: out.value, text: out.label, selected: ui.outcome === out.value }))),
-    textFilter('供应商', ui.provider, (value) => { ui.provider = value; }, filterRefresh),
-    textFilter('账号', ui.account, (value) => { ui.account = value; }, filterRefresh),
-    textFilter('模型', ui.model, (value) => { ui.model = value; }, filterRefresh),
-    textFilter('客户端 IP', ui.clientIp, (value) => { ui.clientIp = value; }, filterRefresh),
     el('select', {
       class: 'input select select-sm',
       on: { change: (event) => { ui.limit = Number(event.target.value); load(); } },
     }, [100, 200, 500, 1000].map((limit) => el('option', { value: String(limit), text: `最多 ${limit} 条`, selected: ui.limit === limit }))),
+    advancedFilters,
+    moreFilters,
     filterRefresh,
     reset,
   );
@@ -221,24 +230,60 @@ function render() {
     ));
   }
 
-  if (ui.entries.length) {
-    const totals = tokenTotals(ui.entries);
-    page.appendChild(el('div', { class: 'request-summary' },
-      el('span', { class: 'request-summary-label', text: `当前列表 ${fmtInt(ui.entries.length)} 条` }),
-      el('span', {
-        class: 'request-summary-tokens mono',
-        text: `入 ${fmtCompact(totals.prompt)} · 出 ${fmtCompact(totals.completion)} · 共 ${fmtCompact(totals.total)} tokens`,
-        title: `Prompt ${fmtInt(totals.prompt)} · Completion ${fmtInt(totals.completion)} · Total ${fmtInt(totals.total)}`,
-      }),
-      el('a', { class: 'request-summary-link', href: '#/usage' }, '完整用量 →'),
-    ));
-  }
+  const totals = tokenTotals(ui.entries);
+  const liveDot = el('span', {
+    class: `live-dot request-live-dot ${ui.autoRefreshSec ? 'is-active' : ''}`,
+    attrs: { 'aria-hidden': 'true' },
+  });
+  const autoSelect = el('select', {
+    class: 'input select select-sm request-auto-select',
+    attrs: { 'aria-label': '自动刷新间隔' },
+    on: {
+      change: (event) => {
+        ui.autoRefreshSec = Number(event.target.value) || 0;
+        toggleTimer();
+        liveDot.classList.toggle('is-active', ui.autoRefreshSec > 0);
+        toast(ui.autoRefreshSec ? `已开启每 ${ui.autoRefreshSec} 秒自动刷新` : '已关闭自动刷新', { type: 'info', duration: 2000 });
+      },
+    },
+  }, AUTO_REFRESH_OPTIONS.map((option) => el('option', {
+    value: String(option.value),
+    text: option.label,
+    selected: ui.autoRefreshSec === option.value,
+  })));
+  const summaryText = ui.entries.length
+    ? `入 ${fmtCompact(totals.prompt)} · 出 ${fmtCompact(totals.completion)} · 共 ${fmtCompact(totals.total)} tokens${totals.cacheTotal ? ` · 缓存 ${fmtCacheRate(totals.cacheRate)}` : ''}`
+    : (ui.loading ? '请求归档加载中…' : '暂无记录');
+  const summaryTitle = ui.entries.length
+    ? `Prompt ${fmtInt(totals.prompt)} · Completion ${fmtInt(totals.completion)} · Total ${fmtInt(totals.total)}${totals.cacheTotal ? ` · 缓存命中 ${fmtInt(totals.cacheHit)} / ${fmtInt(totals.cacheTotal)}（${fmtCacheRate(totals.cacheRate)}）` : ' · 缓存明细未上报'}`
+    : '当前列表合计';
 
-  const tableHost = el('div', { class: 'table-card request-table-card' });
+  page.appendChild(el('div', { class: 'request-toolbar' },
+    el('div', { class: 'request-toolbar-summary' },
+      el('span', { class: 'request-toolbar-label', text: ui.entries.length ? `当前列表 ${fmtInt(ui.entries.length)} 条` : '当前列表' }),
+      el('span', { class: 'request-summary-tokens mono', text: summaryText, title: summaryTitle }),
+      ui.entries.length ? el('a', { class: 'request-summary-link', href: '#/usage' }, '完整用量 →') : null,
+    ),
+    el('div', { class: 'request-toolbar-actions' },
+      el('label', { class: 'request-auto-control', title: '自动刷新只更新当前筛选结果，不会改变筛选条件' },
+        liveDot,
+        el('span', { class: 'request-auto-label', text: '自动刷新' }),
+        autoSelect,
+      ),
+      el('button', {
+        class: 'btn btn-ghost btn-sm', type: 'button',
+        title: '立即刷新当前筛选结果',
+        on: { click: () => load() },
+      }, icon('refresh', 15), '刷新'),
+    ),
+  ));
+
+  const tableHost = el('div', { class: 'table-card request-table-card request-table-desktop' });
   if (ui.loading && !ui.entries.length) {
     tableHost.appendChild(loadingBlock('加载请求归档'));
   } else {
     const table = createTable({
+      caption: '请求归档',
       columns: [
         {
           key: 'time',
@@ -252,17 +297,10 @@ function render() {
         {
           key: 'result',
           label: '结果',
-          width: '132px',
+          width: '118px',
           render: (row) => el('div', { class: 'result-cell' },
             badge(row.status || '—', row.ok ? 'ok' : (row.status === 429 ? 'warn' : 'danger')),
             el('span', { class: 'cell-sub', text: outcomeLabel(row.outcome) }),
-            rowTokenSummary(row)
-              ? el('span', {
-                class: 'cell-sub token-sub mobile-only',
-                text: rowTokenSummary(row),
-                title: rowTokenTitle(row),
-              })
-              : null,
           ),
         },
         {
@@ -279,33 +317,51 @@ function render() {
           render: (row) => el('span', { class: 'mono truncate', text: row.model || '—', title: row.model || '' }),
         },
         {
+          key: 'source',
+          label: '来源 / 终端',
+          width: '142px',
+          render: (row) => {
+            const client = clientInfo(row.user_agent);
+            return el('div', { class: 'cell-title source-cell', title: client.full || '未记录 User-Agent' },
+              el('span', { class: 'source-client', text: client.label }),
+              el('span', { class: 'cell-sub mono', text: row.client_ip || '—' }),
+            );
+          },
+        },
+        {
           key: 'duration_ms',
           label: '耗时',
           align: 'right',
-          hideOnMobile: true,
+          width: '82px',
           render: (row) => fmtDuration(row.duration_ms),
         },
         {
           key: 'tokens',
           label: 'Tokens',
           align: 'right',
-          hideOnMobile: true,
-          render: (row) => (row.total_tokens
-            ? el('span', { text: fmtInt(row.total_tokens), title: rowTokenTitle(row) })
-            : '—'),
-        },
-        {
-          key: 'client_ip',
-          label: '来源 IP',
-          align: 'right',
-          hideOnMobile: true,
-          render: (row) => el('span', { class: 'mono small', text: row.client_ip || '—' }),
+          width: '138px',
+          render: (row) => {
+            const tokens = tokenBreakdown(row);
+            if (!tokens.total) return el('span', { class: 'muted small', text: '—' });
+            return el('div', { class: 'token-cell', title: rowTokenTitle(row) },
+              el('span', { class: 'token-total mono', text: fmtInt(tokens.total) }),
+              tokens.hasCache
+                ? el('span', { class: `cache-pill cache-${cacheTone(tokens.cacheRate)}`, text: `缓存 ${fmtCacheRate(tokens.cacheRate)}` })
+                : el('span', { class: 'cache-pill cache-muted', text: '缓存 —' }),
+            );
+          },
         },
         {
           key: 'path',
           label: '路径',
-          hideOnMobile: true,
           render: (row) => el('span', { class: 'mono small muted', text: row.path || '—' }),
+        },
+        {
+          key: 'open',
+          label: '',
+          width: '34px',
+          align: 'right',
+          render: () => el('span', { class: 'row-open', title: '查看详情', attrs: { 'aria-hidden': 'true' } }, icon('chevron', 14)),
         },
       ],
       rows: ui.entries,
@@ -315,46 +371,177 @@ function render() {
     tableHost.appendChild(table.el);
   }
   page.appendChild(tableHost);
+
+  const cardsHost = el('div', { class: 'request-card-list request-table-mobile' });
+  if (ui.loading && !ui.entries.length) {
+    cardsHost.appendChild(el('div', { class: 'table-card request-card-state' }, loadingBlock('加载请求归档')));
+  } else if (!ui.entries.length) {
+    cardsHost.appendChild(el('div', { class: 'table-card request-card-state' },
+      el('div', { class: 'table-empty' }, icon('info', 16), isAuthenticated() ? '没有符合筛选条件的请求' : '登录后查看请求归档'),
+    ));
+  } else {
+    for (const row of ui.entries) cardsHost.appendChild(renderRequestCard(row));
+  }
+  page.appendChild(cardsHost);
+
   page.appendChild(el('div', { class: 'page-footer-note' },
     el('span', { text: `共 ${fmtInt(ui.entries.length)} 条可见记录` }),
     ui.lastLoaded ? el('span', { text: `更新于 ${fmtTime(ui.lastLoaded)}` }) : null,
-    el('span', { text: '列表最多 1000 条/次，完整日用量见「用量」页；筛选为包含匹配。' }),
+    el('span', { text: '列表最多 1000 条/次，完整日用量见「用量」页；点击记录可查看终端与缓存明细。' }),
   ));
   rootEl.replaceChildren(page);
 }
 
+function tokenBreakdown(row) {
+  const prompt = Number(row.prompt_tokens || 0);
+  const completion = Number(row.completion_tokens || 0);
+  const total = Number(row.total_tokens || 0) || (prompt + completion);
+  const cacheHit = Number(row.cache_hit_tokens || 0);
+  const cacheMiss = Number(row.cache_miss_tokens || 0);
+  const cacheTotal = cacheHit + cacheMiss;
+  return {
+    prompt,
+    completion,
+    total,
+    cacheHit,
+    cacheMiss,
+    cacheTotal,
+    cacheRate: cacheTotal > 0 ? (cacheHit / cacheTotal) * 100 : 0,
+    hasCache: cacheTotal > 0,
+  };
+}
+
 function tokenTotals(entries) {
-  const totals = { prompt: 0, completion: 0, total: 0 };
+  const totals = { prompt: 0, completion: 0, total: 0, cacheHit: 0, cacheMiss: 0, cacheTotal: 0, cacheRate: 0 };
   for (const row of entries) {
-    const prompt = Number(row.prompt_tokens || 0);
-    const completion = Number(row.completion_tokens || 0);
-    const total = Number(row.total_tokens || 0) || (prompt + completion);
-    totals.prompt += prompt;
-    totals.completion += completion;
-    totals.total += total;
+    const tokens = tokenBreakdown(row);
+    totals.prompt += tokens.prompt;
+    totals.completion += tokens.completion;
+    totals.total += tokens.total;
+    totals.cacheHit += tokens.cacheHit;
+    totals.cacheMiss += tokens.cacheMiss;
   }
+  totals.cacheTotal = totals.cacheHit + totals.cacheMiss;
+  totals.cacheRate = totals.cacheTotal > 0 ? (totals.cacheHit / totals.cacheTotal) * 100 : 0;
   return totals;
 }
 
-function rowTokenSummary(row) {
-  const prompt = Number(row.prompt_tokens || 0);
-  const completion = Number(row.completion_tokens || 0);
-  const total = Number(row.total_tokens || 0) || (prompt + completion);
-  if (!total) return '';
-  return `↑${fmtCompact(prompt)} ↓${fmtCompact(completion)}`;
-}
-
 function rowTokenTitle(row) {
-  const prompt = Number(row.prompt_tokens || 0);
-  const completion = Number(row.completion_tokens || 0);
-  const total = Number(row.total_tokens || 0) || (prompt + completion);
-  return `Prompt ${fmtInt(prompt)} · Completion ${fmtInt(completion)} · Total ${fmtInt(total)}`;
+  const tokens = tokenBreakdown(row);
+  const parts = [
+    `Prompt ${fmtInt(tokens.prompt)}`,
+    `Completion ${fmtInt(tokens.completion)}`,
+    `Total ${fmtInt(tokens.total)}`,
+  ];
+  if (tokens.hasCache) {
+    parts.push(`缓存命中 ${fmtInt(tokens.cacheHit)}（${fmtCacheRate(tokens.cacheRate)}）`);
+    parts.push(`缓存未命中 ${fmtInt(tokens.cacheMiss)}`);
+  } else {
+    parts.push('缓存明细未上报');
+  }
+  return parts.join(' · ');
 }
 
-function detailTokenStat(label, value) {
+function cacheTitle(row) {
+  const tokens = tokenBreakdown(row);
+  if (!tokens.hasCache) return '上游未上报缓存 token 明细';
+  return `缓存命中 ${fmtInt(tokens.cacheHit)} / ${fmtInt(tokens.cacheTotal)} tokens（${fmtCacheRate(tokens.cacheRate)}）· 未命中 ${fmtInt(tokens.cacheMiss)}`;
+}
+
+function cacheTone(rate) {
+  if (rate >= 80) return 'ok';
+  if (rate >= 40) return 'warn';
+  return 'danger';
+}
+
+// 缓存命中率向下取整到 0.1%，避免 99.95% 被四舍五入成看似完美的 100%。
+function fmtCacheRate(rate) {
+  if (!Number.isFinite(rate)) return '—';
+  return `${Math.floor(rate * 10) / 10}%`;
+}
+
+function clientInfo(userAgent) {
+  const ua = String(userAgent || '').trim();
+  if (!ua) return { label: '未知终端', platform: '未记录', full: '' };
+  let platform = '未知平台';
+  if (/Android/i.test(ua)) platform = 'Android';
+  else if (/iPhone|iPad|iPod|iOS/i.test(ua)) platform = 'iOS';
+  else if (/Windows/i.test(ua)) platform = 'Windows';
+  else if (/Macintosh|Mac OS X/i.test(ua)) platform = 'macOS';
+  else if (/Linux/i.test(ua)) platform = 'Linux';
+  else if (/Go-http-client/i.test(ua)) platform = '服务端';
+  else if (/curl/i.test(ua)) platform = '命令行';
+  let label = '';
+  if (/Go-http-client/i.test(ua)) label = 'Go HTTP';
+  else if (/NewAPI|new-api/i.test(ua)) label = 'New API';
+  else if (/curl/i.test(ua)) label = 'curl';
+  else if (/PostmanRuntime/i.test(ua)) label = 'Postman';
+  else if (/openai-python|python-requests|python-httpx|httpx|aiohttp|OpenAI\/Python/i.test(ua)) label = 'Python SDK';
+  else if (/openai-node|OpenAI\/Node|node-fetch|undici|axios|Node\.js/i.test(ua)) label = 'Node.js SDK';
+  else if (/okhttp|Android/i.test(ua)) label = 'Android App';
+  else if (/dart|flutter/i.test(ua)) label = 'Flutter';
+  else if (/Java\/|Apache-HttpClient/i.test(ua)) label = 'Java';
+  else if (/Mozilla|Chrome|Safari|Firefox|Edg\//i.test(ua)) label = '浏览器';
+  else label = (ua.split(/[ /]/)[0] || '其他终端').slice(0, 24);
+  return { label, platform, full: ua };
+}
+
+function tokenChip(text, title, className = '') {
+  return el('span', { class: `token-chip ${className}`.trim(), text, title });
+}
+
+function renderRequestCard(row) {
+  const tokens = tokenBreakdown(row);
+  const client = clientInfo(row.user_agent);
+  const statusTone = row.ok ? 'ok' : (row.status === 429 ? 'warn' : 'danger');
+  const tokenChips = tokens.total
+    ? [
+      tokenChip(`↑ ${fmtCompact(tokens.prompt)}`, `Prompt ${fmtInt(tokens.prompt)} tokens`),
+      tokenChip(`↓ ${fmtCompact(tokens.completion)}`, `Completion ${fmtInt(tokens.completion)} tokens`),
+      tokens.hasCache
+        ? tokenChip(`缓存 ${fmtCacheRate(tokens.cacheRate)}`, cacheTitle(row), `cache-${cacheTone(tokens.cacheRate)}`)
+        : tokenChip('缓存 —', '上游未上报缓存 token 明细', 'cache-muted'),
+    ]
+    : el('span', { class: 'request-card-no-token', text: '无 token 记录' });
+  return el('button', {
+    class: 'request-card',
+    type: 'button',
+    attrs: { 'aria-label': `查看请求详情：${row.model || '未知模型'}，${fmtTime(row.time)}` },
+    on: { click: () => openRequestDrawer(row) },
+  },
+    el('span', { class: 'request-card-head' },
+      el('span', { class: 'request-card-time mono', text: fmtTime(row.time) }),
+      el('span', { class: 'request-card-relative', text: fmtRelative(row.time) }),
+      el('span', { class: 'request-card-status' },
+        badge(row.status || '—', statusTone),
+        el('span', { class: 'request-card-outcome', text: outcomeLabel(row.outcome) }),
+      ),
+    ),
+    el('span', { class: 'request-card-model mono', text: row.model || '—', title: row.model || '' }),
+    el('span', { class: 'request-card-route' },
+      el('span', { text: row.provider || '未知供应商' }),
+      el('span', { class: 'request-card-sep', text: '·' }),
+      el('span', { text: row.account || '供应商密钥' }),
+    ),
+    el('span', { class: 'request-card-tokens' }, tokenChips),
+    el('span', { class: 'request-card-foot' },
+      el('span', { class: 'request-card-source', title: client.full || '未记录 User-Agent' },
+        icon('server', 12),
+        el('span', { text: client.label }),
+        el('span', { class: 'request-card-ip mono', text: row.client_ip || '—' }),
+      ),
+      el('span', { class: 'request-card-duration mono', text: fmtDuration(row.duration_ms) }),
+      el('span', { class: 'request-card-open' }, '详情', icon('chevron', 13)),
+    ),
+  );
+}
+
+function detailTokenStat(label, value, meta = '') {
+  const display = typeof value === 'number' ? fmtInt(value) : String(value ?? '—');
   return el('div', { class: 'detail-token-stat' },
     el('span', { class: 'detail-token-label', text: label }),
-    el('span', { class: 'detail-token-value mono', text: fmtInt(value || 0) }),
+    el('span', { class: 'detail-token-value mono', text: display }),
+    meta ? el('span', { class: 'detail-token-meta', text: meta, title: meta }) : null,
   );
 }
 
@@ -429,6 +616,8 @@ function renderDrawerBody() {
 
 function renderDetailPanel() {
   const row = drawerState.row;
+  const tokens = tokenBreakdown(row);
+  const client = clientInfo(row.user_agent);
   const facts = [
     ['请求 ID', row.request_id || '—'],
     ['时间', fmtDateTime(row.time, { seconds: true })],
@@ -442,15 +631,13 @@ function renderDetailPanel() {
     ['耗时', fmtDuration(row.duration_ms)],
     ['TTFB', row.ttfb_ms != null ? fmtDuration(row.ttfb_ms) : '—'],
     ['尝试次数', row.attempts != null ? fmtInt(row.attempts) : '—'],
-    ['Prompt tokens', fmtInt(row.prompt_tokens || 0)],
-    ['Completion tokens', fmtInt(row.completion_tokens || 0)],
-    ['Total tokens', fmtInt(row.total_tokens || 0)],
     ['积分', row.credit_known ? `${row.credit ?? 0}` : '未知'],
-    ['来源 IP', row.client_ip || '—'],
-    ['User-Agent', row.user_agent || '—'],
     ['推理档位', row.reasoning_effort || (row.reasoning ? '已启用' : '未启用')],
     ['推理 tokens', row.reasoning_tokens ? fmtInt(row.reasoning_tokens) : '—'],
   ];
+  const cacheMeta = tokens.hasCache
+    ? `命中 ${fmtInt(tokens.cacheHit)} · 未命中 ${fmtInt(tokens.cacheMiss)}`
+    : '上游未上报';
   const panel = el('div', { class: 'drawer-detail' },
     el('div', { class: 'drawer-status-row' },
       badge(row.status || '—', row.ok ? 'ok' : (row.status === 429 ? 'warn' : 'danger')),
@@ -467,9 +654,24 @@ function renderDetailPanel() {
     ),
     row.error ? el('div', { class: 'drawer-error' }, icon('alert', 15), el('span', { text: row.error })) : null,
     el('div', { class: 'detail-token-stats' },
-      detailTokenStat('输入 Prompt', row.prompt_tokens),
-      detailTokenStat('输出 Completion', row.completion_tokens),
-      detailTokenStat('合计 Total', row.total_tokens || (Number(row.prompt_tokens || 0) + Number(row.completion_tokens || 0))),
+      detailTokenStat('输入 Prompt', tokens.prompt),
+      detailTokenStat('输出 Completion', tokens.completion),
+      detailTokenStat('合计 Total', tokens.total, '输入 + 输出'),
+      detailTokenStat('缓存命中率', tokens.hasCache ? fmtCacheRate(tokens.cacheRate) : '—', cacheMeta),
+    ),
+    el('div', { class: 'detail-source' },
+      el('div', { class: 'detail-source-head' },
+        el('span', { class: 'detail-source-title' }, icon('server', 14), '调用来源'),
+        badge(client.label, 'muted'),
+      ),
+      el('div', { class: 'detail-source-grid' },
+        detailSourceItem('终端', `${client.label} · ${client.platform}`),
+        detailSourceItem('来源 IP', row.client_ip || '—'),
+        detailSourceItem('User-Agent', row.user_agent || '—', true),
+      ),
+      /Go-http-client/i.test(row.user_agent || '')
+        ? el('p', { class: 'detail-source-note', text: 'Go HTTP 常见于服务端 SDK 或 New API 等网关转发；终端 UA 可能已被上游覆盖。' })
+        : null,
     ),
     el('div', { class: 'detail-facts' }, facts.map(([label, value]) => el('div', { class: 'detail-fact' },
       el('span', { class: 'fact-label', text: label }),
@@ -481,6 +683,13 @@ function renderDetailPanel() {
     ),
   );
   return panel;
+}
+
+function detailSourceItem(label, value, wide = false) {
+  return el('div', { class: `detail-source-item ${wide ? 'is-wide' : ''}`.trim() },
+    el('span', { class: 'detail-source-label', text: label }),
+    el('span', { class: 'detail-source-value mono', text: value, title: value }),
+  );
 }
 
 function renderLogsPanel() {

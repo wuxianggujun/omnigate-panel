@@ -170,6 +170,13 @@ func (g *Gateway) NewAPICapture(ctx context.Context, stateID string, p NewAPICap
 	label := pend.label
 	if pend.autoLabel || label == "" {
 		label = g.newAPIAutoLabel(pend.provider, name, userID)
+		// 同一个浏览器会话就是同一个账号：如果这次抓回来的 Cookie 与某个既有
+		// 账号一致，就复用它的名字。否则「第一次没补到用户 ID」会落一个「账号 1」
+		// 占位名，第二次补抓又生成新名字，同一账号在面板里裂成两条——而前一条
+		// 恰好是缺 New-Api-User 的坏账号，用户根本不知道该删哪个。
+		if existing := g.newAPIAccountBySession(pend.provider, cookie); existing != "" {
+			label = existing
+		}
 	}
 	apiKey := pend.apiKey
 	if apiKey == "" {
@@ -177,6 +184,22 @@ func (g *Gateway) NewAPICapture(ctx context.Context, stateID string, p NewAPICap
 	}
 	return g.upsertNewAPIAccount(pend.provider, label, access, sid,
 		cookie, p.ExpiresAt, name, userID, apiKey), nil
+}
+
+// newAPIAccountBySession 找出使用同一份浏览器会话（Cookie）的既有账号名。
+// Cookie 型站点没有 access_token 可以区分账号，会话 Cookie 就是唯一稳定的身份；
+// 用它做「同会话 = 同账号」的判定，避免补抓时裂成两条。
+func (g *Gateway) newAPIAccountBySession(providerName, cookie string) string {
+	cookie = strings.TrimSpace(cookie)
+	if cookie == "" {
+		return ""
+	}
+	for _, a := range g.Accounts(providerName) {
+		if strings.TrimSpace(a.SessionCookie) == cookie {
+			return a.Label
+		}
+	}
+	return ""
 }
 
 // newAPIAutoLabel 在用户没填账号名时，用站点身份生成一个：优先用户名（站点内唯一），
@@ -188,7 +211,18 @@ func (g *Gateway) newAPIAutoLabel(providerName, name, userID string) string {
 	if s := sanitizeLabel(userID); s != "" {
 		return "u" + s
 	}
-	return fmt.Sprintf("账号 %d", len(g.Accounts(providerName))+1)
+	// 占位名要避开已存在的，否则「删掉中间一条再加一条」会撞上同名账号，
+	// 把两条不同的账号写进同一个 label 槽位。
+	taken := map[string]bool{}
+	for _, a := range g.Accounts(providerName) {
+		taken[a.Label] = true
+	}
+	for n := 1; ; n++ {
+		candidate := fmt.Sprintf("账号 %d", n)
+		if !taken[candidate] {
+			return candidate
+		}
+	}
 }
 
 // sanitizeLabel 把站点用户名收成可安全当账号名 / 归属键的短字符串：丢掉控制字符、
@@ -220,6 +254,41 @@ func sanitizeLabel(s string) string {
 		out = string(rs[:48])
 	}
 	return out
+}
+
+// newAPIMissingUIDHint 是「Cookie 型账号缺数字用户 ID」时的统一提示语。
+// 这是唯一一条必须靠重新抓取修复的错误，提示里要写清楚怎么做。
+const newAPIMissingUIDHint = "缺少数字用户 ID（New-Api-User）：请在面板重新抓取一次该账号的会话 Cookie"
+
+// missingNewAPIUserID reports whether a cookie-auth account lacks the numeric
+// user id that its user-API requires as the New-Api-User header.
+//
+// Only cookie-auth relays are checked: bearer relays treat UID as optional
+// metadata, and flagging them would invent a failure that does not exist.
+func missingNewAPIUserID(np *newapi.Provider, acc *provider.Account) bool {
+	if np == nil || acc == nil || !np.Client().Endpoints().UsesCookieAuth() {
+		return false
+	}
+	if np.Client().Endpoints().UserHeader == "" {
+		return false
+	}
+	return !isNumericID(acc.UID)
+}
+
+// isNumericID reports whether s is a plain positive decimal integer, i.e. the
+// shape of a New API user primary key. Used to reject garbage captured by a
+// login snippet before it becomes an always-401 New-Api-User header.
+func isNumericID(s string) bool {
+	s = strings.TrimSpace(s)
+	if s == "" || len(s) > 20 {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return s != "0"
 }
 
 // NewAPISetAPIKey updates an existing account's chat API key (sk-...). The key is
@@ -262,8 +331,19 @@ func (g *Gateway) NewAPISetAPIKey(providerName, label, apiKey string) error {
 }
 
 func (g *Gateway) upsertNewAPIAccount(providerName, label, access, sid, cookie string, expiresAt int64, name, userID, apiKey string) *NewAPILoginResult {
-	if userID == "" {
-		userID = strings.ReplaceAll(util.UUID(), "-", "")
+	// 用户 ID 缺失时**不能**编一个随机值：Cookie 型站点把它原样当 New-Api-User
+	// 发出去，假 ID 只会换来一个必然的 401（签到与查额度全废），而且这个假 ID
+	// 会随账号一起落库，之后每次刷新都在延续错误。留空反而更诚实——用户接口调用
+	// 会明确报「缺少 New-Api-User」，用户补一次抓取即可。
+	//
+	// 只在 cookie 型站点上做数字校验：Bearer 型老站点的用户 ID 语义没有变，
+	// 不能因为这次加固改动既有账号的行为。
+	if userID != "" {
+		if np, err := g.newapiProvider(providerName); err == nil &&
+			np.Client().Endpoints().UsesCookieAuth() && !isNumericID(userID) {
+			// 真站点只接受数字主键；非数字说明抓取脚本读错了字段，按缺失处理。
+			userID = ""
+		}
 	}
 	if name == "" {
 		name = "New API 账号"
@@ -433,6 +513,11 @@ func (g *Gateway) NewAPIAccounts(ctx context.Context, providerName string, withB
 			"has_token":   hasUserCred,
 			"has_api_key": strings.TrimSpace(acc.APIKey) != "",
 		}
+		// 数字用户 ID 对 Cookie 型站点是「能不能用」的一部分，露出来用户才能
+		// 一眼看出账号是否完整（面板会显示 UID 徽标）。
+		if acc.UID != "" {
+			item["user_id"] = acc.UID
+		}
 		if acc.ExpiresAt > 0 {
 			item["expires_at"] = time.Unix(acc.ExpiresAt, 0).Format(time.RFC3339)
 		}
@@ -444,6 +529,13 @@ func (g *Gateway) NewAPIAccounts(ctx context.Context, providerName string, withB
 			} else {
 				item["auth_error"] = "access_token 已失效且自动刷新失败，请重新登录该账号"
 			}
+		}
+		// Cookie 型站点还要一个数字用户 ID 作 New-Api-User 头，缺了它用户接口
+		// 一律 401。这种情况在本地就能判定，不必等上游回一个语义模糊的错误。
+		if missingNewAPIUserID(np, acc) {
+			item["auth_invalid"] = true
+			item["auth_error"] = newAPIMissingUIDHint
+			authInvalid = true
 		}
 		if withBalance && hasUserCred && !authInvalid {
 			bctx, cancel := context.WithTimeout(ctx, 20*time.Second)
@@ -480,6 +572,10 @@ func (g *Gateway) NewAPICheckin(ctx context.Context, providerName, label string)
 		}
 		matched = true
 		g.ensureNewAPIToken(ctx, providerName, np, acc)
+		if missingNewAPIUserID(np, acc) {
+			out = append(out, RaccoonCheckinOutcome{Label: acc.Label, Error: newAPIMissingUIDHint})
+			continue
+		}
 		if acc.Cookie == "" && acc.SessionCookie == "" {
 			out = append(out, RaccoonCheckinOutcome{Label: acc.Label, Error: "没有可用凭据（access_token 或会话 Cookie），请先登录"})
 			continue

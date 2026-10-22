@@ -676,16 +676,28 @@ func (g *Gateway) cachedModels(name string) ([]openai.Model, bool) {
 	return e.models, true
 }
 
-// pickAccount 返回该 provider 的一个可用账号（有凭证），无则 nil。
+// pickAccount 返回该 provider 的一个可用账号（有凭证即可），否则 nil。
+//
+// 优先返回有 Cookie 的账号：raccoon / trae 的模型目录就是按 Cookie 拉的，历史上
+// 也一直是这个选择，先挑 Cookie 才不会有回归。没有 Cookie 账号时再退回其它凭据——
+// Cookie 型站点（AnyRouter / AgentRouter）的账号恰恰没有 Cookie 字段，只认 Cookie
+// 会让这类 provider 永远拿不到真实目录，只能静默退回内置清单。
 func (g *Gateway) pickAccount(name string) *provider.Account {
 	g.accountsMu.RLock()
 	defer g.accountsMu.RUnlock()
+	var anyCred *provider.Account
 	for _, a := range g.accounts[name] {
-		if a != nil && a.Cookie != "" {
+		if a == nil {
+			continue
+		}
+		if a.Cookie != "" {
 			return a
 		}
+		if anyCred == nil && (a.APIKey != "" || a.SessionCookie != "" || a.RefreshToken != "") {
+			anyCred = a
+		}
 	}
-	return nil
+	return anyCred
 }
 
 // ListModels aggregates every provider's models, prefixed with "provider/".

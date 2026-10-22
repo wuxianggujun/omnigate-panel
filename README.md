@@ -228,10 +228,20 @@ plugin.MustRegister(plugin.Plugin{
    Application → Cookies 复制整条，填进 `session_cookie`，并把数字用户 ID 填进
    `uid`。
 
+数字用户 ID 是这类站点唯一不可省的字段：上游用 `New-Api-User: <id>` 决定「这是哪个
+账号」，缺了它签到与额度一律 401。所以网关**不会**替你编一个：抓取时如果身份补全
+失败，账号仍然建好，只是标成「缺少数字用户 ID（New-Api-User）」，重新抓取一次即可
+修复。同一个浏览器会话不会被记成第二个账号——补抓会复用原来那条，不会留下一个坏
+账号在旁边。
+
 签到是普通的 New API 签到：勾选「定时签到」后由调度器每天按 `checkin_path` 执行，
 不需要额外配置。注意 AnyRouter 官方文档声明不转发非 Claude Code 的 API 流量——
 用 `client_preset=claude-code` + `protocol=anthropic` 是在协议层做到「真的像」，
 但这属于绕过对方的使用约束，是否接受由账号所有者判断，上游也可能因此封号。
+
+模型目录同样是按账号拉的：用账号里的 `sk-` 密钥请求 `/v1/models`。没有密钥时不会
+报错，而是退回供应商配置里手写的 `models` 清单——所以「刷新目录」看起来成功、却只有
+几个写死的模型名，通常就是缺聊天密钥。
 
 ## 配置
 

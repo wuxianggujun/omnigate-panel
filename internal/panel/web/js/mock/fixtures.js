@@ -1,4 +1,6 @@
-// fixtures.js — 本地预览数据：7 种供应商 + 空壳、多账号、多租户、失败请求。
+// fixtures.js — 本地预览数据：8 种供应商 + 空壳、多账号、多租户、失败请求。
+// 其中 anyrouter 专门覆盖 Cookie 型中转站（AnyRouter / AgentRouter）：Claude Code
+// 身份 + anthropic 方言 + sign_in 签到，两个账号分别是「UID 完整」与「待补全 UID」。
 //
 // 这里的数据刻意贴近真实后端形状：config 为完整 omnigate 配置、accounts 为
 // {providers:[{name,type,accounts:[]}]}、models 为 OpenAI ModelList 形态。mock/api.js
@@ -668,7 +670,12 @@ export function buildRequestLogs(state, limit = 220) {
     { ok: false, status: 429, outcome: 'rate_limited', weight: 0.045 },
     { ok: false, status: 502, outcome: 'http_error', weight: 0.05 },
     { ok: false, status: 401, outcome: 'http_error', weight: 0.025 },
-    { ok: false, status: 499, outcome: 'interrupted', weight: 0.04 },
+    // interrupted 带具体成因：面板要能显示「谁先断的」。线上排查时只有 outcome
+    // 没有原因，根本分不清是客户端主动取消还是中间层按读超时掐断。
+    {
+      ok: false, status: 499, outcome: 'interrupted', weight: 0.04,
+      failure: 'client canceled the request (context canceled)',
+    },
   ];
   const rows = [];
   for (let i = 0; i < limit; i += 1) {
@@ -699,6 +706,8 @@ export function buildRequestLogs(state, limit = 220) {
       status: outcome.status,
       ok: outcome.ok,
       outcome: outcome.outcome,
+      // 失败原因（interrupted 的行才有）：面板详情直接显示「谁先断的」。
+      ...(outcome.failure ? { failure: outcome.failure } : {}),
       duration_ms: duration,
       ttfb_ms: Math.max(80, Math.floor(duration * (0.15 + rng() * 0.4))),
       attempts: outcome.ok ? 1 : 1 + Math.floor(rng() * 2),

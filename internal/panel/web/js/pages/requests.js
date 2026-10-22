@@ -300,7 +300,9 @@ function render() {
           width: '118px',
           render: (row) => el('div', { class: 'result-cell' },
             badge(row.status || '—', row.ok ? 'ok' : (row.status === 429 ? 'warn' : 'danger')),
-            el('span', { class: 'cell-sub', text: outcomeLabel(row.outcome) }),
+            // 失败原因挂在结果列的 title 上：列表里不必展开，但一眼能把「客户端
+            // 主动取消」和「被读超时掐断」区分开。
+            el('span', { class: 'cell-sub', text: outcomeLabel(row.outcome), title: row.failure || '' }),
           ),
         },
         {
@@ -702,6 +704,9 @@ function renderDetailPanel() {
     ['调度域', row.realm || '—'],
     ['HTTP 状态', row.status != null ? String(row.status) : '—'],
     ['结果', outcomeLabel(row.outcome)],
+    // 失败原因：以前只有 outcome，没有原因——「客户端主动取消」和「中间层按读
+    // 超时掐断」在记录里长得一样，线上排查只能靠猜。现在由网关回填具体成因。
+    ...(row.failure ? [['失败原因', row.failure]] : []),
     ['耗时', fmtDuration(row.duration_ms)],
     ['TTFB', row.ttfb_ms != null ? fmtDuration(row.ttfb_ms) : '—'],
     ['尝试次数', row.attempts != null ? fmtInt(row.attempts) : '—'],
@@ -727,6 +732,11 @@ function renderDetailPanel() {
       }, icon('copy', 14), '复制 ID'),
     ),
     row.error ? el('div', { class: 'drawer-error' }, icon('alert', 15), el('span', { text: row.error })) : null,
+    // 中断/流错误的成因单独一块：它回答「是谁先断的」——客户端主动取消、中间层
+    // 按读超时掐断，还是上游真的失败。此前这条信息完全没有落库。
+    !row.ok && row.failure
+      ? el('div', { class: 'drawer-error' }, icon('alert', 15), el('span', { text: row.failure }))
+      : null,
     redirectBlock(row),
     el('div', { class: 'detail-token-stats' },
       detailTokenStat('输入 Prompt', tokens.prompt),

@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -999,21 +1000,35 @@ func (g *Gateway) HandleChat(ctx context.Context, req *openai.ChatRequest, w htt
 		// 改用第三方兜底（与参考实现仅在 streamed_any 为假时兜底同口径——role 首帧
 		// 不算正文）。
 		contentEmitted := false
+		// lastOut 记录「上次真的往外写了东西」的时刻（UnixNano）。保活只在真正
+		// 静默超过阈值时才发：既避免正文流动时插噪音帧，也让「静默」的定义基于
+		// 实际写出而不是定时器相位。
+		var lastOut atomic.Int64
+		lastOut.Store(time.Now().UnixNano())
+		markOut := func() { lastOut.Store(time.Now().UnixNano()) }
 		onText := func(s string) {
 			contentEmitted = true
 			_ = openai.EmitContent(ew, id, displayModel, created, s)
 			flush()
+			markOut()
 		}
 		onReasoning := func(s string) {
 			if g.cfg.Reasoning {
 				_ = openai.EmitReasoning(ew, id, displayModel, created, s)
 				flush()
+				markOut()
 			}
 		}
-		// 上游长时间静默（如 geminiweb 扩展思考）时，每 sseKeepAliveInterval 发一个
-		// 注释 ping（": ping\n\n"），避免中间代理（nginx / 网关）按读超时掐断流。
-		// 移植自参考实现 app/core/stream.py 的 sse_keepalive_during：runChat 放后台，
-		// 主 goroutine 等它完成期间负责发 ping；两者经 ew 的锁串行写。
+		// 上游长时间静默（扩展思考 / 长 prompt 预填充）时，每 sseKeepAliveInterval 发
+		// 一帧**空 delta 的合法 chat chunk**，避免中间层按读超时掐断流。
+		//
+		// 这里曾经发的是 SSE 注释帧（": ping\n\n"）：那句注释只能穿透「直连网关」的
+		// 场景。线上链路里还有 new-api 一层 SSE 再编码器，它的 StreamScannerHandler
+		// 只转发 `data:` / `[DONE]` 行、把注释行 `continue` 掉——注释帧在网关这端
+		// 「写成功」，客户端却永远收不到，于是静默期客户端按自己的读超时断连，请求
+		// 记录里出现大量 200+interrupted（实测 24h 内 96 次，ttfb≈5ms、token 全 0）。
+		// 空 delta 帧是真实上游在思考阶段也会发的形状，任何 OpenAI 客户端都忽略其
+		// 语义，但它是 `data:` 行，能原样穿过再编码层。
 		type chatOutcome struct {
 			res *chatResult
 			err error
@@ -1033,8 +1048,12 @@ func (g *Gateway) HandleChat(ctx context.Context, req *openai.ChatRequest, w htt
 				res, err = oc.res, oc.err
 				break wait
 			case <-ticker.C:
-				_, _ = ew.Write([]byte(sseKeepAliveFrame))
+				if time.Since(time.Unix(0, lastOut.Load())) < sseKeepAliveInterval {
+					continue // 期间已有输出，不必再补保活
+				}
+				_ = openai.EmitKeepAlive(ew, id, displayModel, created)
 				flush()
+				markOut()
 			}
 		}
 		ticker.Stop()
@@ -1058,7 +1077,7 @@ func (g *Gateway) HandleChat(ctx context.Context, req *openai.ChatRequest, w htt
 				_ = openai.Done(ew)
 				flush()
 				if ew.err != nil || ctx.Err() != nil {
-					markStreamFailure(ctx, reqlog.OutcomeInterrupted, 0)
+					markStreamFailure(ctx, reqlog.OutcomeInterrupted, 0, disconnectReason(ctx, ew.err))
 				}
 				g.log.Info("✓ 完成 %s · 流式兜底 · %s", displayModel, fb.finish)
 				return
@@ -1069,9 +1088,9 @@ func (g *Gateway) HandleChat(ctx context.Context, req *openai.ChatRequest, w htt
 			// 观测状态码）；其余 = 上游 error 帧 / 读失败（用 503 观测，与 WorkBuddy
 			// 侧流式 error 帧同语义）。此前一律记 200 success，是假成功。
 			if ctx.Err() != nil || ew.err != nil {
-				markStreamFailure(ctx, reqlog.OutcomeInterrupted, 0)
+				markStreamFailure(ctx, reqlog.OutcomeInterrupted, 0, disconnectReason(ctx, ew.err))
 			} else {
-				markStreamFailure(ctx, reqlog.OutcomeStreamError, http.StatusServiceUnavailable)
+				markStreamFailure(ctx, reqlog.OutcomeStreamError, http.StatusServiceUnavailable, err.Error())
 			}
 			g.log.Error("对话失败 %s: %v", displayModel, err)
 			fmt.Fprintf(ew, "data: %s\n\n", openai.ErrorJSON("upstream_error", err.Error()))
@@ -1086,7 +1105,7 @@ func (g *Gateway) HandleChat(ctx context.Context, req *openai.ChatRequest, w htt
 			// 这类失败最常见的成因是上游用 200 回了一个非 SSE 的 JSON 错误体（限流 /
 			// 审核 / 参数错），只报 "empty" 会把真实原因彻底吞掉。
 			g.log.Error("对话失败 %s: 上游空流（200+0 帧）finish=%q%s", displayModel, res.finish, sampleSuffix(res.sample))
-			markStreamFailure(ctx, reqlog.OutcomeStreamError, http.StatusBadGateway)
+			markStreamFailure(ctx, reqlog.OutcomeStreamError, http.StatusBadGateway, "upstream returned an empty stream"+sampleSuffix(res.sample))
 			fmt.Fprintf(ew, "data: %s\n\n", openai.ErrorJSON("upstream_error", "empty upstream stream"+sampleSuffix(res.sample)))
 			_ = openai.EmitFinish(ew, id, displayModel, created, "stop")
 			_ = openai.Done(ew)
@@ -1114,7 +1133,7 @@ func (g *Gateway) HandleChat(ctx context.Context, req *openai.ChatRequest, w htt
 		if ew.err != nil || ctx.Err() != nil {
 			// 客户端断连：上游帧无恙，只是没人接了——归为 interrupted（非上游故障，
 			// 保留实际状态码 200，与 WorkBuddy 侧同口径）。
-			markStreamFailure(ctx, reqlog.OutcomeInterrupted, 0)
+			markStreamFailure(ctx, reqlog.OutcomeInterrupted, 0, disconnectReason(ctx, ew.err))
 		}
 		g.log.Info("✓ 完成 %s · 流式 · %s", displayModel, res.finish)
 		return
@@ -1368,7 +1387,11 @@ func collectAttachments(p provider.Provider, msgs []openai.Message) []openai.Att
 // 再改状态码，但请求记录必须能区分假成功：outcome 覆盖成 stream_error/interrupted，
 // status>0 时用 5xx 作为观测状态码（与 WorkBuddy 侧一致），status==0 时保留实际状态码
 // （客户端断连不改状态码）。
-func markStreamFailure(ctx context.Context, outcome string, status int) {
+//
+// reason 必填：只写 outcome 而不写原因，等于把「客户端主动取消」和「中间层按读超时
+// 掐断」记成同一件事，线上排查时根本分不清责任方（实测踩过：96 次 interrupted 全是
+// 200、ttfb≈5ms、token 全 0，却看不出是谁断的）。
+func markStreamFailure(ctx context.Context, outcome string, status int, reason string) {
 	m := ReqMetaFrom(ctx)
 	if m == nil {
 		return
@@ -1377,9 +1400,29 @@ func markStreamFailure(ctx context.Context, outcome string, status int) {
 	if status != 0 {
 		m.Status = status
 	}
+	if reason != "" {
+		m.Failure = reason
+	}
 }
 
-// sampleSuffix renders an upstream "produced no usable frame" sample for a
+// disconnectReason 归纳一次「写失败 / 上下文取消」的具体成因，用于把
+// interrupted 记录变成可定位的证据。区分三类：
+//   - 客户端主动取消（浏览器关页 / IDE 停止）：ctx.Err()==context.Canceled
+//   - 中间层或客户端按读超时断开：写失败（broken pipe / connection reset）
+//   - 上游未被读完：上游读错误（由调用方另走 stream_error）
+func disconnectReason(ctx context.Context, writeErr error) string {
+	switch {
+	case ctx.Err() == context.Canceled:
+		return "client canceled the request (context canceled)"
+	case ctx.Err() == context.DeadlineExceeded:
+		return "request deadline exceeded (context deadline exceeded)"
+	case writeErr != nil:
+		return "client closed the connection while writing: " + writeErr.Error()
+	default:
+		return "stream ended without a successful write"
+	}
+}
+
 // failure message: whitespace is flattened so the text stays readable both in a
 // log line and inside a JSON error body, and it is truncated.
 func sampleSuffix(sample []byte) string {
@@ -1396,14 +1439,10 @@ func sampleSuffix(sample []byte) string {
 	return " · 上游原文: " + s
 }
 
-// sseKeepAliveInterval 是网关等待上游事件的静默上限：超过就发一个 SSE 注释 ping，
-// 防止中间代理（nginx / 负载均衡）按读超时掐断长静默的流。移植自参考实现
-// app/core/stream.py 的 SSE_KEEPALIVE_INTERVAL。包级变量便于测试缩短。
+// sseKeepAliveInterval 是网关等待上游事件的静默上限：超过就发一帧保活，防止中间
+// 代理（nginx / 负载均衡 / SSE 再编码层）按读超时掐断长静默的流。包级变量便于
+// 测试缩短。
 var sseKeepAliveInterval = 10 * time.Second
-
-// sseKeepAliveFrame 是保活用的 SSE 注释帧：注释被所有 SSE 客户端忽略，但足以让
-// 中间代理看到字节流动。与参考实现 app/core/stream.py 的 SSE_KEEPALIVE_FRAME 一致。
-const sseKeepAliveFrame = ": ping\n\n"
 
 // errWriter 记录首个写失败，并把写入串行化。SSE 逐帧写入时客户端可能中途断连，
 // 写失败本身不改变 HTTP 状态码（头已发），但请求记录要据此归为 interrupted；同时

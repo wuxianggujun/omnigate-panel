@@ -345,6 +345,16 @@ func (s *streamState) consume(payload string) {
 	if s.finished {
 		return
 	}
+	// 保活帧（网关在长静默期补发的空 delta chunk）：Gemini 的 NDJSON 方言没有
+	// 注释 / ping 语法，唯一不污染内容的心跳是「空 candidates 的合法响应对象」。
+	var keepAlive struct {
+		KeepAlive bool `json:"omnigate_keepalive"`
+	}
+	if json.Unmarshal([]byte(payload), &keepAlive) == nil && keepAlive.KeepAlive {
+		s.start()
+		s.t.writeNDJSON(map[string]any{"candidates": []any{}})
+		return
+	}
 	// Upstream error frame (rate limit / content block / moderation): surface it
 	// the way the upstream does, as an NDJSON error object.
 	var probe struct {

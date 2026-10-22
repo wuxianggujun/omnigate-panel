@@ -127,6 +127,11 @@ type Event struct {
 	// 日志一模一样（实测踩过，排查成本极高）。空 = 旧归档条目或未经过别名的
 	// WorkBuddy 请求；等于 Model 时表示没有发生别名/目录改写。
 	UpstreamModel string `json:"upstream_model,omitempty"`
+	// Failure 是失败/中断的结构化原因（由 gateway 的 markStreamFailure 填写）。
+	// 只记 outcome 不记原因，会把「客户端主动取消」和「中间层按读超时掐断」记成
+	// 同一件事——线上 96 次 interrupted 全是 200/ttfb≈5ms/token 全 0，却分不清
+	// 责任方。空 = 成功或旧归档条目。
+	Failure string `json:"failure,omitempty"`
 }
 
 // Filter 用于从归档中筛选最近记录。字符串字段一律「包含」匹配（大小写不敏感），

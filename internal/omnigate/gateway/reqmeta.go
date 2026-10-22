@@ -40,6 +40,10 @@ type ReqMeta struct {
 	// Status 覆盖请求记录里的观测状态码（流式失败时用 5xx）。0 = 用实际写出的
 	// 状态码。
 	Status int
+	// Failure 是一次失败/中断的结构化原因，供请求记录与面板定位「到底是谁先断」。
+	// 空 = 无错误。此前只记 outcome=interrupted，不带任何原因，导致「客户端走了」
+	// 与「中间层按读超时掐断」在数据上完全无法区分——排查只能靠猜。
+	Failure string
 	// KeyProviders 是入站密钥的收窄范围（server 侧 keyScope 得到）。nil/空 =
 	// 不限制（全量密钥或网关未配密钥）。非空时表示「这个 key 只准用这些
 	// provider」——兜底选候选必须遵守它，否则收窄密钥能顺着引流链 / 全局兜底

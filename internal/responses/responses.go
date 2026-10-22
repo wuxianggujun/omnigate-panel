@@ -253,13 +253,13 @@ func RequestToChat(raw []byte, store *Store) (*ChatRequest, error) {
 	}
 
 	return &ChatRequest{
-		Body:         body,
-		Stream:       req.Stream,
-		Model:        req.Model,
-		Messages:     msgs,
-		PreviousID:   req.PreviousResponseID,
-		Store:        req.Store == nil || *req.Store, // OpenAI defaults store to true
-		Metadata:     meta,
+		Body:       body,
+		Stream:     req.Stream,
+		Model:      req.Model,
+		Messages:   msgs,
+		PreviousID: req.PreviousResponseID,
+		Store:      req.Store == nil || *req.Store, // OpenAI defaults store to true
+		Metadata:   meta,
 		Echo: Echo{
 			Tools:             toolsEcho(req.Tools),
 			ToolChoice:        toolChoiceEcho(req.ToolChoice),
@@ -619,10 +619,10 @@ func rawToString(raw json.RawMessage) string {
 // ---------------------------------------------------------------------------
 
 type chatUsage struct {
-	PromptTokens            int `json:"prompt_tokens"`
-	CompletionTokens        int `json:"completion_tokens"`
-	TotalTokens             int `json:"total_tokens"`
-	PromptTokensDetails     *struct {
+	PromptTokens        int `json:"prompt_tokens"`
+	CompletionTokens    int `json:"completion_tokens"`
+	TotalTokens         int `json:"total_tokens"`
+	PromptTokensDetails *struct {
 		CachedTokens int `json:"cached_tokens"`
 	} `json:"prompt_tokens_details"`
 	CompletionTokensDetails *struct {
@@ -1113,6 +1113,17 @@ func (s *streamState) assistantMessage() map[string]any {
 // consume handles one chat SSE frame payload.
 func (s *streamState) consume(payload string) {
 	if s.finished {
+		return
+	}
+	// 保活帧（网关在长静默期补发的空 delta chunk）：Responses 方言没有独立的
+	// ping 事件，用 response.in_progress 心跳——它是合法事件、客户端按「仍在生成」
+	// 忽略内容，字节流动足以重置中间层 / 客户端的读超时。
+	var keepAlive struct {
+		KeepAlive bool `json:"omnigate_keepalive"`
+	}
+	if json.Unmarshal([]byte(payload), &keepAlive) == nil && keepAlive.KeepAlive {
+		s.start()
+		s.emit("response.in_progress", map[string]any{"response": s.envelope("in_progress", nil)})
 		return
 	}
 	// Upstream error frame (rate limit / content filter / moderation): surface

@@ -261,14 +261,16 @@ func (s *Server) serveLogged(w http.ResponseWriter, r *http.Request, fn func(htt
 		outcome = meta.Outcome
 	}
 	ev := reqlog.Event{
-		Time:       start,
-		RequestID:  id,
-		Path:       omniMountPrefix + r.URL.Path,
-		Provider:   meta.Provider,
-		Model:      meta.Model,
-		Account:    meta.Account,
+		Time:      start,
+		RequestID: id,
+		Path:      omniMountPrefix + r.URL.Path,
+		Provider:  meta.Provider,
+		Model:     meta.Model,
+		Account:   meta.Account,
 		// 真实上游模型：与 Model 不同即说明别名/目录解析生效过。
 		UpstreamModel: meta.UpstreamModel,
+		// 失败原因：让 interrupted 从「猜」变成「可定位」（谁先断的）。
+		Failure:    meta.Failure,
 		Status:     status,
 		OK:         status >= 200 && status < 300 && outcome == reqlog.OutcomeSuccess,
 		Outcome:    outcome,
@@ -945,7 +947,7 @@ func (s *Server) handleModelMapping(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			s.writeValue(w, 200, map[string]any{
-				"ok": true,
+				"ok":       true,
 				"mappings": s.gw.ModelMappings().All(),
 				"disabled": s.gw.ModelMappings().DisabledAliases(),
 			})
@@ -965,7 +967,7 @@ func (s *Server) handleModelMapping(w http.ResponseWriter, r *http.Request) {
 			s.gw.SetModelMappingEnabled(req.Alias, *req.Enabled)
 		}
 		s.writeValue(w, 200, map[string]any{
-			"ok": true,
+			"ok":       true,
 			"mappings": s.gw.ModelMappings().All(),
 			"disabled": s.gw.ModelMappings().DisabledAliases(),
 		})
@@ -983,7 +985,7 @@ func (s *Server) handleModelMapping(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.writeValue(w, 200, map[string]any{
-			"ok": true,
+			"ok":       true,
 			"mappings": s.gw.ModelMappings().All(),
 			"disabled": s.gw.ModelMappings().DisabledAliases(),
 		})

@@ -33,8 +33,10 @@ func (p *delayingProvider) StreamChat(ctx context.Context, _ *provider.Account, 
 	return &scriptStream{events: p.events}, nil
 }
 
-// TestStreamKeepAlivePing：上游长时间静默时，网关要发保活注释 ping，且必须在
-// 终止帧 [DONE] 之前（移植自参考实现 app/core/stream.py）。
+// TestStreamKeepAlivePing：上游长时间静默时，网关要发保活帧，且必须在终止帧
+// [DONE] 之前发完。保活帧是**合法 data: 帧**（不是 SSE 注释）：注释帧只能穿透
+// 直连场景，遇到 new-api 这类只转发 data: 行的再编码层会被丢弃，客户端于是在静默
+// 期收不到任何字节并按读超时断连（线上 499/interrupted 的成因）。
 func TestStreamKeepAlivePing(t *testing.T) {
 	old := sseKeepAliveInterval
 	sseKeepAliveInterval = 20 * time.Millisecond
@@ -48,20 +50,26 @@ func TestStreamKeepAlivePing(t *testing.T) {
 	g.HandleChat(WithReqMeta(context.Background(), &ReqMeta{}), streamReq(), w)
 
 	out := w.Body.String()
-	i := strings.Index(out, sseKeepAliveFrame)
+	i := strings.Index(out, `"`+openaikeepaliveField+`":true`)
 	j := strings.Index(out, "[DONE]")
 	if i < 0 {
-		t.Fatalf("stream missing keepalive ping: %s", out)
+		t.Fatalf("stream missing keepalive frame: %s", out)
 	}
 	if j < 0 || i > j {
-		t.Fatalf("ping must precede [DONE] (ping=%d done=%d): %s", i, j, out)
+		t.Fatalf("keepalive must precede [DONE] (ka=%d done=%d): %s", i, j, out)
+	}
+	if strings.Contains(out, ": ping") {
+		t.Fatalf("SSE comment keepalive must be gone (it cannot cross SSE re-encoders): %s", out)
 	}
 	if !strings.Contains(out, "hi") {
 		t.Fatalf("content missing: %s", out)
 	}
 }
 
-// TestStreamNoKeepAliveWhenFast：上游立即应答时不得发 ping（ticker 从未触发）。
+// openaikeepaliveField mirrors openai.KeepAliveField for assertions.
+const openaikeepaliveField = "omnigate_keepalive"
+
+// TestStreamNoKeepAliveWhenFast：上游立即应答时不得发保活（静默从未达到阈值）。
 func TestStreamNoKeepAliveWhenFast(t *testing.T) {
 	old := sseKeepAliveInterval
 	sseKeepAliveInterval = time.Hour
@@ -73,7 +81,7 @@ func TestStreamNoKeepAliveWhenFast(t *testing.T) {
 	}})
 	w := httptest.NewRecorder()
 	g.HandleChat(WithReqMeta(context.Background(), &ReqMeta{}), streamReq(), w)
-	if strings.Contains(w.Body.String(), sseKeepAliveFrame) {
-		t.Fatalf("unexpected keepalive ping: %s", w.Body.String())
+	if strings.Contains(w.Body.String(), openaikeepaliveField) {
+		t.Fatalf("unexpected keepalive frame: %s", w.Body.String())
 	}
 }

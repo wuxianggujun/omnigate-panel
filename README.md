@@ -432,6 +432,74 @@ nginx 的 `proxy_read_timeout` **默认只有 60s**。超过后反代会主动�
 流的形态同理：空流会写一帧 `error` 并以 `502` 观测，但 HTTP 头早已是 200，客户端
 看到的是流里的错误帧 + `[DONE]`，不会重连。
 
+### 会话中途被掐断（`interrupted`）怎么定位
+
+「对话跑到一半突然停了」在请求记录里长这样：`status=200`、`outcome=interrupted`、
+`ttfb≈5ms`、`prompt_tokens` / `completion_tokens` 全是 0。**它不是本服务的故障，
+而是链路上某一层先断开了连接**，本服务只是如实记录了「写不进去」。
+
+#### 关键机制：SSE 注释帧穿不过 SSE 再编码层
+
+本服务在上游长静默（扩展思考 / 长 prompt 预填充）时会发保活帧，避免中间层按读
+超时掐断流。这里有一个**极易踩中的陷阱**：
+
+| 保活帧形态 | 客户端直连本服务 | 中间还有一层 SSE 再编码器（如 new-api） |
+|---|---|---|
+| SSE 注释 `: ping` | ✅ 有效 | ❌ **被整行丢弃**，客户端在静默期收不到任何字节 |
+| `data:` 空 delta chunk | ✅ 有效 | ✅ 有效（再编码层只转发 `data:` / `[DONE]` 行） |
+
+new-api 的 `StreamScannerHandler` 明确只处理 `data:` 开头与 `[DONE]` 行：
+
+```go
+if data[:5] != "data:" && data[:6] != "[DONE]" { continue }
+```
+
+更隐蔽的是它还**延迟一帧转发**（为了从最后一帧里捞 usage）：
+
+```go
+if lastStreamData != "" {
+    HandleStreamFormat(c, info, lastStreamData, ...)  // 写出的是「上一帧」
+}
+if len(data) > 0 {
+    lastStreamData = data   // 当前帧先扣住
+}
+```
+
+两个机制叠加才是完整的故障链：注释行被丢弃 → 扫描回调不触发 → 被扣住的帧永远发不出去。
+所以保活不能只靠「偶尔发一帧」，必须**周期性持续供给**，让延迟转发一直有下一帧可等。
+
+所以保活帧**必须是合法的 `data:` 帧**。本服务现在发的是带 `omnigate_keepalive`
+标记的空 delta chunk：OpenAI 客户端会把它当无内容帧忽略，Anthropic / Responses /
+Gemini 三个入站方言则各自翻译成该方言自己的心跳（`ping` 事件 /
+`response.in_progress` / 空 `candidates`），因此三种协议都能穿透再编码层。
+
+> 历史坑：早期实现用的是 `: ping` 注释帧。直连测试永远是好的，一旦前面挂了
+> new-api 就不再生效——实测 24 小时内 96 次 `interrupted`，全是 200 + 零 token。
+> 这类「本地测不出来」的问题只能靠在链路中间实测字节到达时刻来发现。
+
+#### 判断是谁先断的
+
+`interrupted` 记录现在带 `failure` 字段（面板详情「失败原因」直接显示），取值形如：
+
+| `failure` 内容 | 含义 | 该查哪里 |
+|---|---|---|
+| `client canceled the request (context canceled)` | 客户端主动取消（关页面 / IDE 点停止） | 客户端行为，属正常 |
+| `client closed the connection while writing: ...broken pipe` | 写的时候对端已关 | 客户端或中间层先断开 |
+| `request deadline exceeded` | 本服务请求上下文超时 | 调用方设置的超时 |
+| `upstream returned an empty stream · 上游原文: ...` | 上游 200 却 0 有效帧 | 看附带的原文（限流 / 审核 / 参数错） |
+
+如果 `failure` 显示客户端主动取消、但你并没有取消，那说明**是中间层替客户端断的**
+（例如反代的 `proxy_read_timeout`）。此时往上一层查：反代 access log 里应能看到
+`499`（客户端断开）或 `504`（反代超时）。
+
+#### 定位步骤
+
+1. 查请求记录的 `failure`，先分清是「客户端取消」还是「写失败」。
+2. 若指向中间层，看反代 access log 的 `499` / `504` 计数与时间点是否与记录吻合。
+3. 确认反代的 `proxy_buffering off` 与 `proxy_read_timeout` 已按上一节配好。
+4. **实测字节到达时刻**：直接对链路发一个长思考请求，记录 `data:` 帧的到达间隔。
+   如果静默期超过 10s 却一个字节都没有，保活没有穿透——检查是不是又退回注释帧了。
+
 ### 排障速查
 
 出现 504 时按这个顺序定位：

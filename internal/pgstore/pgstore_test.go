@@ -188,7 +188,7 @@ func TestRequestLogSink(t *testing.T) {
 	now := time.Now()
 	events := []reqlog.Event{
 		{Time: now.Add(-2 * time.Minute), RequestID: "a", Path: "/v1/chat", Account: "u1", Model: "alias-x", UpstreamModel: "u1-real", Provider: "raccoon", Outcome: "success", Status: 200, OK: true, TotalTokens: 10},
-		{Time: now.Add(-1 * time.Minute), RequestID: "b", Path: "/v1/chat", Account: "u2", Model: "m2", Provider: "runable", Outcome: "http_error", Status: 500},
+		{Time: now.Add(-1 * time.Minute), RequestID: "b", Path: "/v1/chat", Account: "u2", Model: "m2", Provider: "runable", Outcome: "http_error", Status: 500, Failure: "upstream 429 rate limited"},
 		{Time: now.AddDate(0, 0, -30), RequestID: "c", Path: "/v1/chat", Account: "u3", Model: "m3", Provider: "raccoon", Outcome: "success", Status: 200, OK: true},
 	}
 	if err := st.AppendLogs(events); err != nil {
@@ -218,6 +218,10 @@ func TestRequestLogSink(t *testing.T) {
 	// upstream_model 必须原样往返：它是「别名有没有生效」的唯一记录。
 	if all, _ := st.ReadLogs(10, reqlog.Filter{Model: "alias-x"}); len(all) != 1 || all[0].UpstreamModel != "u1-real" {
 		t.Fatalf("upstream_model 未正确落库/读回: %+v", all)
+	}
+	// failure 必须原样往返：它是「谁先把连接断掉」的唯一记录，丢了就只能靠猜。
+	if all, _ := st.ReadLogs(10, reqlog.Filter{Model: "m2"}); len(all) != 1 || all[0].Failure != "upstream 429 rate limited" {
+		t.Fatalf("failure 未正确落库/读回: %+v", all)
 	}
 	if got, _ = st.ReadLogs(1, reqlog.Filter{}); len(got) != 1 {
 		t.Fatalf("limit=1 应 1 条，得到 %d", len(got))

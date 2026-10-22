@@ -325,8 +325,8 @@ type toolState struct {
 
 // streamState 把 chat SSE 帧累积成 Anthropic SSE 事件序列。
 type streamState struct {
-	t   *Translator
-	id  string
+	t  *Translator
+	id string
 
 	started  bool
 	finished bool
@@ -355,16 +355,27 @@ type streamState struct {
 // newStreamState 构建流式状态（id/模型取自 Translator 的请求侧上下文）。
 func newStreamState(t *Translator) *streamState {
 	return &streamState{
-		t:             t,
-		id:            t.id,
-		inputTokens:   t.opts.InputTokens,
-		toolsByIndex:  map[int]*toolState{},
+		t:            t,
+		id:           t.id,
+		inputTokens:  t.opts.InputTokens,
+		toolsByIndex: map[int]*toolState{},
 	}
 }
 
 // consume 处理一帧 chat SSE payload。
 func (s *streamState) consume(payload string) {
 	if s.finished {
+		return
+	}
+	// 保活帧（网关在长静默期补发的空 delta chunk）：映射成 Anthropic 原生的
+	// `ping` 事件。Anthropic 客户端对 ping 完全免疫，但字节流动足以让任何中间
+	// 代理 / 客户端读超时重置。不能只依赖上层 SSE 注释帧——再编码层会丢弃注释。
+	var keepAlive struct {
+		KeepAlive bool `json:"omnigate_keepalive"`
+	}
+	if json.Unmarshal([]byte(payload), &keepAlive) == nil && keepAlive.KeepAlive {
+		s.start()
+		s.emit("ping", map[string]any{})
 		return
 	}
 	// 上游错误帧（限流 / 内容拦截 / 审核）：转成 Anthropic 的 error 事件。

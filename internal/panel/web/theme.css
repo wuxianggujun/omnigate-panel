@@ -786,6 +786,24 @@ code, pre, .mono { font-family: var(--mono); font-variant-ligatures: none; }
 }
 .cell-title { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .cell-sub { color: var(--text-3); font-size: 10.5px; overflow: hidden; text-overflow: ellipsis; }
+/* 重定向行：列表里点出「请求名 ↳ 实际上游模型」，与普通副标题区分开，
+   否则密集的请求表里看不出哪条被改写过。 */
+.redirect-line { color: var(--accent, #4c8dff); font-size: 10.5px; opacity: .92; }
+.redirect-block {
+  display: flex; flex-direction: column; gap: 10px;
+  padding: 12px 14px; border-radius: 10px;
+  border: 1px solid var(--border, rgba(255,255,255,.08));
+  background: var(--panel-2, rgba(255,255,255,.02));
+}
+.redirect-head { display: flex; align-items: center; gap: 8px; }
+.redirect-title { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; font-weight: 600; color: var(--text-1); }
+.redirect-flow { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.redirect-node { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1 1 180px; }
+.redirect-label { font-size: 10px; color: var(--text-3); letter-spacing: .02em; }
+.redirect-value { font-size: 11.5px; color: var(--text-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.redirect-node.target .redirect-value { color: var(--accent, #4c8dff); }
+.redirect-arrow { color: var(--text-3); display: inline-flex; flex: none; }
+.redirect-note { margin: 0; font-size: 10.5px; color: var(--text-3); line-height: 1.5; }
 .row-actions { display: flex; align-items: center; justify-content: flex-end; gap: 2px; }
 .result-cell { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; }
 .truncate { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }

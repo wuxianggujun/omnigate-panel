@@ -95,8 +95,8 @@ type Event struct {
 	// 免费/零倍率模型回报的 0 是真实值，键被省略后前端 Number(undefined)=NaN，会把它
 	// 误判成「未知」显示成 —（实测过：deepseek-v4.1-flash 全被显示成空）。
 	// 「有没有值」由 HasCredit(credit_known) 表达，两者配对使用。
-	Credit           float64   `json:"credit"`
-	HasCredit        bool      `json:"credit_known"`
+	Credit    float64 `json:"credit"`
+	HasCredit bool    `json:"credit_known"`
 	// CacheHitTokens / CacheMissTokens 上游前缀缓存命中/未命中 token（issue #92）。
 	// 上游未回该维度时两者皆零值省略；hit=0 + miss>0 即整段未命中。
 	CacheHitTokens  int64 `json:"cache_hit_tokens,omitempty"`
@@ -119,6 +119,14 @@ type Event struct {
 	// WorkBuddy 网关为空，其"上游"由 Realm 表达）。面板「域/供应商」列在无 realm
 	// 时用它显示请求落到了哪个供应商——让 OmniGate 请求也能和 WorkBuddy 同表可见。
 	Provider string `json:"provider,omitempty"`
+	// UpstreamModel 是**真正发给上游**的模型 ID（别名解析 + 目录补全之后）。
+	//
+	// Model 记录的是客户端请求的名字，别名命中后两者不同：Model 仍是别名，
+	// UpstreamModel 才是它最后落到哪个上游模型。没有这一列时，「别名有没有生效」
+	// 在请求记录里完全不可见——别名被上游预改写成带前缀的 ID 后，两条路径的
+	// 日志一模一样（实测踩过，排查成本极高）。空 = 旧归档条目或未经过别名的
+	// WorkBuddy 请求；等于 Model 时表示没有发生别名/目录改写。
+	UpstreamModel string `json:"upstream_model,omitempty"`
 }
 
 // Filter 用于从归档中筛选最近记录。字符串字段一律「包含」匹配（大小写不敏感），
@@ -137,8 +145,8 @@ type Filter struct {
 
 // ArchiveStats 归档存储状态。
 type ArchiveStats struct {
-	Enabled       bool   `json:"enabled"`
-	Dir           string `json:"dir,omitempty"`
+	Enabled bool   `json:"enabled"`
+	Dir     string `json:"dir,omitempty"`
 	// Backend 非空表示归档落在这个持久化后端（如 "postgres"），前端据此把「JSONL 归档」
 	// 文案换成「数据库归档」。
 	Backend       string `json:"backend,omitempty"`

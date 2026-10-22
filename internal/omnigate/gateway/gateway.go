@@ -938,10 +938,13 @@ func (g *Gateway) HandleChat(ctx context.Context, req *openai.ChatRequest, w htt
 	if displayModel == "" {
 		displayModel = provName + "/" + upstreamModel
 	}
-	// 请求记录：回填路由结果（provider + 展示模型名），供 server 出口落盘。
+	// 请求记录：回填路由结果（provider + 展示模型名 + 真实上游模型），供 server 出口落盘。
 	if m := ReqMetaFrom(ctx); m != nil {
 		m.Provider = provName
 		m.Model = displayModel
+		// 真实上游模型：别名/目录解析后的最终 ID。与 displayModel 不同时，
+		// 「这条别名到底有没有生效」才第一次变得可观测。
+		m.UpstreamModel = upstreamModel
 		// 思考档位：仅当上游会真正收到 reasoning_effort 时记录（raccoon/openai
 		// 型会透传；runable 自研协议不支持，记了会误导）。
 		if req.ReasoningEffort != "" && supportsEffort(prov.Type()) {

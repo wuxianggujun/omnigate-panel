@@ -654,6 +654,11 @@ export function buildRequestLogs(state, limit = 220) {
       cache_hit_tokens: Math.floor(rng() * pt * 0.4),
       cache_miss_tokens: pt,
     };
+    // upstream_model：让 mock 也能演示「模型 / 重定向」列与详情里的重定向区块。
+    // 只对一小部分行模拟「模型本体被改写」（别名 / 目录补全），其余保持同一个
+    // 模型——真实环境里大多数请求都不发生改写，全部标成重定向反而看不出重点。
+    const bareModel = model.split('/').slice(1).join('/');
+    row.upstream_model = rng() > 0.88 ? `${bareModel}-1017` : bareModel;
     if (!outcome.ok) {
       row.error = outcome.status === 429
         ? 'upstream rate limited: retry after 30s'

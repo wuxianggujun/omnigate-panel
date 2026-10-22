@@ -15,7 +15,14 @@ import (
 type ReqMeta struct {
 	Provider string // 命中的 provider 名（raccoon / runable / deepseek …）
 	Model    string // 展示用模型名（displayModel，通常带 provider 前缀）
-	Account  string // 实际服务账号 label（api-key 上游为 "api-key"）
+	// UpstreamModel 是**别名解析 + 目录补全之后**真正发给上游的模型 ID。
+	//
+	// Model 只能说明「客户端请求了什么」，说明不了「别名最后走到了哪」：别名
+	// 命中后 Model 仍是客户端发来的那个名字，于是「别名到底生效没有」在请求记录
+	// 里完全看不出来（实测过：别名被上游预改写成带前缀的 ID 后，日志与生效时
+	// 一模一样，问题因此一直查不出来）。这里单独记真实目标。
+	UpstreamModel string
+	Account       string // 实际服务账号 label（api-key 上游为 "api-key"）
 	// Usage 是上游回报的 OpenAI 格式 token 用量（raccoon 等会在末尾 chunk 带
 	// usage；不回报时为 nil），供请求记录填充 Token/思考列。
 	Usage *provider.Usage

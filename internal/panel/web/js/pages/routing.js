@@ -709,6 +709,28 @@ function resolveModel(raw) {
   }
   if (!chain.length) chain = [raw];
 
+  // chainScopeSkips 记录「别名链上哪些回退目标会被入站密钥的 scope 直接跳过」。
+  // 别名链是硬规则，但网关只在入口校验主目标的 scope；链上的后续目标由
+  // tryFallback 按 KeyProviders 过滤，越界的那条被静默丢弃。运维配了回退却
+  // 永远不触发，日志里只有一行「未授权该供应商」——这里提前说明。
+  //
+  // 必须独立扫完整条链：下面的选择循环一旦命中健康目标就 break，若把统计写进
+  // 那个循环，回退目标根本轮不到被检查（实测：只报了主目标，回退告警从未出现）。
+  const chainScopeSkips = [];
+  if (keyProviders.length) {
+    chain.forEach((target, index) => {
+      if (index === 0) return; // 主目标由下面的 denied 逻辑覆盖
+      const parsed = parseTarget(target, providers);
+      if (!parsed) return;
+      const resolution = resolveProviderForTarget(parsed, {
+        providers, prefer, defaultProvider, modelCatalog: ui.models,
+      });
+      if (!resolution) return;
+      if (!keyProviders.includes(resolution.provider)) {
+        chainScopeSkips.push({ target, provider: resolution.provider });
+      }
+    });
+  }
   const selectedCandidates = [];
   let chosen = null;
   for (const target of chain) {
@@ -768,6 +790,14 @@ function resolveModel(raw) {
     final.warnings.push('该供应商当前没有健康账号；实际调用会进入冷却/切换或失败。');
   }
   if (!final.account) final.warnings.push('没有匹配的账号或供应商密钥；实际调用会返回无可用凭证。');
+  // 回退目标被 scope 拒掉：配了回退却永远不会生效。chainScopeSkips 只含回退项
+  // （主目标已由上面的 denied 逻辑覆盖）。
+  for (const skip of chainScopeSkips) {
+    final.warnings.push(
+      `别名链的回退目标「${skip.target}」落在供应商 ${skip.provider}，`
+      + `但客户端密钥「${key?.name || '未命名'}」只授权 ${keyProviders.join(', ')}——该回退会被静默跳过。`,
+    );
+  }
   if (final.model && !modelsOf(final.provider).includes(final.model) && !final.prefixed) {
     final.warnings.push('当前模型目录没有该裸模型，已回退默认供应商；上游可能返回模型不存在。');
   }

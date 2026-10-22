@@ -267,6 +267,8 @@ func (s *Server) serveLogged(w http.ResponseWriter, r *http.Request, fn func(htt
 		Provider:   meta.Provider,
 		Model:      meta.Model,
 		Account:    meta.Account,
+		// 真实上游模型：与 Model 不同即说明别名/目录解析生效过。
+		UpstreamModel: meta.UpstreamModel,
 		Status:     status,
 		OK:         status >= 200 && status < 300 && outcome == reqlog.OutcomeSuccess,
 		Outcome:    outcome,

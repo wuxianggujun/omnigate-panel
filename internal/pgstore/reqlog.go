@@ -53,10 +53,12 @@ create table if not exists %s (
     reasoning          boolean          not null default false,
     client_ip          text             not null default '',
     user_agent         text             not null default '',
-    provider           text             not null default ''
+    provider           text             not null default '',
+    upstream_model     text             not null default ''
 );
 create index if not exists %s_time_idx on %s (time desc, id desc);
 create index if not exists %s_outcome_idx on %s (outcome);
+alter table %s add column if not exists upstream_model text not null default '';
 `
 
 // requestLogColumns 与建表顺序一致，供 CopyFrom 与 SELECT 复用。
@@ -66,12 +68,17 @@ var requestLogColumns = []string{
 	"prompt_tokens", "completion_tokens", "total_tokens",
 	"credit", "credit_known", "cache_hit_tokens", "cache_miss_tokens",
 	"reasoning_effort", "reasoning_tokens", "reasoning",
-	"client_ip", "user_agent", "provider",
+	"client_ip", "user_agent", "provider", "upstream_model",
 }
 
 // ensureRequestLogs 建请求记录表（幂等）。由 open 调用。
+//
+// 建表语句里的 alter table 负责给**已存在的旧表**补列（线上表在加列前就已建好，
+// create table if not exists 不会动它）。同一个 %s 参数被复用的次数必须与占位符
+// 数量一致，否则 fmt.Sprintf 会多出 %!s(MISSING)。
 func ensureRequestLogs(ctx context.Context, s *Store) error {
-	if _, err := s.pool.Exec(ctx, fmt.Sprintf(requestLogsSchemaTemplate, s.logTable, s.logTable, s.logTable, s.logTable, s.logTable)); err != nil {
+	if _, err := s.pool.Exec(ctx, fmt.Sprintf(requestLogsSchemaTemplate,
+		s.logTable, s.logTable, s.logTable, s.logTable, s.logTable, s.logTable)); err != nil {
 		return fmt.Errorf("pgstore: 建请求记录表失败: %w", err)
 	}
 	return nil
@@ -93,7 +100,7 @@ func (s *Store) AppendLogs(events []reqlog.Event) error {
 			e.PromptTokens, e.CompletionTokens, e.TotalTokens,
 			e.Credit, e.HasCredit, e.CacheHitTokens, e.CacheMissTokens,
 			e.ReasoningEffort, e.ReasoningTokens, e.Reasoning,
-			e.ClientIP, e.UserAgent, e.Provider,
+			e.ClientIP, e.UserAgent, e.Provider, e.UpstreamModel,
 		}
 	}
 	if _, err := s.pool.CopyFrom(context.Background(),
@@ -162,7 +169,7 @@ func (s *Store) ReadLogs(limit int, filter reqlog.Filter) ([]reqlog.Event, error
 			&e.PromptTokens, &e.CompletionTokens, &e.TotalTokens,
 			&e.Credit, &e.HasCredit, &e.CacheHitTokens, &e.CacheMissTokens,
 			&e.ReasoningEffort, &e.ReasoningTokens, &e.Reasoning,
-			&e.ClientIP, &e.UserAgent, &e.Provider,
+			&e.ClientIP, &e.UserAgent, &e.Provider, &e.UpstreamModel,
 		); err != nil {
 			return out, fmt.Errorf("pgstore: 解析请求记录: %w", err)
 		}

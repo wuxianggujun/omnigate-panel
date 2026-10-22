@@ -313,8 +313,24 @@ function render() {
         },
         {
           key: 'model',
-          label: '模型',
-          render: (row) => el('span', { class: 'mono truncate', text: row.model || '—', title: row.model || '' }),
+          label: '模型 / 重定向',
+          render: (row) => {
+            const requested = String(row.model || '');
+            const info = redirectInfo(row);
+            // 「请求名 → 实际上游模型」是这一列的核心信息。只有模型本体真的被改写
+            // 才显示第二行（仅补 provider 前缀不算改写）。
+            if (!info) {
+              return el('span', { class: 'mono truncate', text: requested || '—', title: requested || '' });
+            }
+            return el('div', { class: 'cell-title' },
+              el('span', { class: 'mono truncate', text: requested || '—', title: `客户端请求：${requested}` }),
+              el('span', {
+                class: 'redirect-line mono truncate',
+                title: `实际发往上游：${info.upstream}`,
+                text: `↳ ${info.upstream}`,
+              }),
+            );
+          },
         },
         {
           key: 'source',
@@ -614,6 +630,60 @@ function renderDrawerBody() {
   host.replaceChildren(drawerState.tab === 'logs' ? renderLogsPanel() : renderDetailPanel());
 }
 
+// redirectInfo 把「客户端请求的模型」与「真正发往上游的模型」整理成可展示的
+// 重定向信息。只有**模型本身**变了才算改写：全局别名、目录补全（短名补成上游
+// 真实 ID）、或回退换供应商。
+//
+// 比较前必须先剥掉 provider 前缀再比，否则会把「仅补全前缀」误报成改写——
+// 请求名 "justwoker/o3" 与上游 "o3" 指的是同一个模型，全列标成「已改写」等于
+// 噪声淹没信号（实测过）。没有 upstream_model 的旧记录返回 null。
+function redirectInfo(row) {
+  const requested = String(row?.model || '');
+  const upstream = String(row?.upstream_model || '');
+  if (!upstream) return null;
+  const provider = String(row?.provider || '');
+  const stripPrefix = (value) => {
+    if (!value) return '';
+    if (provider && value.startsWith(`${provider}/`)) return value.slice(provider.length + 1);
+    const slash = value.indexOf('/');
+    return slash > 0 ? value.slice(slash + 1) : value;
+  };
+  // 模型本体没变就不是重定向，哪怕前缀补全了。
+  if (stripPrefix(upstream) === stripPrefix(requested)) return null;
+  const qualified = upstream.includes('/') ? upstream : (provider ? `${provider}/${upstream}` : upstream);
+  return { requested, upstream: qualified };
+}
+
+// redirectText 是 redirectInfo 的纯文本形态（detail-facts 只放纯文本）。
+function redirectText(row) {
+  const info = redirectInfo(row);
+  if (!info) return String(row?.upstream_model || '—');
+  return `${info.requested} → ${info.upstream}`;
+}
+
+function redirectBlock(row) {
+  const info = redirectInfo(row);
+  if (!info) return null;
+  return el('div', { class: 'redirect-block' },
+    el('div', { class: 'redirect-head' },
+      el('span', { class: 'redirect-title' }, icon('arrowRight', 14), '路由重定向'),
+      badge('已改写', 'warn'),
+    ),
+    el('div', { class: 'redirect-flow' },
+      el('div', { class: 'redirect-node' },
+        el('span', { class: 'redirect-label', text: '客户端请求' }),
+        el('span', { class: 'redirect-value mono', text: info.requested, title: info.requested }),
+      ),
+      el('span', { class: 'redirect-arrow', 'aria-hidden': 'true' }, icon('arrowRight', 16)),
+      el('div', { class: 'redirect-node target' },
+        el('span', { class: 'redirect-label', text: '实际发往上游' }),
+        el('span', { class: 'redirect-value mono', text: info.upstream, title: info.upstream }),
+      ),
+    ),
+    el('p', { class: 'redirect-note', text: '模型名不等于请求名，说明路由层改写过：全局别名、目录补全或回退换供应商各其一。' }),
+  );
+}
+
 function renderDetailPanel() {
   const row = drawerState.row;
   const tokens = tokenBreakdown(row);
@@ -625,6 +695,10 @@ function renderDetailPanel() {
     ['供应商', row.provider || '—'],
     ['账号', row.account || '供应商密钥'],
     ['模型', row.model || '—'],
+    // 重定向：把「请求了什么」和「实际打到哪个上游模型」并排显示。两者不同就是
+    // 别名 / 目录补全 / 回退换供应商其中之一生效了——以前这条信息完全不可见，
+    // 只能靠猜。
+    ['实际模型', redirectText(row)],
     ['调度域', row.realm || '—'],
     ['HTTP 状态', row.status != null ? String(row.status) : '—'],
     ['结果', outcomeLabel(row.outcome)],
@@ -653,6 +727,7 @@ function renderDetailPanel() {
       }, icon('copy', 14), '复制 ID'),
     ),
     row.error ? el('div', { class: 'drawer-error' }, icon('alert', 15), el('span', { text: row.error })) : null,
+    redirectBlock(row),
     el('div', { class: 'detail-token-stats' },
       detailTokenStat('输入 Prompt', tokens.prompt),
       detailTokenStat('输出 Completion', tokens.completion),

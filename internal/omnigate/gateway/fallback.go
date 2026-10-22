@@ -167,6 +167,9 @@ func (g *Gateway) tryFallback(ctx context.Context, req *openai.ChatRequest, prim
 		}
 		// Attribute the request to the provider that actually served it.
 		meta.Provider = c.Provider
+		// 兜底命中后上游已换成候选的模型，真实模型名必须跟着走，否则请求记录
+		// 会显示一个根本没被调用的模型（主目标那个）。
+		meta.UpstreamModel = c.Model
 		g.log.Info("兜底命中 %s", c.qualified())
 		return res
 	}

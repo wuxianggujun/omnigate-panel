@@ -452,9 +452,32 @@ func TestAnyRouterMissingUserIDIsNotFabricated(t *testing.T) {
 	if len(list) != 1 || list[0]["has_token"] != true {
 		t.Fatalf("账号应存在且有会话凭据: %+v", list)
 	}
-	// 但没有 ID 时，本地就能判定它不可用，而且提示要能指路——不能只显示「失败」。
-	if msg, _ := list[0]["auth_error"].(string); !strings.Contains(msg, "New-Api-User") {
-		t.Errorf("auth_error 应点明缺 New-Api-User，得到 %q", msg)
+	// 但没有 ID 时，用户接口（签到/额度）用不了，而且提示要能指路——不能只显示「失败」。
+	if msg, _ := list[0]["uid_error"].(string); !strings.Contains(msg, "New-Api-User") {
+		t.Errorf("uid_error 应点明缺 New-Api-User，得到 %q", msg)
+	}
+	if list[0]["auth_invalid"] == true {
+		t.Error("缺 UID 不该判成授权失效：聊天只用 sk- 密钥，账号并没有废")
+	}
+	// 缺 UID 时签到必须在本地说清楚原因，而不是发一个注定 401 的请求。
+	out0, err := g.NewAPICheckin(context.Background(), "anyrouter", "acc")
+	if err != nil {
+		t.Fatalf("NewAPICheckin: %v", err)
+	}
+	if len(out0) != 1 || !strings.Contains(out0[0].Error, "New-Api-User") {
+		t.Fatalf("签到应本地报缺 UID: %+v", out0)
+	}
+	if fake.checkinCalls != 0 {
+		t.Errorf("缺 UID 时不该真的发签到请求，实际 %d 次", fake.checkinCalls)
+	}
+	// 聊天不受影响：这是「账号没废」的判断依据。
+	w0 := httptest.NewRecorder()
+	g.HandleChat(context.Background(), &openai.ChatRequest{
+		Model:    "anyrouter/claude-sonnet-4",
+		Messages: []openai.Message{{Role: "user", Content: openai.Content{Text: "hi"}}},
+	}, w0)
+	if w0.Code != http.StatusOK {
+		t.Fatalf("缺 UID 不该影响聊天，status = %d (body=%s)", w0.Code, w0.Body.String())
 	}
 
 	// 补一次抓取（这次带上 ID）后，同一账号应立刻恢复可用 —— 验证留空是可修复的，

@@ -288,6 +288,8 @@ export function healthOfAccount(account) {
   if (coolingUntil && coolingUntil.getTime() > Date.now()) return { tone: 'warn', label: '冷却中' };
   if (account.session_expired_at && !account.session_verified_at) return { tone: 'warn', label: '会话过期' };
   if (account.has_token === false && (account.cookie_required !== false)) return { tone: 'muted', label: '未配置凭证' };
+  // 缺数字用户 ID 只影响签到与额度，聊天照常——所以是「待补全」而不是「失效」。
+  if (account.uid_missing) return { tone: 'warn', label: '待补全 UID' };
   if (account.balance_error && account.available == null) return { tone: 'warn', label: '额度未知' };
   return { tone: 'ok', label: '正常' };
 }

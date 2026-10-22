@@ -530,14 +530,19 @@ func (g *Gateway) NewAPIAccounts(ctx context.Context, providerName string, withB
 				item["auth_error"] = "access_token 已失效且自动刷新失败，请重新登录该账号"
 			}
 		}
-		// Cookie 型站点还要一个数字用户 ID 作 New-Api-User 头，缺了它用户接口
-		// 一律 401。这种情况在本地就能判定，不必等上游回一个语义模糊的错误。
-		if missingNewAPIUserID(np, acc) {
-			item["auth_invalid"] = true
-			item["auth_error"] = newAPIMissingUIDHint
-			authInvalid = true
+		// Cookie 型站点还要一个数字用户 ID 作 New-Api-User 头，缺了它签到与额度
+		// 一律 401。但它**不影响聊天**（聊天只用 sk- 密钥），所以不能标成
+		// auth_invalid —— 那会让路由和用户都以为这条账号废了。额度查询也直接跳过：
+		// 明知会 401 的请求没必要发，把原因写进错误位即可。
+		uidMissing := missingNewAPIUserID(np, acc)
+		if uidMissing {
+			item["uid_missing"] = true
+			item["uid_error"] = newAPIMissingUIDHint
+			if withBalance {
+				item["balance_error"] = newAPIMissingUIDHint
+			}
 		}
-		if withBalance && hasUserCred && !authInvalid {
+		if withBalance && hasUserCred && !authInvalid && !uidMissing {
 			bctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 			self, serr := np.Client().Self(bctx, acc)
 			cancel()

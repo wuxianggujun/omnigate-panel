@@ -808,7 +808,10 @@ function accountsTab(provider, meta, current) {
 function accountCard(provider, account, meta, actions, current) {
   const health = healthOfAccount(account);
   const balance = accountBalance(account);
-  const error = accountError(account);
+  // 缺数字用户 ID 是「可修的配置缺失」，不是授权失效：账号还能聊天，只是签到与
+  // 额度用不了。提示语已经写清怎么修（重新抓取），所以优先展示它，避免用户先看到
+  // 一条语义模糊的「未知」。
+  const error = account.uid_error || accountError(account);
   const coolingMs = account.cooling_until ? parseDate(account.cooling_until)?.getTime() - Date.now() : 0;
   const canOperate = canOperateAccounts();
   const walletList = Array.isArray(account.wallets) ? account.wallets : [];

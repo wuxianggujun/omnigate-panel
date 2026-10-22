@@ -25,6 +25,8 @@ export const OWNERSHIP = {
   'trae/solo-1': 'bob',
   'justwoker/alice-lab': 'alice',
   'justwoker/ops-shared': 'bob',
+  'anyrouter/anyuser': 'bob',
+  'anyrouter/uidok': 'alice',
   'gemini/personal': 'alice',
 };
 
@@ -60,7 +62,7 @@ function baseConfig() {
       refresh_interval: '10m',
     },
     routing: {
-      prefer: ['raccoon', 'runable', 'opencode', 'justwoker', 'trae', 'gemini'],
+      prefer: ['raccoon', 'runable', 'opencode', 'justwoker', 'anyrouter', 'trae', 'gemini'],
     },
     fingerprint: {
       jitter_enabled: false,
@@ -87,6 +89,7 @@ function baseConfig() {
         { name: 'runable-keepalive', type: 'runable', provider: 'runable', interval_minutes: 360 },
         { name: 'trae-checkin', type: 'trae', provider: 'trae', interval_minutes: 720 },
         { name: 'newapi-refresh', type: 'newapi-refresh', provider: 'justwoker', interval_minutes: 180 },
+        { name: 'anyrouter-checkin', type: 'newapi', provider: 'anyrouter', interval_minutes: 1440 },
       ],
     },
     providers: [
@@ -199,6 +202,44 @@ function baseConfig() {
             refresh_token: '',
             api_key: secretValue('sk-newapi-ops', 36),
             session_cookie: 'session=def456',
+          },
+        ],
+      },
+      {
+        // AnyRouter / AgentRouter：cookie 型站点。账号没有 access_token，用户接口
+        // 认会话 Cookie + New-Api-User；其中一个账号缺数字 UID（可修），另一个完整。
+        name: 'anyrouter',
+        type: 'newapi',
+        base_url: 'https://anyrouter.example',
+        protocol: 'anthropic',
+        client_preset: 'claude-code',
+        auth_mode: 'cookie',
+        user_header: 'New-Api-User',
+        checkin_path: '/api/user/sign_in',
+        signin_path: '/login',
+        api_key: '',
+        api_keys: [],
+        models: ['claude-sonnet-4'],
+        system_prompt: '',
+        max_prompt_chars: 0,
+        accounts: [
+          {
+            label: 'anyuser',
+            name: 'Any User',
+            cookie: '',
+            refresh_token: '',
+            api_key: secretValue('sk-any-chat', 36),
+            session_cookie: 'session=any123',
+            uid: '',
+          },
+          {
+            label: 'uidok',
+            name: 'UID 完整',
+            cookie: '',
+            refresh_token: '',
+            api_key: secretValue('sk-any-chat2', 36),
+            session_cookie: 'session=any456',
+            uid: '42',
           },
         ],
       },
@@ -326,6 +367,10 @@ export function buildModelCatalog(config = baseConfig()) {
       context: 200000, maxTokens: 16384, pricing: { input: 0.0000006, output: 0.0000022 },
       capabilities: ['chat', 'stream', 'tools', 'reasoning'],
     }),
+    modelEntry('anyrouter', 'claude-sonnet-4', {
+      context: 200000, maxTokens: 64000,
+      capabilities: ['chat', 'stream', 'tools', 'vision'],
+    }),
     modelEntry('gemini', 'gemini-2.5-pro', {
       context: 1048576, maxTokens: 65536, free: true,
       capabilities: ['chat', 'stream', 'vision', 'reasoning'],
@@ -445,6 +490,22 @@ function runtimeMap(now) {
       group: 'shared',
       cooling_until: iso(now + 8 * MIN),
       last_error: '429 rate limited（上游要求 30s 后重试）',
+    },
+    // Cookie 型中转站（AnyRouter / AgentRouter）账号缺数字用户 ID：还能聊天，
+    // 只是签到与额度用不了。用来验证面板把它渲染成「待补全 UID」而不是「失效」。
+    'anyrouter/anyuser': {
+      available: null,
+      user_id: '',
+      uid_missing: true,
+      uid_error: '缺少数字用户 ID（New-Api-User）：请在面板重新抓取一次该账号的会话 Cookie',
+      balance_error: '缺少数字用户 ID（New-Api-User）：请在面板重新抓取一次该账号的会话 Cookie',
+    },
+    'anyrouter/uidok': {
+      available: 128.5,
+      used: 21.5,
+      group: 'default',
+      name: 'UID 完整',
+      user_id: '42',
     },
     'gemini/personal': {
       available: null,
@@ -907,7 +968,9 @@ export function buildAccountsPayload(state, { withBalance = false, role = '', us
       const row = {
         label: raw.label,
         name: runtime.name || raw.name || '',
-        has_token: !!raw.cookie,
+        // 与后端一致：Cookie 型站点（AnyRouter / AgentRouter）没有 access_token，
+        // 会话 Cookie 就是用户接口凭据，只看 cookie 会误判成「未配置凭证」。
+        has_token: !!(raw.cookie || raw.session_cookie),
         ...(runtime.available != null ? { available: runtime.available } : {}),
         ...(runtime.credits != null ? { credits: runtime.credits } : {}),
         ...(runtime.credits_limit != null ? { credits_limit: runtime.credits_limit } : {}),
@@ -918,6 +981,8 @@ export function buildAccountsPayload(state, { withBalance = false, role = '', us
         ...(runtime.org_name ? { org_name: runtime.org_name } : {}),
         ...(runtime.auth_invalid ? { auth_invalid: true } : {}),
         ...(runtime.auth_error ? { auth_error: runtime.auth_error } : {}),
+        ...(runtime.uid_missing ? { uid_missing: true } : {}),
+        ...(runtime.uid_error ? { uid_error: runtime.uid_error } : {}),
         ...(runtime.balance_error ? { balance_error: runtime.balance_error } : {}),
         ...(runtime.session_error ? { session_error: runtime.session_error } : {}),
         ...(runtime.session_expired_at ? { session_expired_at: runtime.session_expired_at } : {}),

@@ -17,6 +17,10 @@ data/
 config.json
 omnigate.json
 
+# 本机部署覆盖层（端口/网络名/容器别名因机器而异）。模板见
+# docker-compose.override.example.yml。
+docker-compose.override.yml
+
 # Build artifacts
 *.tmp
 __pycache__/

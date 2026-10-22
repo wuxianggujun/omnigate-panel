@@ -205,6 +205,29 @@ docker compose exec omnigate-panel /app/omnigate-panel \
 > ⚠️ **反向代理必须放宽超时**，否则会出现「后端已计费、客户端却收到 504 并重试」
 > 的 token 浪费。见下文[反向代理部署](#反向代理部署)。
 
+### 本机覆盖层（端口 / 网络 / 容器别名）
+
+`docker-compose.yml` 里的端口是 `"7863:7863"`，会监听 `0.0.0.0`。面板前面通常还有
+一层反向代理负责 TLS 与鉴权，所以实际部署几乎总要覆盖这两点：只绑回环地址、
+加入前置网关所在的 docker 网络、并给对方一个稳定的容器别名。
+
+```bash
+cp docker-compose.override.example.yml docker-compose.override.yml
+# 按需改端口 / 网络名 / 别名，或写进同目录 .env
+docker compose up -d
+```
+
+模板里的 `ports: !override` 是必需的：compose 默认把多份 `ports` **取并集**，
+基础文件里的 `"7863:7863"` 会一起保留，等于照样裸奔在 `0.0.0.0`。加上 `!override`
+才是整体替换（需要 compose ≥ 2.24）。
+
+前置网关把渠道 `base_url` 指向本服务时要用**容器别名**（模板默认 `omnigate`，
+可用 `PANEL_ALIAS` 改），不要用 `127.0.0.1`——容器内的回环是它自己。别名解析失败
+的典型表现是上游报 `dial tcp 127.0.0.1:7863: connect: connection refused`。
+
+真实的 `docker-compose.override.yml` 已加入 `.gitignore`：端口、网络名、别名都是
+本机事实，不应该进版本库。
+
 ## 开发
 
 ```bash

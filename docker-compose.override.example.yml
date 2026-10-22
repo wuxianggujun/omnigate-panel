@@ -1,0 +1,30 @@
+# 本机覆盖层模板：cp docker-compose.override.example.yml docker-compose.override.yml
+#
+# compose 会自动叠加 docker-compose.override.yml。真实的覆盖层因机器而异
+# （端口、网络名、容器别名都是本机事实），所以仓库里只保留这份模板，并把真实的
+# override 加进 .gitignore。
+#
+# 下面的变量都有默认值，直接复制即可用；需要改的话写进 .env（同目录）或导出环境变量：
+#   PANEL_PORT=7863 PANEL_ALIAS=omnigate PANEL_NETWORK=1panel-network
+services:
+  omnigate-panel:
+    # 只监听回环：面板前面通常还有一层反向代理（Nginx / OpenResty / Caddy）在
+    # 负责 TLS 与鉴权。直接暴露 0.0.0.0 会让面板绕过代理裸奔在公网上。
+    #
+    # !override 是必需的：compose 默认把多份 ports 取并集，基础文件里的
+    # "7863:7863" 会一起留下，等于照样监听 0.0.0.0。这个标记让它整体替换。
+    ports: !override
+      - "127.0.0.1:${PANEL_PORT:-7863}:7863"
+    networks:
+      default:
+      # 与同机上的另一个容器互通时用（典型场景：new-api 作为前置网关，把渠道
+      # base_url 指到 http://<alias>:7863）。别名必须稳定，否则对方一重启就找不到。
+      # 没有这个需求时整段删掉即可。
+      panel-net:
+        aliases:
+          - ${PANEL_ALIAS:-omnigate}
+networks:
+  panel-net:
+    external: true
+    # 对方容器所在的 docker 网络名，用 `docker network ls` 查。
+    name: ${PANEL_NETWORK:-1panel-network}

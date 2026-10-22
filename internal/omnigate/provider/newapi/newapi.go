@@ -30,8 +30,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/egress"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/openai"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/provider"
+	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/provider/geminiweb/fingerprint"
+	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/wire"
 	"github.com/wuxianggujun/omnigate-panel/internal/outbound"
 )
 
@@ -51,7 +54,7 @@ const refreshLead = 5 * time.Minute
 // UpstreamError carries an HTTP/upstream failure so the gateway can tell an auth
 // failure (401) from a generic error.
 type UpstreamError struct {
-	Status  int
+	Status int
 	// Code 是上游 envelope 里的业务错误码（如 AUTH_REFRESH_RACE / AUTH_SESSION_MISMATCH），
 	// 用于区分「并发刷新」这类可重试错误。
 	Code    string
@@ -84,13 +87,24 @@ func Unauthorized(err error) bool {
 type Client struct {
 	baseURL string
 	http    *http.Client
+	eps     Endpoints
+	egress  egress.Profile
 }
 
 // NewClient builds a client. baseURL is the relay origin, e.g.
 // https://api.justwoker.icu (no trailing /v1).
 func NewClient(baseURL string) *Client {
-	return &Client{
+	return NewClientWithOptions(baseURL, Endpoints{}, egress.Profile{})
+}
+
+// NewClientWithOptions builds a client with an explicit endpoint surface and
+// outbound identity. Zero values keep the legacy behaviour exactly (default
+// paths, browser identity), so every existing config is unaffected.
+func NewClientWithOptions(baseURL string, eps Endpoints, prof egress.Profile) *Client {
+	c := &Client{
 		baseURL: strings.TrimRight(strings.TrimSpace(baseURL), "/"),
+		eps:     eps.Normalized(),
+		egress:  prof.Normalized(),
 		http: &http.Client{
 			Transport: &http.Transport{
 				DialContext:           (&net.Dialer{Timeout: 20 * time.Second}).DialContext,
@@ -99,7 +113,33 @@ func NewClient(baseURL string) *Client {
 			},
 		},
 	}
+	c.applyTLS()
+	return c
 }
+
+// applyTLS installs the utls ClientHello the identity profile asks for. A CLI
+// preset does this because the real Claude Code / Codex clients ship a non-Go TLS
+// stack; presenting Go's ClientHello while claiming to be them is exactly the
+// mismatch this layer exists to remove. No-op when no profile asks for it.
+func (c *Client) applyTLS() {
+	tr, ok := c.http.Transport.(*http.Transport)
+	if !ok {
+		return
+	}
+	target := c.egress.ResolveWith(egress.PresetBrowser).TLSProfile
+	imp := fingerprint.NewTLSImpersonator(target)
+	if target == "" || !imp.Enabled() {
+		tr.DialTLSContext = nil
+		tr.CloseIdleConnections()
+		return
+	}
+	imp.Apply(tr, &net.Dialer{Timeout: 20 * time.Second})
+	tr.ForceAttemptHTTP2 = true
+	tr.CloseIdleConnections()
+}
+
+// Endpoints returns the resolved endpoint surface.
+func (c *Client) Endpoints() Endpoints { return c.eps }
 
 // BaseURL returns the relay origin.
 func (c *Client) BaseURL() string { return c.baseURL }
@@ -132,23 +172,29 @@ func (c *Client) SetProxySelector(sel outbound.Selector) {
 // relay's console would carry: browsers attach Origin to every non-GET/HEAD
 // request, but Content-Type only when there is a body. hasBody marks the latter;
 // accept overrides the default Accept header when non-empty.
+//
+// The identity itself comes from egress: with no configured profile this resolves
+// to PresetBrowser, which is byte-for-byte what this client sent before. When the
+// operator picks a CLI preset (claude-code / codex), the browser-only Referer and
+// Origin are omitted — a CLI never sends them, so keeping them would make the
+// impersonation internally inconsistent.
 func (c *Client) setBrowserHeaders(req *http.Request, hasBody bool, accept string) {
 	if req == nil {
 		return
 	}
-	req.Header.Set("User-Agent", browserUA)
-	if accept == "" {
-		accept = "application/json, text/plain, */*"
+	prof := egress.Profile{}
+	if c != nil {
+		prof = c.egress
 	}
-	req.Header.Set("Accept", accept)
-	req.Header.Set("Accept-Language", acceptLanguage)
-	req.Header.Set("Sec-Fetch-Site", "same-origin")
-	req.Header.Set("Sec-Fetch-Mode", "cors")
-	req.Header.Set("Sec-Fetch-Dest", "empty")
+	resolved := prof.ResolveWith(egress.PresetBrowser)
+	resolved.Apply(req)
+	if accept != "" {
+		req.Header.Set("Accept", accept)
+	}
 	if hasBody {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	if c != nil && c.baseURL != "" {
+	if c != nil && c.baseURL != "" && resolved.Preset == egress.PresetBrowser {
 		req.Header.Set("Referer", c.baseURL+"/")
 		if req.Method != http.MethodGet && req.Method != http.MethodHead {
 			req.Header.Set("Origin", c.baseURL)
@@ -170,6 +216,35 @@ type envelope struct {
 // (empty = omit). A non-2xx status or success=false becomes an *UpstreamError so
 // callers see the real message.
 func (c *Client) doJSON(ctx context.Context, method, endpoint, authHeader, sidHeader, cookie string, body any) (json.RawMessage, error) {
+	return c.doUserJSON(ctx, method, endpoint, Auth{Token: authHeader, SessionSID: sidHeader, Cookie: cookie}, body)
+}
+
+// Auth carries every credential shape a New API relay's user API accepts.
+//
+// The adapter originally assumed one shape (a rotating bearer access token).
+// AnyRouter and AgentRouter instead authenticate the user API with the browser
+// session cookie plus a numeric identity header, and have no access token at all
+// — so the shape has to be a parameter, not an assumption.
+type Auth struct {
+	// Token is the access token value (without "Bearer ") when known.
+	Token string
+	// SessionSID is sent as X-Auth-Session during rotation.
+	SessionSID string
+	// Cookie is the raw Cookie header value (session=…).
+	Cookie string
+	// UserID is the numeric user id, sent via Endpoints.UserHeader.
+	UserID string
+}
+
+// doUserJSON performs one user-API request using a fully specified credential
+// set. Authentication follows the configured AuthMode:
+//   - bearer: Authorization: Bearer <token>
+//   - cookie: Cookie: <cookie> (and no Authorization header at all)
+//
+// Endpoints.UserHeader is stamped whenever UserID is known, in either mode: the
+// header is what New API deployments use to pick the account, independent of how
+// the request was authenticated.
+func (c *Client) doUserJSON(ctx context.Context, method, endpoint string, auth Auth, body any) (json.RawMessage, error) {
 	var reader io.Reader
 	if body != nil {
 		raw, err := json.Marshal(body)
@@ -183,14 +258,29 @@ func (c *Client) doJSON(ctx context.Context, method, endpoint, authHeader, sidHe
 		return nil, err
 	}
 	c.setBrowserHeaders(req, body != nil, "application/json")
-	if authHeader != "" {
-		req.Header.Set("Authorization", authHeader)
+	switch c.eps.AuthMode {
+	case AuthCookie:
+		if auth.Cookie != "" {
+			req.Header.Set("Cookie", auth.Cookie)
+		} else if auth.SessionSID != "" {
+			// A captured session id is usually the same value as the cookie's
+			// "session=" payload; fall back to it so cookie-auth sites work from
+			// a session-only capture.
+			req.Header.Set("Cookie", "session="+auth.SessionSID)
+		}
+	default:
+		if a := bearer(auth.Token); a != "" {
+			req.Header.Set("Authorization", a)
+		}
+		if auth.SessionSID != "" {
+			req.Header.Set("X-Auth-Session", auth.SessionSID)
+		}
+		if auth.Cookie != "" {
+			req.Header.Set("Cookie", auth.Cookie)
+		}
 	}
-	if sidHeader != "" {
-		req.Header.Set("X-Auth-Session", sidHeader)
-	}
-	if cookie != "" {
-		req.Header.Set("Cookie", cookie)
+	if c.eps.UserHeader != "" && auth.UserID != "" {
+		req.Header.Set(c.eps.UserHeader, auth.UserID)
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -232,11 +322,11 @@ type Bundle struct {
 // parseBundle decodes {access_token, token_type, access_expires_at, session, user}.
 func parseBundle(data json.RawMessage) (*Bundle, error) {
 	var m struct {
-		AccessToken     string          `json:"access_token"`
-		TokenType       string          `json:"token_type"`
-		AccessExpiresAt json.Number     `json:"access_expires_at"`
-		Session         map[string]any  `json:"session"`
-		User            map[string]any  `json:"user"`
+		AccessToken     string         `json:"access_token"`
+		TokenType       string         `json:"token_type"`
+		AccessExpiresAt json.Number    `json:"access_expires_at"`
+		Session         map[string]any `json:"session"`
+		User            map[string]any `json:"user"`
 	}
 	if err := json.Unmarshal(data, &m); err != nil {
 		return nil, fmt.Errorf("解析鉴权响应失败: %w", err)
@@ -269,8 +359,18 @@ func parseBundle(data json.RawMessage) (*Bundle, error) {
 // session.sid 是**稳定**的（刷新只换 access_token，sid 不变；上游还会校验返回的
 // sid 必须与请求一致），所以浏览器标签页与面板可以共用同一个 sid。唯一要处理的是
 // 并发刷新：上游对同 session 的并发刷新回 409 AUTH_REFRESH_RACE，稍后重试即可。
-func (c *Client) Refresh(ctx context.Context, sid, cookie string) (*Bundle, error) {
+//
+// Cookie-auth relays (AnyRouter/AgentRouter) have no refresh endpoint: they keep
+// the browser session alive as long as it is used, so Refresh reports a clear
+// "not supported" instead of pretending to succeed.
+func (c *Client) Refresh(ctx context.Context, sid, cookie, userID string) (*Bundle, error) {
 	sid = strings.TrimSpace(sid)
+	if c.eps.UsesCookieAuth() {
+		if strings.TrimSpace(cookie) == "" && sid == "" {
+			return nil, &UpstreamError{Status: 401, Message: "缺少浏览器会话 Cookie，请重新登录"}
+		}
+		return nil, &UpstreamError{Status: 501, Message: "该站点用浏览器 Cookie 鉴权，没有可轮换的 access_token"}
+	}
 	if sid == "" && strings.TrimSpace(cookie) == "" {
 		return nil, &UpstreamError{Status: 401, Message: "缺少 session（X-Auth-Session），请重新登录"}
 	}
@@ -283,7 +383,8 @@ func (c *Client) Refresh(ctx context.Context, sid, cookie string) (*Bundle, erro
 			case <-time.After(time.Duration(attempt) * 400 * time.Millisecond):
 			}
 		}
-		data, err := c.doJSON(ctx, http.MethodPost, c.baseURL+"/api/user/auth/refresh", "", sid, cookie, nil)
+		data, err := c.doUserJSON(ctx, http.MethodPost, c.baseURL+c.eps.RefreshPath,
+			Auth{SessionSID: sid, Cookie: cookie, UserID: userID}, nil)
 		if err == nil {
 			return parseBundle(data)
 		}
@@ -307,15 +408,31 @@ type SelfResult struct {
 	Group       string `json:"group,omitempty"`
 }
 
+// AuthFor builds the user-API credential set for an account. It understands both
+// credential shapes: a bearer access token (Cookie field for this adapter's
+// historical layout) and a browser session cookie (SessionCookie).
+func AuthFor(acc *provider.Account) Auth {
+	if acc == nil {
+		return Auth{}
+	}
+	a := Auth{
+		Token:      stripBearer(acc.Cookie),
+		SessionSID: stripBearer(acc.RefreshToken),
+		Cookie:     strings.TrimSpace(acc.SessionCookie),
+		UserID:     strings.TrimSpace(acc.UID),
+	}
+	return a
+}
+
 // Self fetches the account's own profile + quota.
-func (c *Client) Self(ctx context.Context, accessToken string) (*SelfResult, error) {
-	data, err := c.doJSON(ctx, http.MethodGet, c.baseURL+"/api/user/self", bearer(accessToken), "", "", nil)
+func (c *Client) Self(ctx context.Context, acc *provider.Account) (*SelfResult, error) {
+	data, err := c.doUserJSON(ctx, http.MethodGet, c.baseURL+c.eps.SelfPath, AuthFor(acc), nil)
 	if err != nil {
 		return nil, err
 	}
 	var m map[string]any
 	if err := json.Unmarshal(data, &m); err != nil {
-		return nil, fmt.Errorf("解析 /api/user/self 失败: %w", err)
+		return nil, fmt.Errorf("解析 %s 失败: %w", c.eps.SelfPath, err)
 	}
 	out := &SelfResult{
 		Username:    asText(m, "username"),
@@ -346,9 +463,9 @@ type CheckinResult struct {
 	AlreadyClaimed bool `json:"already_claimed"`
 }
 
-// Checkin performs the daily check-in (POST /api/user/checkin).
-func (c *Client) Checkin(ctx context.Context, accessToken string) (*CheckinResult, error) {
-	data, err := c.doJSON(ctx, http.MethodPost, c.baseURL+"/api/user/checkin", bearer(accessToken), "", "", nil)
+// Checkin performs the daily check-in (POST Endpoints.CheckinPath).
+func (c *Client) Checkin(ctx context.Context, acc *provider.Account) (*CheckinResult, error) {
+	data, err := c.doUserJSON(ctx, http.MethodPost, c.baseURL+c.eps.CheckinPath, AuthFor(acc), nil)
 	if err != nil {
 		msg := err.Error()
 		if isAlreadyClaimed(msg) {
@@ -390,7 +507,7 @@ func isAlreadyClaimed(msg string) bool {
 
 // FetchModels lists the relay's models for a chat API key.
 func (c *Client) FetchModels(ctx context.Context, apiKey string) ([]openai.Model, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/models", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+c.eps.ModelsPath, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -432,15 +549,43 @@ type Provider struct {
 	name   string
 	client *Client
 	models []string
+	format wire.Format
 }
 
 // 编译期保证：模型目录要带账号（用其 API Key）才能拿到，实现可选能力。
 var _ provider.AccountModelLister = (*Provider)(nil)
 
+// Options configures a New API relay provider.
+type Options struct {
+	Name    string
+	BaseURL string
+	Models  []string
+	// Endpoints overrides the relay's user-API surface. Zero = the legacy
+	// defaults (api.justwoker.icu). AnyRouter/AgentRouter set sign_in paths,
+	// New-Api-User and cookie auth here.
+	Endpoints Endpoints
+	// Client is the outbound identity (browser by default for this type).
+	Client egress.Profile
+	// Protocol is the upstream chat dialect: openai (default), anthropic or
+	// responses. AnyRouter/AgentRouter only accept /v1/messages.
+	Protocol string
+}
+
 // NewProvider builds a New API provider. baseURL is the relay origin; models is
 // the fallback catalog used when no API key is available.
 func NewProvider(name, baseURL string, models []string) *Provider {
-	return &Provider{name: name, client: NewClient(baseURL), models: models}
+	return NewProviderWithOptions(Options{Name: name, BaseURL: baseURL, Models: models})
+}
+
+// NewProviderWithOptions builds a provider with an explicit endpoint surface and
+// outbound identity.
+func NewProviderWithOptions(o Options) *Provider {
+	return &Provider{
+		name:   o.Name,
+		client: NewClientWithOptions(o.BaseURL, o.Endpoints, o.Client),
+		models: o.Models,
+		format: wire.ParseFormat(o.Protocol),
+	}
 }
 
 // Name returns the provider name.
@@ -492,12 +637,69 @@ func (p *Provider) fallback() []openai.Model {
 	return out
 }
 
-// StreamChat posts an OpenAI-compatible chat completion using the account's API
-// key and streams it back.
+// StreamChat posts a chat completion using the account's API key and streams it
+// back. The dialect follows the configured protocol: relays that only accept
+// Claude Code traffic (AnyRouter) are spoken to in /v1/messages, everything else
+// stays on /v1/chat/completions.
 func (p *Provider) StreamChat(ctx context.Context, acc *provider.Account, in provider.ChatInput) (provider.Stream, error) {
 	if acc == nil || strings.TrimSpace(acc.APIKey) == "" {
 		return nil, &UpstreamError{Status: 401, Message: "该账号未配置 API Key（sk-），无法聊天"}
 	}
+	format := p.format
+	var (
+		raw  []byte
+		err  error
+		path = p.client.eps.ChatPath
+	)
+	switch format {
+	case wire.FormatAnthropic:
+		raw, err = wire.EncodeAnthropic(in)
+		path = "/v1/messages"
+	case wire.FormatResponses:
+		raw, err = wire.EncodeResponses(in)
+		path = "/v1/responses"
+	default:
+		format = wire.FormatOpenAI
+		raw, err = p.encodeOpenAI(in)
+	}
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.client.baseURL+path, bytes.NewReader(raw))
+	if err != nil {
+		return nil, err
+	}
+	if format == wire.FormatAnthropic {
+		// /v1/messages authenticates with x-api-key, and stays with the identity
+		// the operator configured (Claude Code, normally).
+		p.client.setBrowserHeaders(req, true, "text/event-stream")
+		req.Header.Set("x-api-key", stripBearer(acc.APIKey))
+		req.Header.Del("Authorization")
+	} else {
+		p.client.setBrowserHeaders(req, true, "text/event-stream")
+		req.Header.Set("Authorization", "Bearer "+stripBearer(acc.APIKey))
+	}
+	resp, err := p.client.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode >= 400 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		resp.Body.Close()
+		return nil, &UpstreamError{Status: resp.StatusCode, Message: strings.TrimSpace(string(b))}
+	}
+	switch format {
+	case wire.FormatAnthropic:
+		return wire.NewAnthropicStream(resp.Body), nil
+	case wire.FormatResponses:
+		return wire.NewResponsesStream(resp.Body), nil
+	default:
+		return provider.NewOpenAIStream(resp.Body), nil
+	}
+}
+
+// encodeOpenAI builds the standard chat/completions body.
+func (p *Provider) encodeOpenAI(in provider.ChatInput) ([]byte, error) {
 	body := map[string]any{
 		"model":    in.Model,
 		"messages": in.Messages,
@@ -510,31 +712,27 @@ func (p *Provider) StreamChat(ctx context.Context, acc *provider.Account, in pro
 		body["reasoning_effort"] = in.ReasoningEffort
 	}
 	provider.ApplySampling(body, in)
-	raw, _ := json.Marshal(body)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.client.baseURL+"/v1/chat/completions", bytes.NewReader(raw))
-	if err != nil {
-		return nil, err
-	}
-	p.client.setBrowserHeaders(req, true, "text/event-stream")
-	req.Header.Set("Authorization", "Bearer "+stripBearer(acc.APIKey))
-	resp, err := p.client.http.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode >= 400 {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		resp.Body.Close()
-		return nil, &UpstreamError{Status: resp.StatusCode, Message: strings.TrimSpace(string(b))}
-	}
-	return provider.NewOpenAIStream(resp.Body), nil
+	return json.Marshal(body)
 }
 
-// TokenExpired reports whether acc's access token is missing or about to expire.
-// When the expiry is unknown we optimistically say "valid" and rely on the
-// reactive refresh in the gateway (Unauthorized → RefreshAccount → retry).
+// SetProtocol switches the upstream dialect (hot reload).
+func (p *Provider) SetProtocol(protocol string) {
+	p.format = wire.ParseFormat(protocol)
+}
+
+// Protocol returns the upstream dialect name.
+func (p *Provider) Protocol() string { return string(p.format) }
+
+// TokenExpired reports whether acc's user-API credentials are missing or about to
+// expire. Cookie-auth relays (AnyRouter/AgentRouter) have no access token at all,
+// so a session cookie is a valid, non-expiring credential from our point of view.
 func (p *Provider) TokenExpired(acc *provider.Account) bool {
-	if acc == nil || strings.TrimSpace(acc.Cookie) == "" {
+	if acc == nil {
 		return true
+	}
+	if strings.TrimSpace(acc.Cookie) == "" {
+		// Cookie-mode accounts: the session cookie is the credential.
+		return strings.TrimSpace(acc.SessionCookie) == ""
 	}
 	if acc.ExpiresAt > 0 {
 		return time.Now().Add(refreshLead).Unix() >= acc.ExpiresAt
@@ -547,14 +745,25 @@ func (p *Provider) TokenExpired(acc *provider.Account) bool {
 
 // RefreshAccount rotates the access token from the stored session id and updates
 // acc in place (access token, session id, expiry).
+//
+// Cookie-auth relays (AnyRouter / AgentRouter) have no access token to rotate:
+// the browser session cookie *is* the credential, and refreshing it is the
+// browser's job. Rotating there would either 404 or, worse, invalidate the
+// session the user is still using — so it is a successful no-op.
 func (p *Provider) RefreshAccount(ctx context.Context, acc *provider.Account) error {
 	if acc == nil {
 		return fmt.Errorf("账号为空")
 	}
+	if p.client.eps.UsesCookieAuth() && strings.TrimSpace(acc.Cookie) == "" {
+		if strings.TrimSpace(acc.SessionCookie) == "" {
+			return fmt.Errorf("账号「%s」缺少会话 Cookie，请重新登录", acc.Label)
+		}
+		return nil
+	}
 	if strings.TrimSpace(acc.RefreshToken) == "" && strings.TrimSpace(acc.SessionCookie) == "" {
 		return fmt.Errorf("账号「%s」缺少 session，请重新登录", acc.Label)
 	}
-	b, err := p.client.Refresh(ctx, acc.RefreshToken, acc.SessionCookie)
+	b, err := p.client.Refresh(ctx, acc.RefreshToken, acc.SessionCookie, acc.UID)
 	if err != nil {
 		return err
 	}

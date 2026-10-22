@@ -199,3 +199,73 @@ func TestRefreshModelsUnknownProvider(t *testing.T) {
 		t.Fatalf("未知供应商应报 unknown provider，得到 %v", err)
 	}
 }
+
+// TestSpecOfThreadsIdentityAndEndpoints 锁住「配置 → ProviderSpec」这一唯一映射
+// 点：出站身份、协议方言与 New API 用户接口表面都必须原样传下去，否则面板填了
+// 却运行时没生效——这类问题最难查，因为它看起来配置完全正常。
+func TestSpecOfThreadsIdentityAndEndpoints(t *testing.T) {
+	p := &config.ProviderConfig{
+		Name:             "anyrouter",
+		Type:             "newapi",
+		BaseURL:          "https://anyrouter.top",
+		ClientPreset:     "claude-code",
+		ClientUserAgent:  "claude-cli/9.9.9 (external, cli)",
+		ClientHeaders:    map[string]string{"anthropic-beta": "x"},
+		ClientTLSProfile: "chrome120",
+		Protocol:         "anthropic",
+		CheckinPath:      "/api/user/sign_in",
+		SelfPath:         "/api/user/self",
+		RefreshPath:      "/api/user/auth/refresh",
+		UserHeader:       "New-Api-User",
+		AuthMode:         "cookie",
+		SigninPath:       "/login",
+		ModelsPath:       "/v1/models",
+		ChatPath:         "/v1/chat/completions",
+	}
+	spec := specOf(p)
+	if spec.Protocol != "anthropic" {
+		t.Errorf("Protocol=%q", spec.Protocol)
+	}
+	if spec.Client.Preset != "claude-code" || spec.Client.UserAgent != "claude-cli/9.9.9 (external, cli)" {
+		t.Errorf("Client=%+v", spec.Client)
+	}
+	if spec.Client.Headers["Anthropic-Beta"] != "x" || spec.Client.TLSProfile != "chrome120" {
+		t.Errorf("Client 覆盖项丢失: %+v", spec.Client)
+	}
+	if !spec.Endpoints.UsesCookieAuth() {
+		t.Errorf("Endpoints.AuthMode=%q", spec.Endpoints.AuthMode)
+	}
+	if spec.Endpoints.CheckinPath != "/api/user/sign_in" || spec.Endpoints.UserHeader != "New-Api-User" {
+		t.Errorf("Endpoints=%+v", spec.Endpoints)
+	}
+	if spec.Endpoints.SigninPath != "/login" {
+		t.Errorf("SigninPath=%q", spec.Endpoints.SigninPath)
+	}
+}
+
+// TestProbeProviderCarriesIdentity 探测必须与保存后运行时走同一条构造路径：
+// 自定义出站身份在探测阶段也要生效，否则会出现「探测通过、保存后被拒」。
+func TestProbeProviderCarriesIdentity(t *testing.T) {
+	catalog.Register()
+	var gotUA, gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotUA = r.Header.Get("User-Agent")
+		gotPath = r.URL.Path
+		_, _ = w.Write([]byte(`{"object":"list","data":[]}`))
+	}))
+	defer srv.Close()
+
+	g := &Gateway{cfg: &config.Config{DataDir: t.TempDir()}, log: logx.New(10)}
+	if _, err := g.ProbeProvider(context.Background(), config.ProviderConfig{
+		Name: "probe-identity", Type: "openai", BaseURL: srv.URL,
+		ClientPreset: "claude-code",
+	}); err != nil {
+		t.Fatalf("ProbeProvider: %v", err)
+	}
+	if !strings.HasPrefix(gotUA, "claude-cli/") {
+		t.Errorf("探测的出站 UA=%q，身份没有生效", gotUA)
+	}
+	if gotPath != "/models" {
+		t.Errorf("path=%q", gotPath)
+	}
+}

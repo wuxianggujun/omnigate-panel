@@ -45,6 +45,10 @@ type NewAPICapturePayload struct {
 	SessionCookie string `json:"cookie"`
 	Username      string `json:"username"`
 	UserID        string `json:"user_id"`
+	// APIKey is the relay's sk- chat key. The snippet cannot read it (it lives in
+	// a separate "令牌" page), so it is normally passed by the panel instead;
+	// accepting it here lets a manual paste add it in the same step.
+	APIKey string `json:"api_key"`
 }
 
 // newapiProvider resolves a provider name to a *newapi.Provider.
@@ -84,12 +88,18 @@ func (g *Gateway) NewAPIAuthorize(providerName, label, apiKey string) (map[strin
 	}
 	g.newapiPendMu.Unlock()
 
-	signin := strings.TrimRight(np.Client().BaseURL(), "/") + "/sign-in"
+	signin := strings.TrimRight(np.Client().BaseURL(), "/") + np.Client().Endpoints().SigninPath
+	authMode := "bearer"
+	if np.Client().Endpoints().UsesCookieAuth() {
+		authMode = "cookie"
+	}
 	return map[string]string{
 		"provider":   providerName,
 		"label":      label,
 		"state":      stateID,
 		"signin_url": signin,
+		"auth_mode":  authMode,
+		"self_path":  np.Client().Endpoints().SelfPath,
 	}, nil
 }
 
@@ -122,14 +132,31 @@ func (g *Gateway) NewAPICapture(ctx context.Context, stateID string, p NewAPICap
 		return nil, err
 	}
 	access := strings.TrimSpace(p.AccessToken)
-	if access == "" {
+	sid := strings.TrimSpace(p.SessionSID)
+	cookie := strings.TrimSpace(p.SessionCookie)
+	if access == "" && cookie == "" && sid == "" {
+		return nil, fmt.Errorf("抓取包是空的：需要在站点登录后回传 access_token 或会话 Cookie")
+	}
+	// Cookie 型站点（AnyRouter / AgentRouter）只有浏览器会话，没有可轮换的
+	// access_token；此时会话 Cookie 就是用户接口凭据，签到/查额度都用它。
+	cookieAuth := np.Client().Endpoints().UsesCookieAuth()
+	if access == "" && !cookieAuth {
 		return nil, fmt.Errorf("上游未返回 access_token，请确认已在浏览器登录")
+	}
+	if access == "" && cookie == "" {
+		return nil, fmt.Errorf("该站点用会话 Cookie 鉴权，但抓取包里没有 Cookie")
 	}
 	// 尽力补全昵称 / 用户 ID：失败不影响抓取本身。
 	name, userID := strings.TrimSpace(p.Username), strings.TrimSpace(p.UserID)
 	if name == "" || userID == "" {
 		sctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-		if self, serr := np.Client().Self(sctx, access); serr == nil {
+		tmp := &provider.Account{
+			Cookie:        access,
+			RefreshToken:  sid,
+			SessionCookie: cookie,
+			UID:           userID,
+		}
+		if self, serr := np.Client().Self(sctx, tmp); serr == nil {
 			if name == "" {
 				name = self.DisplayName
 			}
@@ -144,8 +171,12 @@ func (g *Gateway) NewAPICapture(ctx context.Context, stateID string, p NewAPICap
 	if pend.autoLabel || label == "" {
 		label = g.newAPIAutoLabel(pend.provider, name, userID)
 	}
-	return g.upsertNewAPIAccount(pend.provider, label, access, strings.TrimSpace(p.SessionSID),
-		strings.TrimSpace(p.SessionCookie), p.ExpiresAt, name, userID, pend.apiKey), nil
+	apiKey := pend.apiKey
+	if apiKey == "" {
+		apiKey = strings.TrimSpace(p.APIKey)
+	}
+	return g.upsertNewAPIAccount(pend.provider, label, access, sid,
+		cookie, p.ExpiresAt, name, userID, apiKey), nil
 }
 
 // newAPIAutoLabel 在用户没填账号名时，用站点身份生成一个：优先用户名（站点内唯一），
@@ -265,6 +296,11 @@ func (g *Gateway) upsertNewAPIAccount(providerName, label, access, sid, cookie s
 			a.RefreshToken = sid
 			a.SessionCookie = cookie
 			a.ExpiresAt = expiresAt
+			// UID 是 Cookie 型站点（AnyRouter / AgentRouter）的身份头
+			// New-Api-User 的来源；不写进运行时账号，签到与查额度都会 401。
+			if userID != "" {
+				a.UID = userID
+			}
 			if apiKey != "" {
 				a.APIKey = apiKey
 			}
@@ -279,6 +315,7 @@ func (g *Gateway) upsertNewAPIAccount(providerName, label, access, sid, cookie s
 			RefreshToken:  sid,
 			SessionCookie: cookie,
 			ExpiresAt:     expiresAt,
+			UID:           userID,
 			APIKey:        apiKey,
 		})
 	}
@@ -387,9 +424,13 @@ func (g *Gateway) NewAPIAccounts(ctx context.Context, providerName string, withB
 		if withBalance {
 			g.ensureNewAPIToken(ctx, providerName, np, acc)
 		}
+		// has_token 表达的是「用户接口有没有可用凭据」，不是「有没有 access_token」：
+		// Cookie 型站点（AnyRouter / AgentRouter）根本没有 token，只看 Cookie 会让
+		// 面板把一个可用账号标成「未配置凭证」。
+		hasUserCred := acc.Cookie != "" || acc.SessionCookie != ""
 		item := map[string]any{
 			"label":       acc.Label,
-			"has_token":   acc.Cookie != "",
+			"has_token":   hasUserCred,
 			"has_api_key": strings.TrimSpace(acc.APIKey) != "",
 		}
 		if acc.ExpiresAt > 0 {
@@ -398,11 +439,15 @@ func (g *Gateway) NewAPIAccounts(ctx context.Context, providerName string, withB
 		authInvalid := np.TokenExpired(acc)
 		if authInvalid {
 			item["auth_invalid"] = true
-			item["auth_error"] = "access_token 已失效且自动刷新失败，请重新登录该账号"
+			if np.Client().Endpoints().UsesCookieAuth() {
+				item["auth_error"] = "会话 Cookie 缺失或已失效，请重新登录该账号"
+			} else {
+				item["auth_error"] = "access_token 已失效且自动刷新失败，请重新登录该账号"
+			}
 		}
-		if withBalance && acc.Cookie != "" && !authInvalid {
+		if withBalance && hasUserCred && !authInvalid {
 			bctx, cancel := context.WithTimeout(ctx, 20*time.Second)
-			self, serr := np.Client().Self(bctx, acc.Cookie)
+			self, serr := np.Client().Self(bctx, acc)
 			cancel()
 			if serr != nil {
 				item["balance_error"] = serr.Error()
@@ -435,12 +480,12 @@ func (g *Gateway) NewAPICheckin(ctx context.Context, providerName, label string)
 		}
 		matched = true
 		g.ensureNewAPIToken(ctx, providerName, np, acc)
-		if acc.Cookie == "" {
-			out = append(out, RaccoonCheckinOutcome{Label: acc.Label, Error: "没有可用 access_token，请先登录"})
+		if acc.Cookie == "" && acc.SessionCookie == "" {
+			out = append(out, RaccoonCheckinOutcome{Label: acc.Label, Error: "没有可用凭据（access_token 或会话 Cookie），请先登录"})
 			continue
 		}
 		cctx, cancel := context.WithTimeout(ctx, 60*time.Second)
-		res, cerr := np.Client().Checkin(cctx, acc.Cookie)
+		res, cerr := np.Client().Checkin(cctx, acc)
 		cancel()
 		if cerr != nil {
 			out = append(out, RaccoonCheckinOutcome{Label: acc.Label, Error: cerr.Error()})

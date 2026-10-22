@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/egress"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/provider"
 )
 
@@ -46,7 +47,7 @@ func TestCheckinAlreadyClaimedIsNeutral(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	res, err := NewClient(srv.URL).Checkin(context.Background(), "tok")
+	res, err := NewClient(srv.URL).Checkin(context.Background(), &provider.Account{Cookie: "tok"})
 	if err != nil {
 		t.Fatalf("已签到不该返回 error：%v", err)
 	}
@@ -64,7 +65,7 @@ func TestRefreshSendsSessionHeader(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	b, err := NewClient(srv.URL).Refresh(context.Background(), "sid1", "")
+	b, err := NewClient(srv.URL).Refresh(context.Background(), "sid1", "", "")
 	if err != nil {
 		t.Fatalf("refresh: %v", err)
 	}
@@ -77,7 +78,7 @@ func TestRefreshSendsSessionHeader(t *testing.T) {
 }
 
 func TestRefreshRequiresSession(t *testing.T) {
-	if _, err := NewClient("http://127.0.0.1:1").Refresh(context.Background(), "", ""); err == nil {
+	if _, err := NewClient("http://127.0.0.1:1").Refresh(context.Background(), "", "", ""); err == nil {
 		t.Fatal("缺少 session 应报错")
 	}
 }
@@ -92,7 +93,7 @@ func TestSelfParsesQuota(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	s, err := NewClient(srv.URL).Self(context.Background(), "tok")
+	s, err := NewClient(srv.URL).Self(context.Background(), &provider.Account{Cookie: "tok"})
 	if err != nil {
 		t.Fatalf("self: %v", err)
 	}
@@ -136,13 +137,13 @@ func TestBrowserHeaders(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(srv.URL)
-	if _, err := c.Self(context.Background(), "tok"); err != nil {
+	if _, err := c.Self(context.Background(), &provider.Account{Cookie: "tok"}); err != nil {
 		t.Fatalf("self: %v", err)
 	}
-	if got.ua != provider.BrowserUA {
+	if got.ua != egress.ChromeUA {
 		t.Errorf("User-Agent=%q", got.ua)
 	}
-	if got.al != provider.AcceptLanguage {
+	if got.al != egress.AcceptLanguage {
 		t.Errorf("Accept-Language=%q", got.al)
 	}
 	if got.site != "same-origin" || got.mode != "cors" || got.dest != "empty" {
@@ -155,7 +156,7 @@ func TestBrowserHeaders(t *testing.T) {
 		t.Errorf("GET 不该带 Origin/Content-Type，得到 %q/%q", got.origin, got.ctype)
 	}
 
-	if _, err := c.Checkin(context.Background(), "tok"); err != nil {
+	if _, err := c.Checkin(context.Background(), &provider.Account{Cookie: "tok"}); err != nil {
 		t.Fatalf("checkin: %v", err)
 	}
 	if got.origin != srv.URL {
@@ -176,5 +177,191 @@ func TestBrowserHeaders(t *testing.T) {
 	}
 	if req.Header.Get("Accept") != "text/event-stream" {
 		t.Errorf("Accept=%q", req.Header.Get("Accept"))
+	}
+}
+
+// TestAnyRouterStyleSurface 覆盖 AnyRouter/AgentRouter 形态：sign_in 路径、
+// New-Api-User 身份头、Cookie 会话鉴权（无 Authorization）。
+func TestAnyRouterStyleSurface(t *testing.T) {
+	var (
+		gotPath, gotUser, gotCookie, gotAuth string
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotUser = r.Header.Get("New-Api-User")
+		gotCookie = r.Header.Get("Cookie")
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"success":true,"data":{"stats":{"checkin_count":1}}}`))
+	}))
+	defer srv.Close()
+
+	eps := Endpoints{CheckinPath: "/api/user/sign_in", UserHeader: "New-Api-User", AuthMode: AuthCookie}
+	c := NewClientWithOptions(srv.URL, eps, egress.Profile{})
+	acc := &provider.Account{SessionCookie: "session=abc123", UID: "42"}
+	if _, err := c.Checkin(context.Background(), acc); err != nil {
+		t.Fatalf("checkin: %v", err)
+	}
+	if gotPath != "/api/user/sign_in" {
+		t.Errorf("path=%q", gotPath)
+	}
+	if gotUser != "42" {
+		t.Errorf("New-Api-User=%q", gotUser)
+	}
+	if gotCookie != "session=abc123" {
+		t.Errorf("Cookie=%q", gotCookie)
+	}
+	if gotAuth != "" {
+		t.Errorf("cookie 模式不该带 Authorization，得到 %q", gotAuth)
+	}
+}
+
+// TestClientProfileOverride 证明 provider.client 能覆盖该类型的历史默认指纹。
+func TestClientProfileOverride(t *testing.T) {
+	var gotUA, gotApp string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotUA = r.Header.Get("User-Agent")
+		gotApp = r.Header.Get("x-app")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"success":true,"data":{"id":1}}`))
+	}))
+	defer srv.Close()
+
+	c := NewClientWithOptions(srv.URL, Endpoints{}, egress.Profile{Preset: egress.PresetClaudeCode})
+	if _, err := c.Self(context.Background(), &provider.Account{Cookie: "tok"}); err != nil {
+		t.Fatalf("self: %v", err)
+	}
+	if !strings.HasPrefix(gotUA, "claude-cli/") {
+		t.Errorf("User-Agent=%q", gotUA)
+	}
+	if gotApp != "cli" {
+		t.Errorf("x-app=%q", gotApp)
+	}
+}
+
+// TestCookieAuthFallsBackToSessionSID：抓取里只拿到 session id（没有整条 Cookie）时，
+// Cookie 型站点也要能用——session=<sid> 就是站点会话 Cookie 的实际形态。
+func TestCookieAuthFallsBackToSessionSID(t *testing.T) {
+	var gotCookie, gotUser string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotCookie = r.Header.Get("Cookie")
+		gotUser = r.Header.Get("New-Api-User")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"success":true,"data":{"id":42,"username":"u"}}`))
+	}))
+	defer srv.Close()
+
+	c := NewClientWithOptions(srv.URL,
+		Endpoints{AuthMode: AuthCookie, UserHeader: "New-Api-User"}, egress.Profile{})
+	acc := &provider.Account{RefreshToken: "sid-xyz", UID: "42"}
+	if _, err := c.Self(context.Background(), acc); err != nil {
+		t.Fatalf("self: %v", err)
+	}
+	if gotCookie != "session=sid-xyz" {
+		t.Errorf("Cookie=%q", gotCookie)
+	}
+	if gotUser != "42" {
+		t.Errorf("New-Api-User=%q", gotUser)
+	}
+}
+
+// TestRefreshIsNoOpForCookieAuth：Cookie 型站点没有 token 可轮换，Refresh 必须
+// 明确拒绝，而不是发出一个注定失败的请求（也绝不能拿会话去「刷新」把用户登出）。
+func TestRefreshIsNoOpForCookieAuth(t *testing.T) {
+	called := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		called = true
+	}))
+	defer srv.Close()
+
+	c := NewClientWithOptions(srv.URL, Endpoints{AuthMode: AuthCookie}, egress.Profile{})
+	_, err := c.Refresh(context.Background(), "", "session=abc", "7")
+	if err == nil {
+		t.Fatal("cookie 型站点不该报告刷新成功")
+	}
+	if called {
+		t.Error("不该真的发请求")
+	}
+
+	p := NewProviderWithOptions(Options{Name: "ar", BaseURL: srv.URL, Endpoints: Endpoints{AuthMode: AuthCookie}})
+	acc := &provider.Account{Label: "a", SessionCookie: "session=abc"}
+	if err := p.RefreshAccount(context.Background(), acc); err != nil {
+		t.Errorf("RefreshAccount 对 cookie 账号应是成功的空操作，得到 %v", err)
+	}
+}
+
+// TestTokenExpiredAcceptsSessionCookie：Cookie 型账号没有 access_token，但只要会话
+// Cookie 在就视为有效，否则面板会把可用账号全标成「授权失效」。
+func TestTokenExpiredAcceptsSessionCookie(t *testing.T) {
+	p := NewProviderWithOptions(Options{Name: "ar", BaseURL: "http://127.0.0.1:1", Endpoints: Endpoints{AuthMode: AuthCookie}})
+	if p.TokenExpired(&provider.Account{SessionCookie: "session=abc"}) {
+		t.Error("有会话 Cookie 时不该判为过期")
+	}
+	if !p.TokenExpired(&provider.Account{}) {
+		t.Error("两种凭据都没有时应判为过期")
+	}
+}
+
+// TestAnthropicProtocolChat：newapi 适配器在 protocol=anthropic 下走 /v1/messages，
+// 用 x-api-key 鉴权，并解码 Anthropic SSE。
+func TestAnthropicProtocolChat(t *testing.T) {
+	var gotPath, gotKey, gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotKey = r.Header.Get("x-api-key")
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n" +
+			"data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"你好\"}}\n\n" +
+			"data: {\"type\":\"message_stop\"}\n\n"))
+	}))
+	defer srv.Close()
+
+	p := NewProviderWithOptions(Options{
+		Name: "ar", BaseURL: srv.URL, Protocol: "anthropic",
+		Client: egress.Profile{Preset: egress.PresetClaudeCode},
+	})
+	s, err := p.StreamChat(context.Background(), &provider.Account{APIKey: "sk-chat"}, provider.ChatInput{Model: "claude-sonnet-4"})
+	if err != nil {
+		t.Fatalf("StreamChat: %v", err)
+	}
+	defer s.Close()
+	if gotPath != "/v1/messages" {
+		t.Errorf("path=%q", gotPath)
+	}
+	if gotKey != "sk-chat" {
+		t.Errorf("x-api-key=%q", gotKey)
+	}
+	if gotAuth != "" {
+		t.Errorf("Anthropic 方言不该带 Authorization，得到 %q", gotAuth)
+	}
+	var text string
+	for {
+		e, err := s.Recv()
+		if err != nil {
+			break
+		}
+		if e.Text != "" {
+			text += e.Text
+		}
+	}
+	if text != "你好" {
+		t.Errorf("解码出的正文=%q", text)
+	}
+	if p.Protocol() != "anthropic" {
+		t.Errorf("Protocol()=%q", p.Protocol())
+	}
+}
+
+// TestMissingAPIKeyIsClearError：只建了会话、还没补 sk- 密钥的账号，报错必须说清
+// 缺的是什么，而不是一个泛泛的上游错误。
+func TestMissingAPIKeyIsClearError(t *testing.T) {
+	p := NewProviderWithOptions(Options{Name: "ar", BaseURL: "http://127.0.0.1:1"})
+	_, err := p.StreamChat(context.Background(), &provider.Account{SessionCookie: "session=abc"}, provider.ChatInput{})
+	if err == nil {
+		t.Fatal("没有 sk- 密钥时应报错")
+	}
+	if !strings.Contains(err.Error(), "API Key") {
+		t.Errorf("错误信息应点明缺 API Key，得到 %q", err.Error())
 	}
 }

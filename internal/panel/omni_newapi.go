@@ -77,13 +77,16 @@ func (p *Panel) omniNewAPIAuthorize(w http.ResponseWriter, r *http.Request) {
 	if who == "" {
 		who = "（自动命名）"
 	}
-	log.Printf("panel: New API 浏览器登录发起 %s/%s", req.Provider, who)
+	authMode, _ := m["auth_mode"].(string)
+	selfPath, _ := m["self_path"].(string)
+	log.Printf("panel: New API 浏览器登录发起 %s/%s (auth=%s)", req.Provider, who, authMode)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":         true,
 		"state":      stateID,
 		"signin_url": signin,
 		"label":      req.Label,
-		"snippet":    newAPICaptureSnippet(panelPublicBase(r), stateID),
+		"auth_mode":  authMode,
+		"snippet":    newAPICaptureSnippet(panelPublicBase(r), stateID, selfPath, authMode == "cookie"),
 	})
 }
 
@@ -295,17 +298,24 @@ func panelPublicBase(r *http.Request) string {
 	return util.PublicBase(r)
 }
 
-// newAPICaptureSnippet 生成让用户在 New API 站点控制台粘贴的抓取脚本。
+// newAPICaptureSnippet 生成让用户在站点控制台粘贴的抓取脚本。
 //
-// 脚本在 New API 的 origin 上跑，且走的就是站点前端自己的「bootstrap」路径：
-// 新开页面时前端内存态为空，getExpectedSID() 为 undefined，于是用
-// credentials:'include' 调 /api/user/auth/refresh（**不带** X-Auth-Session 头，
-// 靠 httpOnly 会话 cookie 认身份）拿一份鉴权包。所以脚本也这样做。
+// 两种站点形态各有一个脚本：
 //
-// session.sid 是稳定的（刷新只换 access_token，sid 不变），因此面板与浏览器可共用
-// 同一会话；并发刷新时上游回 409 AUTH_REFRESH_RACE，脚本重试即可。脚本还会抢站点
-// 前端同名的 Web Lock（new-api:auth-refresh），避免和它抢刷新。
-func newAPICaptureSnippet(base, stateID string) string {
+//	bearer（本适配器最初对接的站点）：走站点前端自己的 bootstrap 路径
+//	  /api/user/auth/refresh（credentials:'include'，靠 httpOnly 会话 cookie
+//	  认身份）拿一份 access_token + sid。session.sid 是稳定的，因此面板与
+//	  浏览器可共用同一会话。
+//	cookie（AnyRouter / AgentRouter）：站点没有可轮换的 access_token，用户接口
+//	  直接认会话 Cookie + New-Api-User。脚本只读 document.cookie 并查一次
+//	  /api/user/self 补全用户 ID，然后回传。
+func newAPICaptureSnippet(base, stateID, selfPath string, cookieAuth bool) string {
+	if cookieAuth {
+		if strings.TrimSpace(selfPath) == "" {
+			selfPath = "/api/user/self"
+		}
+		return newAPICookieSnippet(base, stateID, selfPath)
+	}
 	captureURL := strings.TrimRight(base, "/") + "/panel/api/omni/newapi/capture?state=" + stateID
 	// 注意：脚本里含 %c，用 %% 转义避免被 fmt 当成动词。
 	tpl := `(async () => {
@@ -361,4 +371,55 @@ func newAPICaptureSnippet(base, stateID string) string {
   }
 })();`
 	return fmt.Sprintf(tpl, captureURL)
+}
+
+// newAPICookieSnippet 是 Cookie 型站点（AnyRouter / AgentRouter）的抓取脚本。
+//
+// 这些站点没有可轮换的 access_token：用户接口直接认浏览器会话 Cookie，并用
+// New-Api-User 指明是哪个账号。所以脚本做三件事：
+//  1. 读 document.cookie —— 会话 cookie 必须不是 httpOnly 才读得到，读不到就
+//     明确报错，而不是回传一个空壳让面板误以为成功。
+//  2. 用 Cookie 调一次 /api/user/self，拿数字用户 ID（后面所有请求都要用它）。
+//  3. 回传 cookie + user_id。
+func newAPICookieSnippet(base, stateID, selfPath string) string {
+	captureURL := strings.TrimRight(base, "/") + "/panel/api/omni/newapi/capture?state=" + stateID
+	tpl := `(async () => {
+  const selfPath = %q;
+  try {
+    const cookie = document.cookie || '';
+    if (!cookie) {
+      throw new Error('读不到 Cookie：该会话 Cookie 可能是 httpOnly，请在浏览器开发者工具的 Application → Cookies 里复制整条 Cookie 后回到面板用「粘贴 Cookie」添加账号。');
+    }
+    const r = await fetch(selfPath, {
+      method: 'GET', credentials: 'include',
+      headers: { 'Accept': 'application/json', 'Cache-Control': 'no-store' }
+    });
+    const b = await r.json().catch(() => ({}));
+    const u = (b && b.data) || {};
+    const uid = u.id ? String(u.id) : '';
+    if (!uid) {
+      throw new Error('读取用户信息失败（HTTP ' + r.status + '）：' + ((b && b.message) || '未返回用户 ID') + '，请确认已登录本站');
+    }
+    const payload = {
+      cookie: cookie,
+      user_id: uid,
+      username: u.username || '',
+      display_name: u.display_name || ''
+    };
+    const res = await fetch(%q, {
+      method: 'POST', mode: 'cors',
+      headers: { 'Content-Type': 'text/plain' },
+      body: JSON.stringify(payload)
+    });
+    const out = await res.json().catch(() => ({}));
+    if (res.ok && (!out || out.ok !== false)) {
+      console.log('%%c已回传会话 Cookie，请回到面板补齐聊天密钥（sk-）。', 'color:#0a0');
+    } else {
+      console.error('回传被拒（HTTP ' + res.status + '）：' + ((out && out.error) || '未知错误'));
+    }
+  } catch (e) {
+    console.error('抓取失败：', e);
+  }
+})();`
+	return fmt.Sprintf(tpl, selfPath, captureURL)
 }

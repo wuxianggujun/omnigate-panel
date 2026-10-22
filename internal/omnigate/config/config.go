@@ -4,12 +4,14 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/egress"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/plugin"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/plugin/catalog"
 )
@@ -300,6 +302,38 @@ type ProviderConfig struct {
 	// 消息型上游（openai/newapi/raccoon/trae）在 messages 头部插一条 system；
 	// 单条 prompt 型上游（runable/geminiweb）拼到 prompt 开头。留空 = 不注入。
 	SystemPrompt string `json:"system_prompt,omitempty"`
+	// ClientPreset 是出站客户端身份预设："" （如实申报 omnigate）、"browser"
+	// （桌面 Chrome）、"claude-code"（Claude Code CLI）、"codex"（OpenAI Codex
+	// CLI）。留空 = 沿用该类型的历史默认（openai 如实申报，newapi 伪装浏览器）。
+	//
+	// 这是「请求伪装」的总开关：AnyRouter / AgentRouter 一类只收官方客户端流量
+	// 的中转站，靠它配合 Protocol=anthropic 才能真正可用。见 egress 包。
+	ClientPreset string `json:"client_preset,omitempty"`
+	// ClientUserAgent 覆盖预设的 User-Agent（留空 = 用预设自带的值）。预设过期
+	// 时不必改代码，改这里即可。
+	ClientUserAgent string `json:"client_user_agent,omitempty"`
+	// ClientHeaders 是追加到每个出站请求上的额外请求头（覆盖预设同名头）。
+	// 典型用法：给 Claude Code 预设换一个 anthropic-beta。
+	ClientHeaders map[string]string `json:"client_headers,omitempty"`
+	// ClientTLSProfile 选择 utls 的 ClientHello（如 "chrome120"）。留空 = 用预设
+	// 自带的（claude-code / codex 自带 chrome120），"none" = 显式关闭 TLS 伪装。
+	ClientTLSProfile string `json:"client_tls_profile,omitempty"`
+	// Protocol 是出站协议方言（openai / anthropic / responses）。留空 = openai。
+	// 只对通用后端生效（type=openai / type=newapi）；有自有协议的上游（raccoon、
+	// geminiweb、trae、runable、opencode）忽略此字段。
+	Protocol string `json:"protocol,omitempty"`
+	// 以下五项是 newapi 的「用户接口表面」覆盖项。AnyRouter / AgentRouter 与
+	// 本适配器最初对接的中转站同属 New API，但签到路径（sign_in）、身份头
+	// （New-Api-User）和鉴权方式（会话 Cookie）都不同。留空 = 各自的默认值，
+	// 老配置行为完全不变。
+	CheckinPath string `json:"checkin_path,omitempty"`
+	SelfPath    string `json:"self_path,omitempty"`
+	RefreshPath string `json:"refresh_path,omitempty"`
+	UserHeader  string `json:"user_header,omitempty"`
+	AuthMode    string `json:"auth_mode,omitempty"`
+	SigninPath  string `json:"signin_path,omitempty"`
+	ModelsPath  string `json:"models_path,omitempty"`
+	ChatPath    string `json:"chat_path,omitempty"`
 	// Raccoon-specific bases; each defaults to base_url + the upstream path.
 	MainOrigin string `json:"main_origin"`
 	LLMBase    string `json:"llm_base"`
@@ -321,6 +355,21 @@ type ProviderConfig struct {
 // 否则会出现「面板说空壳、服务端其实能用」的静默不一致。
 func (p *ProviderConfig) AnonymousEnabled() bool {
 	return p.Anonymous == nil || *p.Anonymous
+}
+
+// ClientProfile 把扁平的 client_* 字段组装成出站身份配置。用扁平字段而不是
+// 嵌套对象，是因为面板的 schema 表单按扁平 key 读写（与 fallback.* /
+// fingerprint.* 一致），嵌套会让「填了却没生效」这种问题无声发生。
+func (p *ProviderConfig) ClientProfile() egress.Profile {
+	if p == nil {
+		return egress.Profile{}
+	}
+	return egress.Profile{
+		Preset:     p.ClientPreset,
+		UserAgent:  p.ClientUserAgent,
+		Headers:    p.ClientHeaders,
+		TLSProfile: p.ClientTLSProfile,
+	}.Normalized()
 }
 
 // AccountConfig is one credential set.
@@ -618,7 +667,55 @@ func (c *Config) applyDefaults() {
 		p.TierPrefer = strings.ToLower(strings.TrimSpace(p.TierPrefer))
 		p.GoBaseURL = strings.TrimRight(strings.TrimSpace(p.GoBaseURL), "/")
 		p.SystemPrompt = strings.TrimSpace(p.SystemPrompt)
+		// 出站方言与身份：统一小写/去空白，未知方言与未知预设一律降级，绝不让
+		// 手工改坏的一行配置把供应商变成不可路由。
+		p.Protocol = normalizeProtocol(p.Protocol)
+		p.ClientPreset = strings.ToLower(strings.TrimSpace(p.ClientPreset))
+		p.ClientUserAgent = strings.TrimSpace(p.ClientUserAgent)
+		p.ClientTLSProfile = strings.ToLower(strings.TrimSpace(p.ClientTLSProfile))
+		p.ClientHeaders = normalizeHeaderMap(p.ClientHeaders)
+		// New API 用户接口表面：只规范化，不填默认值——默认值由适配器在
+		// Endpoints.Normalized() 里补，这样「留空 = 走历史默认」的语义与配置文件
+		// 里实际写了什么无关。
+		for _, f := range []*string{&p.CheckinPath, &p.SelfPath, &p.RefreshPath,
+			&p.UserHeader, &p.AuthMode, &p.SigninPath, &p.ModelsPath, &p.ChatPath} {
+			*f = strings.TrimSpace(*f)
+		}
+		p.AuthMode = strings.ToLower(p.AuthMode)
 	}
+}
+
+// normalizeProtocol 把出站方言收成 openai / anthropic / responses；空值与未知值
+// 都落到 openai（历史行为，最保守）。
+func normalizeProtocol(v string) string {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "anthropic", "messages", "claude":
+		return "anthropic"
+	case "responses", "codex":
+		return "responses"
+	default:
+		return "openai"
+	}
+}
+
+// normalizeHeaderMap 去掉空白键值并统一头名大小写；全空返回 nil。
+func normalizeHeaderMap(m map[string]string) map[string]string {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		k = http.CanonicalHeaderKey(strings.TrimSpace(k))
+		v = strings.TrimSpace(v)
+		if k == "" || v == "" {
+			continue
+		}
+		out[k] = v
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // normalizeKeys 去掉空白项与重复项；全空返回 nil（而不是空切片），好让

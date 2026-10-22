@@ -258,36 +258,51 @@ func newAPISpec() plugin.Plugin {
 	return plugin.Plugin{
 		Type:        "newapi",
 		DisplayName: "New API",
-		Description: "New API 中转站；access_token 管签到与用户接口，sk- 密钥管聊天。",
+		Description: "New API 中转站（含 AnyRouter / AgentRouter）；用户接口管签到与额度，sk- 密钥管聊天。",
 		AccountMode: plugin.AccountModeDynamic,
 		Factory: func(s plugin.ProviderSpec, _ plugin.Deps) (plugin.Provider, error) {
-			return newapi.NewProvider(s.Name, s.BaseURL, s.Models), nil
+			return newapi.NewProviderWithOptions(newapi.Options{
+				Name:      s.Name,
+				BaseURL:   s.BaseURL,
+				Models:    s.Models,
+				Endpoints: s.Endpoints,
+				Client:    s.Client,
+				Protocol:  s.Protocol,
+			}), nil
 		},
 		Traits: plugin.Traits{
 			WireFormat:          plugin.WireOpenAI,
 			ReasoningEffort:     true,
 			AccountScopedModels: true,
 			SystemPrompt:        true,
+			// newapi 自己决定出站指纹（默认浏览器形态），但允许 operator 用
+			// provider.client 覆盖成 Claude Code / Codex——这正是 AnyRouter 一类
+			// 只收官方客户端流量的中转站能被接入的前提。
+			ClientIdentity: true,
 		},
-		ConfigFields: []plugin.Field{
+		ConfigFields: append([]plugin.Field{
 			field("base_url", "Base URL", plugin.GroupConnection, plugin.KindURL,
 				required(),
 				placeholder("https://api.example.com"),
 				help("中转站根地址，不含 /v1；每个站点不同，必填。")),
 			modelsField("留空 = 用账号的 sk- 密钥自动发现；填写时作为回退清单。"),
 			systemPromptField(),
-		},
+			protocolField(),
+		}, append(clientIdentityFields(), userAPIEndpointFields()...)...),
 		AccountFields: []plugin.Field{
 			accountLabelField(),
 			accessTokenField("Access Token", "Bearer 凭证，用于签到与 /api/user/*；可由 session 自动刷新。", false),
 			refreshTokenField("X-Auth-Session 会话 id，用于轮换 access_token。"),
 			field("api_key", "Chat API Key", plugin.GroupCredentials, plugin.KindSecret,
-				required(),
-				help("sk-... 密钥，用于 /v1/chat/completions 与模型目录。")),
+				help("sk-... 密钥，用于 /v1/chat/completions 与模型目录。可稍后补填（未填时该账号不能聊天，但签到/额度照常）。")),
 			expiresAtField(),
 			field("session_cookie", "Session Cookie", plugin.GroupCredentials, plugin.KindSecret,
 				advanced(),
-				help("可选：轮换 token 时一并发送的站点 Cookie。")),
+				help("站点会话 Cookie（整条，含 name=value）。AnyRouter / AgentRouter 这类 Cookie 型站点用它做签到与额度查询；bearer 型站点只在轮换 token 时一并发送。")),
+			field("uid", "用户 ID", plugin.GroupCredentials, plugin.KindText,
+				advanced(),
+				placeholder("如 12345"),
+				help("Cookie 型站点会用 New-Api-User 头传这个值；浏览器登录抓取时自动填。手动粘贴 Cookie 时必须填，否则上游认不出账号。")),
 		},
 		Actions: []plugin.Action{
 			action(plugin.ActionCheckin, "签到", plugin.ActionScopeAccount, "领取站点每日额度。", false),
@@ -328,14 +343,25 @@ func openAISpec() plugin.Plugin {
 		Description: "任意 OpenAI 兼容上游（OpenAI / DeepSeek / GLM / Kimi / OpenRouter / Ollama）。",
 		AccountMode: plugin.AccountModeNone,
 		Factory: func(s plugin.ProviderSpec, _ plugin.Deps) (plugin.Provider, error) {
-			return openaibackend.New(s.Name, s.BaseURL, s.APIKey, s.Models), nil
+			return openaibackend.NewWithOptions(openaibackend.Options{
+				Name:     s.Name,
+				BaseURL:  s.BaseURL,
+				APIKey:   s.APIKey,
+				APIKeys:  s.APIKeys,
+				Models:   s.Models,
+				Client:   s.Client,
+				Protocol: s.Protocol,
+			}), nil
 		},
 		Traits: plugin.Traits{
 			WireFormat:      plugin.WireOpenAI,
 			ReasoningEffort: true,
 			SystemPrompt:    true,
+			// 通用 OpenAI 兼容后端的默认身份是「如实申报 omnigate/…」；允许 operator
+			// 改为浏览器 / Claude Code / Codex，用于只收官方客户端流量的中转站。
+			ClientIdentity: true,
 		},
-		ConfigFields: []plugin.Field{
+		ConfigFields: append([]plugin.Field{
 			field("base_url", "Base URL", plugin.GroupConnection, plugin.KindURL,
 				defaultValue("https://api.openai.com/v1"),
 				placeholder("https://api.openai.com/v1"),
@@ -347,7 +373,8 @@ func openAISpec() plugin.Plugin {
 				help("一行一个；多把按请求轮询，失败自动冷却。留空 = 用 api_key。")),
 			modelsField("留空 = 自动向上游发现；填写 = 只使用这些模型，不再自动拉取。填上游原始模型 ID，目录展示时自动加 provider/ 前缀。"),
 			systemPromptField(),
-		},
+			protocolField(),
+		}, clientIdentityFields()...),
 		AccountFields: []plugin.Field{},
 		Actions:       []plugin.Action{},
 		Tasks:         []plugin.Task{},
@@ -603,4 +630,77 @@ func expiresAtField() plugin.Field {
 
 func action(name plugin.ActionName, label string, scope plugin.ActionScope, helpText string, confirm bool) plugin.Action {
 	return plugin.Action{Name: name, Label: label, Scope: scope, Help: helpText, Confirm: confirm}
+}
+
+// ---------------------------------------------------------------------------
+// outbound identity / protocol fields
+//
+// Shared by every type whose Traits.ClientIdentity is true. The identity is what
+// the upstream sees: which UA it thinks we are, which headers we carry, and the
+// TLS ClientHello we present. Presets keep the common cases one click away, the
+// override fields exist so an operator never has to wait for a rebuild when a
+// relay starts rejecting an old CLI version.
+
+// clientIdentityFields is the identity block (UA / headers / TLS ClientHello).
+func clientIdentityFields() []plugin.Field {
+	return []plugin.Field{
+		enumField("client_preset", "出站客户端身份", plugin.GroupFingerprint, "",
+			plugin.EnumOption{Value: "omnigate", Label: "omnigate（如实申报）"},
+			plugin.EnumOption{Value: "browser", Label: "桌面 Chrome 浏览器"},
+			plugin.EnumOption{Value: "claude-code", Label: "Claude Code CLI"},
+			plugin.EnumOption{Value: "codex", Label: "OpenAI Codex CLI"},
+		),
+		field("client_user_agent", "User-Agent 覆盖", plugin.GroupFingerprint, plugin.KindText,
+			advanced(),
+			placeholder("留空 = 用预设自带的 UA"),
+			help("预设声明的 UA 过期时改这里；整串替换，不要只填版本号。")),
+		field("client_headers", "附加请求头", plugin.GroupFingerprint, plugin.KindJSON,
+			advanced(),
+			help(`JSON 对象，覆盖预设同名头。例：{"anthropic-beta":"claude-code-20250219"}`)),
+		field("client_tls_profile", "TLS ClientHello", plugin.GroupFingerprint, plugin.KindText,
+			advanced(),
+			placeholder("留空 = 预设自带；none = 关闭"),
+			help("如 chrome120；只对 HTTPS 生效，需 utls 支持该版本。")),
+	}
+}
+
+// protocolField is the outbound dialect selector for a generic OpenAI-compatible
+// backend. Anthropic is what AnyRouter/AgentRouter accept; responses is the Codex
+// wire format.
+func protocolField() plugin.Field {
+	return enumField("protocol", "出站协议", plugin.GroupConnection, "openai",
+		plugin.EnumOption{Value: "openai", Label: "chat/completions（标准 OpenAI）"},
+		plugin.EnumOption{Value: "anthropic", Label: "messages（Anthropic / Claude Code）"},
+		plugin.EnumOption{Value: "responses", Label: "responses（OpenAI Codex）"},
+	)
+}
+
+// userAPIEndpointFields is the New API user-surface block: the facts that differ
+// between New API deployments (see plugin.UserAPIEndpoints).
+func userAPIEndpointFields() []plugin.Field {
+	return []plugin.Field{
+		enumField("auth_mode", "用户接口鉴权", plugin.GroupCredentials, "bearer",
+			plugin.EnumOption{Value: "bearer", Label: "Authorization: Bearer <access_token>"},
+			plugin.EnumOption{Value: "cookie", Label: "Cookie 会话（AnyRouter / AgentRouter）"},
+		),
+		field("user_header", "用户身份头", plugin.GroupCredentials, plugin.KindText,
+			placeholder("留空 = 不发；AnyRouter 用 New-Api-User"),
+			help("AnyRouter / AgentRouter 要求 New-Api-User: <数字用户 ID>。")),
+		field("checkin_path", "签到路径", plugin.GroupAdvanced, plugin.KindText,
+			advanced(),
+			placeholder("/api/user/checkin"),
+			help("AnyRouter / AgentRouter 用 /api/user/sign_in；留空 = 默认。")),
+		field("self_path", "资料路径", plugin.GroupAdvanced, plugin.KindText,
+			advanced(),
+			placeholder("/api/user/self"),
+			help("读取用户名与额度；留空 = 默认。")),
+		field("refresh_path", "刷新令牌路径", plugin.GroupAdvanced, plugin.KindText,
+			advanced(),
+			placeholder("/api/user/auth/refresh"),
+			help("轮换 access_token；Cookie 型站点用不到。留空 = 默认。")),
+		field("signin_path", "登录页路径", plugin.GroupAdvanced, plugin.KindText,
+			advanced(),
+			placeholder("/sign-in"),
+			help("浏览器登录向导打开的页面；AnyRouter / AgentRouter 用 /login。留空 = 默认。")),
+	}
 }

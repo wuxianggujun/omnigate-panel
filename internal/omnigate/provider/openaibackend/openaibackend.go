@@ -19,8 +19,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/egress"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/openai"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/provider"
+	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/provider/geminiweb/fingerprint"
+	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/wire"
 	"github.com/wuxianggujun/omnigate-panel/internal/outbound"
 )
 
@@ -31,6 +34,11 @@ type Provider struct {
 	apiKey  string
 	models  []string
 	http    *http.Client
+	// egress is the outbound client identity (UA / extra headers / TLS hello).
+	// Zero = honest "omnigate/<ver>".
+	egress egress.Profile
+	// format is the upstream dialect this provider speaks. Defaults to openai.
+	format wire.Format
 
 	// 上游密钥池（可选）。非空时按请求轮询：某个 key 拿到 401/403（key 不可用）
 	// 或 429（限流）就冷却并自动切下一个；额度耗尽类失败（quota）则长禁用并记账
@@ -47,11 +55,37 @@ type Provider struct {
 // New builds an OpenAI-compatible provider. baseURL should include the version
 // prefix, e.g. https://api.openai.com/v1.
 func New(name, baseURL, apiKey string, models []string) *Provider {
-	return &Provider{
-		name:    name,
-		baseURL: strings.TrimRight(baseURL, "/"),
-		apiKey:  apiKey,
-		models:  models,
+	return NewWithOptions(Options{Name: name, BaseURL: baseURL, APIKey: apiKey, Models: models})
+}
+
+// Options configures an OpenAI-compatible provider.
+type Options struct {
+	Name    string
+	BaseURL string
+	APIKey  string
+	APIKeys []string
+	Models  []string
+	// Client is the outbound identity. Zero = honest omnigate UA, which is what
+	// every existing deployment got before the identity layer existed.
+	Client egress.Profile
+	// Protocol is the upstream dialect: openai (default), anthropic or
+	// responses. Anything unrecognized degrades to openai rather than failing to
+	// build, so a hand-edited config never leaves a provider unroutable.
+	Protocol string
+	// Transport, when non-nil, replaces the built-in one (proxy pools install
+	// their selector afterwards; tests inject a stub).
+	Transport http.RoundTripper
+}
+
+// NewWithOptions builds a provider with an explicit outbound identity/protocol.
+func NewWithOptions(o Options) *Provider {
+	p := &Provider{
+		name:    o.Name,
+		baseURL: strings.TrimRight(o.BaseURL, "/"),
+		apiKey:  o.APIKey,
+		models:  o.Models,
+		egress:  o.Client.Normalized(),
+		format:  wire.ParseFormat(o.Protocol),
 		http: &http.Client{
 			Transport: &http.Transport{
 				DialContext:           (&net.Dialer{Timeout: 20 * time.Second}).DialContext,
@@ -60,6 +94,92 @@ func New(name, baseURL, apiKey string, models []string) *Provider {
 			},
 		},
 	}
+	if o.Transport != nil {
+		p.http.Transport = o.Transport
+	}
+	p.applyTLS()
+	if len(o.APIKeys) > 0 {
+		p.SetAPIKeys(o.APIKeys)
+	}
+	return p
+}
+
+// SetClient replaces the outbound identity (hot reload / tests).
+func (p *Provider) SetClient(prof egress.Profile) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	p.egress = prof.Normalized()
+	p.mu.Unlock()
+	p.applyTLS()
+}
+
+// Client returns the resolved outbound identity, for diagnostics and the panel.
+func (p *Provider) Client() egress.Resolved {
+	if p == nil {
+		return egress.Profile{}.Resolve()
+	}
+	p.mu.Lock()
+	prof := p.egress
+	p.mu.Unlock()
+	return prof.Resolve()
+}
+
+// SetProtocol switches the upstream dialect (hot reload).
+func (p *Provider) SetProtocol(protocol string) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	p.format = wire.ParseFormat(protocol)
+	p.mu.Unlock()
+}
+
+// Protocol returns the upstream dialect name.
+func (p *Provider) Protocol() string {
+	if p == nil {
+		return string(wire.FormatOpenAI)
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return string(p.format)
+}
+
+// applyTLS installs the utls ClientHello promised by the identity profile. The
+// gateway had that capability only inside geminiweb; the identity layer makes it
+// available to any provider that asks for it (claude-code / codex presets do).
+//
+// It is a no-op unless a TLS profile is configured, so nothing changes for the
+// providers that never asked for impersonation.
+func (p *Provider) applyTLS() {
+	if p == nil || p.http == nil {
+		return
+	}
+	tr, ok := p.http.Transport.(*http.Transport)
+	if !ok {
+		return
+	}
+	target := p.Client().TLSProfile
+	if target == "" {
+		tr.DialTLSContext = nil
+		tr.CloseIdleConnections()
+		return
+	}
+	imp := fingerprint.NewTLSImpersonator(target)
+	if !imp.Enabled() {
+		// Unsupported target: keep the standard library handshake instead of
+		// silently pretending to impersonate.
+		tr.DialTLSContext = nil
+		tr.CloseIdleConnections()
+		return
+	}
+	dialer := &net.Dialer{Timeout: 20 * time.Second}
+	imp.Apply(tr, dialer)
+	// utls speaks HTTP/1.1 or h2 depending on ALPN; net/http needs this to build
+	// the h2 stack for a custom DialTLSContext.
+	tr.ForceAttemptHTTP2 = true
+	tr.CloseIdleConnections()
 }
 
 // 密钥池冷却时长：鉴权失败（key 被吊销 / 无权限）冷得久一点，限流（429）只短暂
@@ -438,14 +558,6 @@ func (p *Provider) SetProxySelector(sel outbound.Selector) {
 // Type returns the provider type.
 func (p *Provider) Type() string { return "openai" }
 
-// auth 给请求带上某把上游 key 的 Authorization 头（key 为空则不带，兼容无鉴权
-// 上游）。
-func (p *Provider) auth(req *http.Request, key string) {
-	if key != "" {
-		req.Header.Set("Authorization", "Bearer "+key)
-	}
-}
-
 // ListModels 返回供应商的模型目录。
 //
 // 显式配置了 models 时，它就是目录白名单：直接返回该清单，绝不访问上游 /models。
@@ -461,7 +573,10 @@ func (p *Provider) ListModels(ctx context.Context) ([]openai.Model, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.baseURL+"/models", nil)
 	if err == nil {
 		key, _ := p.pick(nil)
-		p.auth(req, key)
+		// 模型目录请求走同一套出站身份：只收 Claude Code 流量的中转站在
+		// /v1/models 上同样会校验客户端形态。这里用 openai 方言的鉴权（Bearer），
+		// 因为 /models 本身是 OpenAI 形态的端点，与聊天所用的方言无关。
+		p.stamp(req, wire.FormatOpenAI, key)
 		if resp, err := p.http.Do(req); err == nil {
 			defer resp.Body.Close()
 			if resp.StatusCode < 400 {
@@ -491,23 +606,18 @@ func (p *Provider) ListModels(ctx context.Context) ([]openai.Model, error) {
 	return out, nil
 }
 
-// StreamChat sends a streaming chat completion and normalizes the SSE. When an
+// StreamChat sends a streaming chat completion and normalizes the stream. When an
 // upstream key pool is configured it rotates on auth/rate failures, so one dead
 // or throttled key doesn't take the whole provider down.
+//
+// The request body and the response codec both come from the configured protocol
+// (openai / anthropic / responses), so this method has no per-dialect branch and
+// a relay that only accepts /v1/messages is reachable through the same adapter.
 func (p *Provider) StreamChat(ctx context.Context, acc *provider.Account, in provider.ChatInput) (provider.Stream, error) {
-	body := map[string]any{
-		"model":    in.Model,
-		"messages": in.Messages,
-		"stream":   true,
+	format, endpoint, raw, err := p.buildRequest(in)
+	if err != nil {
+		return nil, err
 	}
-	if len(in.Tools) > 0 {
-		body["tools"] = in.Tools
-	}
-	if in.ReasoningEffort != "" {
-		body["reasoning_effort"] = in.ReasoningEffort
-	}
-	provider.ApplySampling(body, in)
-	raw, _ := json.Marshal(body)
 
 	tried := map[string]bool{}
 	var lastErr error
@@ -523,13 +633,11 @@ func (p *Provider) StreamChat(ctx context.Context, acc *provider.Account, in pro
 			return nil, fmt.Errorf("no upstream api key available")
 		}
 		tried[key] = true
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/chat/completions", bytes.NewReader(raw))
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+endpoint, bytes.NewReader(raw))
 		if err != nil {
 			return nil, err
 		}
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Accept", "text/event-stream")
-		p.auth(req, key)
+		p.stamp(req, format, key)
 		resp, err := p.http.Do(req)
 		if err != nil {
 			// 网络层错误与 key 无关：不轮换，否则一次网络抖动会把整池 key 冷却掉。
@@ -561,6 +669,92 @@ func (p *Provider) StreamChat(ctx context.Context, acc *provider.Account, in pro
 			return nil, lastErr
 		}
 		p.markGood(key)
-		return provider.NewOpenAIStream(resp.Body), nil
+		return wrapStream(format, resp.Body), nil
+	}
+}
+
+// buildRequest encodes in for the configured protocol and returns the endpoint
+// suffix together with the serialized body.
+func (p *Provider) buildRequest(in provider.ChatInput) (wire.Format, string, []byte, error) {
+	p.mu.Lock()
+	format := p.format
+	p.mu.Unlock()
+	if format == "" {
+		format = wire.FormatOpenAI
+	}
+	var (
+		raw []byte
+		err error
+	)
+	switch format {
+	case wire.FormatAnthropic:
+		raw, err = wire.EncodeAnthropic(in)
+	case wire.FormatResponses:
+		raw, err = wire.EncodeResponses(in)
+	default:
+		format = wire.FormatOpenAI
+		raw, err = encodeChat(in)
+	}
+	if err != nil {
+		return format, "", nil, err
+	}
+	return format, format.Path(), raw, nil
+}
+
+// encodeChat is the pre-existing chat/completions body builder.
+func encodeChat(in provider.ChatInput) ([]byte, error) {
+	body := map[string]any{
+		"model":    in.Model,
+		"messages": in.Messages,
+		"stream":   true,
+	}
+	if len(in.Tools) > 0 {
+		body["tools"] = in.Tools
+	}
+	if in.ReasoningEffort != "" {
+		body["reasoning_effort"] = in.ReasoningEffort
+	}
+	provider.ApplySampling(body, in)
+	return json.Marshal(body)
+}
+
+// stamp applies the outbound identity and auth to one request. Auth stays
+// format-specific: chat/Responses want "Bearer", Anthropic wants "x-api-key".
+func (p *Provider) stamp(req *http.Request, format wire.Format, key string) {
+	p.mu.Lock()
+	prof := p.egress
+	p.mu.Unlock()
+	prof.Resolve().Apply(req)
+	req.Header.Set("Content-Type", "application/json")
+	if format == wire.FormatAnthropic {
+		// Anthropic authenticates with x-api-key; the browser-style "Bearer"
+		// header is not accepted by the real API and relays mirror that.
+		req.Header.Set("x-api-key", key)
+		req.Header.Del("Authorization")
+		if req.Header.Get("anthropic-version") == "" {
+			req.Header.Set("anthropic-version", "2023-06-01")
+		}
+		// Every request built here asks for stream=true, and a CLI preset sets
+		// Accept: application/json because that is what a real client sends for
+		// non-streaming calls. Leaving it would contradict the body we just
+		// built, so the streaming Accept wins.
+		req.Header.Set("Accept", "text/event-stream")
+		return
+	}
+	if key != "" {
+		req.Header.Set("Authorization", "Bearer "+key)
+	}
+	req.Header.Set("Accept", "text/event-stream")
+}
+
+// wrapStream picks the decoder for the dialect the request was made in.
+func wrapStream(format wire.Format, body io.ReadCloser) provider.Stream {
+	switch format {
+	case wire.FormatAnthropic:
+		return wire.NewAnthropicStream(body)
+	case wire.FormatResponses:
+		return wire.NewResponsesStream(body)
+	default:
+		return provider.NewOpenAIStream(body)
 	}
 }

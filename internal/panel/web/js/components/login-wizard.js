@@ -314,10 +314,16 @@ export function openLoginWizard({
   function snippetStep() {
     const wrap = el('div', { class: 'wizard-step' });
     const signin = state.session?.signin_url || '';
+    // cookie 型站点（AnyRouter / AgentRouter）没有 access_token：脚本读的是浏览器
+    // 会话 Cookie，所以「粘贴脚本」之外还得提醒「聊天密钥稍后补」，否则用户会以为
+    // 账号建好就能直接聊天。
+    const cookieAuth = state.session?.auth_mode === 'cookie';
     wrap.appendChild(el('ol', { class: 'wizard-steps' },
       el('li', { text: '点击「打开登录页」，在站点完成登录。' }),
       el('li', { text: '打开浏览器开发者工具的控制台，粘贴并运行下面的脚本。' }),
-      el('li', { text: '脚本会把会话回传，面板自动建号（本页会自动刷新）。' }),
+      cookieAuth
+        ? el('li', { text: '脚本会把会话 Cookie 与用户 ID 回传，面板自动建号；聊天还需在账号里补填站点的 sk- 密钥。' })
+        : el('li', { text: '脚本会把会话回传，面板自动建号（本页会自动刷新）。' }),
     ));
     if (signin) {
       wrap.appendChild(el('div', { class: 'wizard-actions-row' },
@@ -340,6 +346,11 @@ export function openLoginWizard({
       ),
       el('pre', { class: 'code-block snippet-code', text: state.snippet }),
     ));
+    if (cookieAuth) {
+      // 会话 Cookie 若是 httpOnly，控制台读不到——这条兜底必须写在页面上，
+      // 否则用户只会看到脚本报「读不到 Cookie」而不知道下一步做什么。
+      wrap.appendChild(el('p', { class: 'muted small', text: '若脚本提示读不到 Cookie（httpOnly），请在开发者工具 Application → Cookies 里复制整条 Cookie，关闭本窗口后用「手动添加账号」的 Session Cookie 字段填入。' }));
+    }
     wrap.appendChild(el('p', { class: 'muted small' },
       el('span', { class: 'spinner', 'aria-hidden': 'true' }),
       ' 正在等待会话回传…',

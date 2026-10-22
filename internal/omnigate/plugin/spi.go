@@ -26,6 +26,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/egress"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/provider"
 )
 
@@ -87,6 +88,11 @@ func (w WireFormat) Valid() bool {
 // provider instance, so it no longer has to switch on the type string.
 type Traits struct {
 	WireFormat WireFormat `json:"wire_format"`
+	// ClientIdentity says whether the gateway may override this type's outbound
+	// identity (provider.client). Types with their own hardcoded fingerprint
+	// stack (geminiweb) or an identity their protocol dictates (opencode's CLI
+	// headers) keep full control and ignore the operator's profile.
+	ClientIdentity bool `json:"client_identity,omitempty"`
 	// ToolEmulation: tools are advertised in the prompt and parsed from text.
 	ToolEmulation bool `json:"tool_emulation,omitempty"`
 	Attachments   bool `json:"attachments,omitempty"`
@@ -357,6 +363,17 @@ type ProviderSpec struct {
 	AgentHost    string
 	UgHost       string
 	OAuthHost    string
+
+	// Client is the outbound client identity (UA / extra headers / TLS hello).
+	// Zero = keep the provider's historical default.
+	Client egress.Profile
+	// Protocol is the outbound dialect for generic OpenAI-compatible backends
+	// (openai / anthropic / responses). Empty = openai.
+	Protocol string
+	// Endpoints overrides a New API relay's user-API surface. Zero = the legacy
+	// defaults; AnyRouter/AgentRouter set sign_in, New-Api-User and cookie auth.
+	// Only newapi reads it.
+	Endpoints UserAPIEndpoints
 }
 
 // Factory constructs a Provider from spec.

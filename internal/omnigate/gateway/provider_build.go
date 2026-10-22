@@ -39,6 +39,21 @@ func specOf(p *config.ProviderConfig) plugin.ProviderSpec {
 		AgentHost:    p.AgentHost,
 		UgHost:       p.UgHost,
 		OAuthHost:    p.OAuthHost,
+		Client:       p.ClientProfile(),
+		Protocol:     p.Protocol,
+		// newapi 的用户接口表面（签到 / 资料路径、New-Api-User、Cookie 鉴权）
+		// 与出站身份走同一套 ProviderSpec 字段，AnyRouter / AgentRouter 才能被
+		// 这一层覆盖。
+		Endpoints: plugin.UserAPIEndpoints{
+			CheckinPath: p.CheckinPath,
+			SelfPath:    p.SelfPath,
+			RefreshPath: p.RefreshPath,
+			UserHeader:  p.UserHeader,
+			AuthMode:    p.AuthMode,
+			SigninPath:  p.SigninPath,
+			ModelsPath:  p.ModelsPath,
+			ChatPath:    p.ChatPath,
+		},
 	}
 }
 

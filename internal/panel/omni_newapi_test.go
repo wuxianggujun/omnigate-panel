@@ -10,7 +10,7 @@ import (
 )
 
 func TestNewAPICaptureSnippet(t *testing.T) {
-	got := newAPICaptureSnippet("https://wb.example.com/", "STATE123")
+	got := newAPICaptureSnippet("https://wb.example.com/", "STATE123", "/api/user/self", false)
 	if !strings.Contains(got, "https://wb.example.com/panel/api/omni/newapi/capture?state=STATE123") {
 		t.Fatalf("脚本应包含带 state 的回传地址，得到:\n%s", got)
 	}
@@ -31,6 +31,35 @@ func TestNewAPICaptureSnippet(t *testing.T) {
 	// 不该残留未转义的 Go 动词（%%c 已转成 %c）。
 	if strings.Contains(got, "%%c") {
 		t.Error("控制台颜色占位符转义失败")
+	}
+}
+
+// TestNewAPICookieSnippet：Cookie 型站点（AnyRouter / AgentRouter）的脚本不回传
+// access_token，只回传会话 Cookie + 数字用户 ID，并且明确要求非 httpOnly。
+func TestNewAPICookieSnippet(t *testing.T) {
+	got := newAPICaptureSnippet("https://anyrouter.top", "STATE9", "/api/user/self", true)
+	if !strings.Contains(got, "https://anyrouter.top/panel/api/omni/newapi/capture?state=STATE9") {
+		t.Fatalf("缺少回传地址:\n%s", got)
+	}
+	for _, want := range []string{
+		"document.cookie",
+		`"/api/user/self"`,
+		"credentials: 'include'",
+		"user_id",
+		"httpOnly",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("cookie 脚本缺少 %q", want)
+		}
+	}
+	// cookie 型站点没有 access_token 可刷新，脚本不该去调 refresh。
+	if strings.Contains(got, "auth/refresh") {
+		t.Error("cookie 脚本不该调用 auth/refresh")
+	}
+	// 自定义 self 路径要被用上（不同部署可能不同）。
+	custom := newAPICaptureSnippet("https://x.test", "S1", "/api/user/info", true)
+	if !strings.Contains(custom, `"/api/user/info"`) {
+		t.Errorf("自定义 self 路径未生效:\n%s", custom)
 	}
 }
 

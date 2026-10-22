@@ -1048,7 +1048,11 @@ func (g *Gateway) HandleChat(ctx context.Context, req *openai.ChatRequest, w htt
 				res, err = oc.res, oc.err
 				break wait
 			case <-ticker.C:
-				if time.Since(time.Unix(0, lastOut.Load())) < sseKeepAliveInterval {
+				// 阈值留 25% 余量。markOut 记录的是「帧真正写完」的时刻，比 tick
+				// 时刻略晚；若直接拿 sseKeepAliveInterval 当阈值，下一个 tick 算出的
+				// since 恰好落在 9.99…s，被判成「刚输出过」，于是每两个 tick 才发
+				// 一帧——设定 10s 实际变成 20s（实测抓到过这个 2 倍退化）。
+				if time.Since(time.Unix(0, lastOut.Load())) < sseKeepAliveInterval*3/4 {
 					continue // 期间已有输出，不必再补保活
 				}
 				_ = openai.EmitKeepAlive(ew, id, displayModel, created)

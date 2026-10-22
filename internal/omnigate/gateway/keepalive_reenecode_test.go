@@ -155,6 +155,30 @@ func TestKeepAliveFrameIsValidOpenAIShape(t *testing.T) {
 	}
 }
 
+// TestKeepAliveIntervalIsNotDoubled 锁死一个实测抓到的退化：`markOut` 记录的是
+// 「帧真正写完」的时刻，比 tick 时刻略晚；若保活阈值正好等于 tick 周期，下一个
+// tick 算出的 since 会落在 9.99…s 被判定为「刚输出过」，于是隔一个 tick 才发一帧。
+// 设定 10s 实际变成 20s——线上实测到达时刻就是 10/20/40/60/80 这种跳变。
+func TestKeepAliveIntervalIsNotDoubled(t *testing.T) {
+	old := sseKeepAliveInterval
+	sseKeepAliveInterval = 40 * time.Millisecond
+	defer func() { sseKeepAliveInterval = old }()
+
+	// 静默 ~200ms ≈ 5 个 tick。若退化成 2 倍，只能收到约 2-3 帧。
+	g := testGateway(&delayingProvider{name: "fake", delay: 200 * time.Millisecond, events: []provider.Event{
+		{Type: provider.EventText, Text: "hi"},
+		{Type: provider.EventFinish, Finish: "stop"},
+	}})
+	w := httptest.NewRecorder()
+	g.HandleChat(WithReqMeta(context.Background(), &ReqMeta{}), streamReq(), w)
+
+	n := strings.Count(w.Body.String(), `"`+openaikeepaliveField+`":true`)
+	if n < 4 {
+		t.Fatalf("keepalive fired only %d times in 5 tick windows (interval collapsed to 2x): %s",
+			n, w.Body.String())
+	}
+}
+
 // TestInterruptedRecordsWhyItWasInterrupted：interrupted 必须带原因，否则「客户端
 // 主动取消」与「中间层按读超时掐断」在记录里无法区分（线上排查时正是卡在这里）。
 func TestInterruptedRecordsWhyItWasInterrupted(t *testing.T) {

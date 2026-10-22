@@ -10,8 +10,11 @@
 
 - **OpenAI / Anthropic / Gemini 兼容入口**：`/v1/chat/completions`、
   `/v1/responses`、`/v1/messages`、`/v1beta/models/*` 等。
-- **多供应商**：raccoon、Runable、OpenCode、New API、任意 OpenAI 兼容上游、
-  Gemini Web、TRAE。
+- **多供应商**：raccoon、Runable、OpenCode、New API（含 AnyRouter / AgentRouter）、
+  任意 OpenAI 兼容上游、Gemini Web、TRAE。
+- **出站身份与协议方言**：`client_preset` 决定上游看到的客户端（omnigate / 浏览器 /
+  Claude Code / Codex，含 TLS ClientHello），`protocol` 决定说的是哪种方言
+  （chat/completions / Anthropic messages / Responses），两者独立可组合。
 - **账号池**：轮询、冷却、积分快过期优先、密钥池健康与自动禁用、会话/账号级粘性。
 - **供应商插件 SPI**：类型元数据、字段 schema、能力与操作统一注册；面板表单由
   后端 schema 动态生成，新增 provider 不需要改前端。
@@ -30,6 +33,8 @@ cmd/server                 唯一入口：配置 → 引擎 → 面板 → HTTP
 internal/omnigate/
   config/                  引擎配置模型（数据存 PostgreSQL panel_config）
   gateway/                 选号、冷却、密钥池、模型目录、路由
+  egress/                  出站客户端身份（UA / 特征头 / TLS ClientHello 预设）
+  wire/                    出站协议方言（openai / anthropic / responses 编解码）
   provider/                上游实现 + 插件描述符
   plugin/                  SPI（Plugin / Factory / Field / 能力接口）
   server/                  OpenAI / Anthropic / Gemini 协议入口
@@ -132,6 +137,101 @@ plugin.MustRegister(plugin.Plugin{
 内置类型注册在 `internal/omnigate/plugin/catalog`，启动时由 `main` 显式调用
 `catalog.Register()`；网关工厂按注册表查找 `Factory`，不再有类型 switch。新增
 「只是换 base_url」的上游不需要写插件，直接用 `openai` 类型配置即可。
+
+## 出站身份与协议方言
+
+上游看到的「谁在请求」由两层决定，都是供应商级配置，改完保存即热重载：
+
+- `client_preset` — 出站客户端身份（UA + 一组特征头 + TLS ClientHello）
+- `protocol` — 出站协议方言（请求体形状 + 端点 + 鉴权头 + 响应解码）
+
+两层是独立的：身份管「看起来像谁」，协议管「说的是哪种话」。只收官方客户端流量
+的中转站（AnyRouter 一类）两个都要配对，缺一个都会被拒。
+
+### client_preset
+
+| 值 | 含义 |
+| --- | --- |
+| `omnigate`（默认） | 如实申报 `omnigate/<ver>`，不做任何伪装 |
+| `browser` | 桌面 Chrome：UA、`Accept-Language`、`Sec-Fetch-*`。New API 类型的历史默认就是这个 |
+| `claude-code` | Claude Code CLI：`claude-cli/<ver>`、`x-app: cli`、`anthropic-beta`、`x-stainless-*`，并套用 Chrome 的 TLS ClientHello（真实 CLI 不用 Go 的 TLS 栈，只改头不改握手照样能被认出来） |
+| `codex` | OpenAI Codex CLI：`codex_cli_rs/<ver>`、`originator`、`OpenAI-Beta: responses=experimental` |
+
+留空表示「沿用该类型的历史默认」：`openai` 类型如实申报，`newapi` 类型伪装浏览器。
+预设写死在 `internal/omnigate/egress`，但三个覆盖字段永远优先：
+
+```jsonc
+{
+  "name": "anyrouter",
+  "type": "newapi",
+  "client_preset": "claude-code",
+  "client_user_agent": "claude-cli/2.0.20 (external, cli)",  // 预设版本过期时改这里
+  "client_headers": { "anthropic-beta": "claude-code-20250219" },
+  "client_tls_profile": "chrome120"                          // "none" = 显式关闭
+}
+```
+
+预设只影响「能问出身份」的那部分：`Accept-Encoding` 之类由 net/http 自己协商的
+头不写死，手写的 `Host` / `Content-Length` 会被忽略（net/http 拥有它们）。
+
+### protocol
+
+| 值 | 端点 | 鉴权 | 请求/响应 |
+| --- | --- | --- | --- |
+| `openai`（默认） | `/v1/chat/completions` | `Authorization: Bearer` | OpenAI chat + SSE |
+| `anthropic` | `/v1/messages` | `x-api-key`（**不带** Authorization） | Anthropic messages + SSE |
+| `responses` | `/v1/responses` | `Authorization: Bearer` | Responses API + SSE |
+
+方言同时决定响应解码：`anthropic` 的 SSE 会被翻译成统一的 `provider.Event`，
+工具调用、`cache_creation_input_tokens` 之类的用量字段都不丢。未知值一律降级为
+`openai`，不会让供应商变成不可路由。
+
+`protocol` 只对通用后端（`openai` / `newapi`）生效；有自有协议的上游
+（raccoon、geminiweb、trae、runable、opencode）忽略它。
+
+### 接入 AnyRouter / AgentRouter（含自动签到）
+
+两者都是 New API 的部署，所以用 `newapi` 类型即可，不需要单独的插件。与默认
+部署的差异只有四处，全部在供应商配置里覆盖：
+
+| 配置项 | 值 | 原因 |
+| --- | --- | --- |
+| `checkin_path` | `/api/user/sign_in` | 默认部署是 `/api/user/checkin` |
+| `auth_mode` | `cookie` | 用户接口认浏览器会话 Cookie，没有可轮换的 access_token |
+| `user_header` | `New-Api-User` | 上游靠这个头决定「是哪个账号」 |
+| `signin_path` | `/login` | 登录向导打开的页面 |
+
+再加上出站身份的两项，一个可用的配置长这样：
+
+```jsonc
+{
+  "name": "anyrouter",
+  "type": "newapi",
+  "base_url": "https://anyrouter.top",
+  "protocol": "anthropic",
+  "client_preset": "claude-code",
+  "auth_mode": "cookie",
+  "user_header": "New-Api-User",
+  "checkin_path": "/api/user/sign_in",
+  "signin_path": "/login"
+}
+```
+
+添加账号的流程：
+
+1. 供应商页 →「登录 / 添加账号」→ 打开登录页，在站点完成 GitHub / LinuxDO 登录。
+2. 把面板生成的控制台脚本粘贴进该站点的开发者工具运行。Cookie 型站点的脚本会
+   读 `document.cookie`、查一次 `/api/user/self` 补全数字用户 ID，然后回传。
+3. 回到面板补填聊天密钥（`sk-...`，站点「令牌」页创建）。**签到与额度查询不需要
+   它，但聊天需要**，所以账号建好后要在账号里补。
+4. 若脚本提示读不到 Cookie（会话 Cookie 是 httpOnly），改用手动添加：开发者工具
+   Application → Cookies 复制整条，填进 `session_cookie`，并把数字用户 ID 填进
+   `uid`。
+
+签到是普通的 New API 签到：勾选「定时签到」后由调度器每天按 `checkin_path` 执行，
+不需要额外配置。注意 AnyRouter 官方文档声明不转发非 Claude Code 的 API 流量——
+用 `client_preset=claude-code` + `protocol=anthropic` 是在协议层做到「真的像」，
+但这属于绕过对方的使用约束，是否接受由账号所有者判断，上游也可能因此封号。
 
 ## 配置
 
@@ -302,6 +402,25 @@ nginx 的 `proxy_read_timeout` **默认只有 60s**。超过后反代会主动�
 | `503` | 流式失败（仅用于请求记录的观测状态码，HTTP 头已发 200） |
 
 所以**看到 504 一定是中间层（反代 / CDN）发出的**，不是本服务。
+
+### 空回复不会让客户端无限重试
+
+上游消耗了 token 却一个正文字节都没回，是真实存在的（典型成因：`max_tokens` 太小，
+模型把预算全花在不上报为 `reasoning_content` 的内部推理上，于是只发空 delta 帧 +
+`finish_reason=length`）。这类情况分成两种，本服务的处理方式不同：
+
+| 上游行为 | 本服务返回 | 客户端应如何理解 |
+|---|---|---|
+| 200 + 连 `finish_reason` 都没发（0 有效帧） | `502` + `upstream_error`，并附上游原文片段 | 上游确实失败，不是空回复；换供应商 / 看上游原文 |
+| 200 + 有 `finish_reason`，但正文为空 | `200` + 空正文 + 真实 `finish_reason` | 合法空补全（预算耗尽），应停止重试 |
+
+关键点：**「合法空回复」返回的是 200，不是错误**。如果把它当故障返回 502，客户端会
+按 5xx 语义自动重试，而每次重试都要重新计费一遍——同一份 prompt 被反复收费。
+所以只要上游明确收尾了，这里就照 OpenAI 语义返回空内容；请求记录里状态是成功，
+但日志会打一条 `空回复 … 上游正常收尾但无正文` 便于排查。
+
+流的形态同理：空流会写一帧 `error` 并以 `502` 观测，但 HTTP 头早已是 200，客户端
+看到的是流里的错误帧 + `[DONE]`，不会重连。
 
 ### 排障速查
 

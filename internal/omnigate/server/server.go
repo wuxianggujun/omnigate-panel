@@ -4,6 +4,8 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -240,6 +242,8 @@ func (s *Server) serveLogged(w http.ResponseWriter, r *http.Request, fn func(htt
 	if k, _ := s.keyScope(r); len(k.Providers) > 0 {
 		meta.KeyProviders = k.Providers
 	}
+	// 入站身份：记录到请求归档，面板「用户」页据此按人聚合。只写标签，不写密钥。
+	meta.APIKey = s.keyLabel(r)
 	r = r.WithContext(gateway.WithReqMeta(r.Context(), meta))
 	lw := &logWriter{ResponseWriter: w, start: start}
 	if s.reqlog != nil {
@@ -267,6 +271,8 @@ func (s *Server) serveLogged(w http.ResponseWriter, r *http.Request, fn func(htt
 		Provider:  meta.Provider,
 		Model:     meta.Model,
 		Account:   meta.Account,
+		// 入站身份（密钥标签）：与 Account（上游账号）是两条正交的账。
+		APIKey: meta.APIKey,
 		// 真实上游模型：与 Model 不同即说明别名/目录解析生效过。
 		UpstreamModel: meta.UpstreamModel,
 		// 失败原因：让 interrupted 从「猜」变成「可定位」（谁先断的）。
@@ -449,6 +455,44 @@ func (s *Server) keyScope(r *http.Request) (config.APIKey, bool) {
 		return config.APIKey{}, true
 	}
 	return s.cfg.APIKeys.Find(key)
+}
+
+// panelKeyLabel 是面板自身密钥在请求记录里的标签。面板前端用 cfg.PanelKey 调
+// /omni/*，与真实用户混在一起会让「用户」页出现一行无法对账的假用户。
+const panelKeyLabel = "panel"
+
+// keyLabel 把请求携带的入站密钥翻译成**可展示、不可逆**的身份标签。
+//
+// 三级回落：
+//  1. 面板自身密钥 → panel（它不是用户）；
+//  2. 配置里写了 name → 直接用 name（运营自己起的名字，最贴近对账口径）；
+//  3. 配置了但没写 name → 取 sha256 前 4 字节的十六进制。
+//
+// 第 3 条为什么不用密钥前缀：请求记录要落库、要进备份、要给非管理员看，截一段
+// sk- 明文等于把凭证散落到每一份备份里；而直接返回空串又会让所有匿名密钥合并
+// 成同一行，统计彻底失真。短摘要两头都躲开了。
+func (s *Server) keyLabel(r *http.Request) string {
+	if s.cfg == nil {
+		return ""
+	}
+	key := apiKeyFrom(r)
+	if key == "" {
+		return ""
+	}
+	if s.cfg.PanelKey != "" && key == s.cfg.PanelKey {
+		return panelKeyLabel
+	}
+	k, ok := s.cfg.APIKeys.Find(key)
+	if !ok {
+		// 走到这里说明请求未通过鉴权，正常情况下不会产生归档；返回空串而不是
+		// 把非法密钥的摘要写进库里。
+		return ""
+	}
+	if name := strings.TrimSpace(k.Name); name != "" {
+		return name
+	}
+	sum := sha256.Sum256([]byte(key))
+	return "unnamed-" + hex.EncodeToString(sum[:4])
 }
 
 // keyOK 报告请求是否携带了合法的网关密钥，**不写响应**——用于「同一端点按鉴权

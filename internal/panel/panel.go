@@ -197,6 +197,9 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/api/request_metrics", p.read(p.requestMetrics))
 	p.mux.HandleFunc("GET /panel/api/request_logs", p.read(p.requestLogs))
 	p.mux.HandleFunc("GET /panel/api/usage", p.read(p.usage))
+	// 按入站密钥聚合。只给 privileged：归属表里的租户维度是「上游账号」，
+	// 没有到入站密钥的映射，放给普通租户等于让他们看到别人的用量。
+	p.mux.HandleFunc("GET /panel/api/usage/by-key", p.privileged(p.usageByKey))
 	p.mux.HandleFunc("POST /panel/api/usage/save", p.admin(p.usageSave))
 
 	// 批量与迁移。

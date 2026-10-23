@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -33,6 +34,7 @@ create table if not exists %s (
     request_id         text             not null default '',
     path               text             not null default '',
     account            text             not null default '',
+    api_key            text             not null default '',
     model              text             not null default '',
     realm              text             not null default '',
     status             int              not null default 0,
@@ -59,13 +61,18 @@ create table if not exists %s (
 );
 create index if not exists %s_time_idx on %s (time desc, id desc);
 create index if not exists %s_outcome_idx on %s (outcome);
+-- 按入站密钥聚合（面板「用户」页）：api_key + time 复合索引让「某用户的最近请求」
+-- 和「区间内按 key 分组」都走索引，不必扫全表。请求记录表是热表，这个索引是
+-- 面板唯一会做聚合查询的维度，值得单独建。
+create index if not exists %s_key_idx on %s (api_key, time desc);
 alter table %s add column if not exists upstream_model text not null default '';
 alter table %s add column if not exists failure text not null default '';
+alter table %s add column if not exists api_key text not null default '';
 `
 
 // requestLogColumns 与建表顺序一致，供 CopyFrom 与 SELECT 复用。
 var requestLogColumns = []string{
-	"time", "request_id", "path", "account", "model", "realm",
+	"time", "request_id", "path", "account", "api_key", "model", "realm",
 	"status", "ok", "outcome", "duration_ms", "ttfb_ms", "attempts",
 	"prompt_tokens", "completion_tokens", "total_tokens",
 	"credit", "credit_known", "cache_hit_tokens", "cache_miss_tokens",
@@ -80,7 +87,8 @@ var requestLogColumns = []string{
 // 数量一致，否则 fmt.Sprintf 会多出 %!s(MISSING)。
 func ensureRequestLogs(ctx context.Context, s *Store) error {
 	if _, err := s.pool.Exec(ctx, fmt.Sprintf(requestLogsSchemaTemplate,
-		s.logTable, s.logTable, s.logTable, s.logTable, s.logTable, s.logTable, s.logTable)); err != nil {
+		s.logTable, s.logTable, s.logTable, s.logTable, s.logTable, s.logTable, s.logTable,
+		s.logTable, s.logTable, s.logTable)); err != nil {
 		return fmt.Errorf("pgstore: 建请求记录表失败: %w", err)
 	}
 	return nil
@@ -97,7 +105,7 @@ func (s *Store) AppendLogs(events []reqlog.Event) error {
 	rows := make([][]any, len(events))
 	for i, e := range events {
 		rows[i] = []any{
-			e.Time, e.RequestID, e.Path, e.Account, e.Model, e.Realm,
+			e.Time, e.RequestID, e.Path, e.Account, e.APIKey, e.Model, e.Realm,
 			e.Status, e.OK, e.Outcome, e.DurationMs, e.TTFBMs, e.Attempts,
 			e.PromptTokens, e.CompletionTokens, e.TotalTokens,
 			e.Credit, e.HasCredit, e.CacheHitTokens, e.CacheMissTokens,
@@ -137,6 +145,7 @@ func (s *Store) ReadLogs(limit int, filter reqlog.Filter) ([]reqlog.Event, error
 		conds = append(conds, fmt.Sprintf("lower(%s) like $%d", col, len(args)))
 	}
 	like("account", filter.Account)
+	like("api_key", filter.APIKey)
 	like("model", filter.Model)
 	like("provider", filter.Provider)
 	like("client_ip", filter.ClientIP)
@@ -166,7 +175,7 @@ func (s *Store) ReadLogs(limit int, filter reqlog.Filter) ([]reqlog.Event, error
 	for rows.Next() {
 		var e reqlog.Event
 		if err := rows.Scan(
-			&e.Time, &e.RequestID, &e.Path, &e.Account, &e.Model, &e.Realm,
+			&e.Time, &e.RequestID, &e.Path, &e.Account, &e.APIKey, &e.Model, &e.Realm,
 			&e.Status, &e.OK, &e.Outcome, &e.DurationMs, &e.TTFBMs, &e.Attempts,
 			&e.PromptTokens, &e.CompletionTokens, &e.TotalTokens,
 			&e.Credit, &e.HasCredit, &e.CacheHitTokens, &e.CacheMissTokens,
@@ -289,3 +298,101 @@ func (s *Store) ImportRequestLogsFromDir(dir string) (int, error) {
 
 // 编译期断言：*Store 实现 reqlog.Sink。
 var _ reqlog.Sink = (*Store)(nil)
+
+// AggregateKeyUsage 按入站密钥聚合 [from, to] 区间内的请求。
+//
+// 两条查询拼一份结果：主查询出每把密钥的汇总，第二条出逐模型拆分。不写成
+// 一条 join / json_agg 是为了让主查询永远只返回「用户数」那么多行——面板一次
+// 渲染几十行，拆分表再按 key 挂上去，读起来和调试都简单。
+//
+// 口径说明：
+//   - 只统计 api_key <> ''：开放模式与旧归档没有身份，混进来会变成一行巨大
+//     的「空」，把真正能对账的数据压掉；
+//   - errors 取 not ok（与请求记录页同一口径），客户端中断也算失败；
+//   - avg(duration_ms) 含失败请求：用户体感就是「我这次等了多久」，不该只统计
+//     成功的那些。
+func (s *Store) AggregateKeyUsage(from, to time.Time) ([]reqlog.KeyUsage, error) {
+	if s == nil || s.pool == nil {
+		return nil, kvErrUnavailable()
+	}
+	ctx := context.Background()
+	args := []any{}
+	conds := []string{"api_key <> ''"}
+	if !from.IsZero() {
+		args = append(args, from)
+		conds = append(conds, fmt.Sprintf("time >= $%d", len(args)))
+	}
+	if !to.IsZero() {
+		args = append(args, to)
+		conds = append(conds, fmt.Sprintf("time <= $%d", len(args)))
+	}
+	where := " where " + strings.Join(conds, " and ")
+
+	rows, err := s.pool.Query(ctx, fmt.Sprintf(`
+		select api_key,
+		       count(*),
+		       count(*) filter (where not ok),
+		       coalesce(sum(prompt_tokens), 0),
+		       coalesce(sum(completion_tokens), 0),
+		       coalesce(sum(total_tokens), 0),
+		       coalesce(avg(duration_ms), 0)::bigint,
+		       max(time)
+		from %s%s
+		group by api_key
+		order by count(*) desc, api_key asc`, s.logTable, where), args...)
+	if err != nil {
+		return nil, fmt.Errorf("pgstore: 按密钥聚合请求记录: %w", err)
+	}
+	defer rows.Close()
+
+	var out []reqlog.KeyUsage
+	index := make(map[string]int)
+	for rows.Next() {
+		var u reqlog.KeyUsage
+		if err := rows.Scan(&u.Key, &u.Requests, &u.Errors, &u.PromptTokens,
+			&u.CompletionTokens, &u.TotalTokens, &u.AvgDurationMs, &u.LastSeen); err != nil {
+			return out, fmt.Errorf("pgstore: 解析密钥聚合: %w", err)
+		}
+		index[u.Key] = len(out)
+		out = append(out, u)
+	}
+	if err := rows.Err(); err != nil {
+		return out, err
+	}
+	if len(out) == 0 {
+		return out, nil
+	}
+
+	// 逐模型拆分。区间条件与主查询完全一致，避免两半数据对不上。
+	rows2, err := s.pool.Query(ctx, fmt.Sprintf(`
+		select api_key, model,
+		       count(*),
+		       count(*) filter (where not ok),
+		       coalesce(sum(prompt_tokens), 0),
+		       coalesce(sum(completion_tokens), 0),
+		       coalesce(sum(total_tokens), 0)
+		from %s%s
+		group by api_key, model
+		order by count(*) desc`, s.logTable, where), args...)
+	if err != nil {
+		return out, fmt.Errorf("pgstore: 按密钥聚合模型拆分: %w", err)
+	}
+	defer rows2.Close()
+	for rows2.Next() {
+		var (
+			key string
+			m   reqlog.KeyUsageModel
+		)
+		if err := rows2.Scan(&key, &m.Model, &m.Requests, &m.Errors,
+			&m.PromptTokens, &m.CompletionTokens, &m.TotalTokens); err != nil {
+			return out, fmt.Errorf("pgstore: 解析密钥模型拆分: %w", err)
+		}
+		if i, ok := index[key]; ok {
+			out[i].Models = append(out[i].Models, m)
+		}
+	}
+	return out, rows2.Err()
+}
+
+// 编译期断言：*Store 实现按密钥聚合（面板「用户」页依赖的能力）。
+var _ reqlog.KeyUsageSink = (*Store)(nil)

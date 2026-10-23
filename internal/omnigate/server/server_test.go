@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/config"
@@ -12,6 +13,34 @@ import (
 	"github.com/wuxianggujun/omnigate-panel/internal/reqlog"
 	"github.com/wuxianggujun/omnigate-panel/internal/usage"
 )
+
+// TestServeLoggedRecordsAPIKey 验证入站密钥标签会随请求写进归档：面板「用户」页
+// 完全依赖这一列，漏写就会让所有请求都算成「无身份」。
+func TestServeLoggedRecordsAPIKey(t *testing.T) {
+	rec := reqlog.New(reqlog.Config{})
+	s := &Server{
+		reqlog: rec,
+		cfg: &config.Config{
+			APIKeys: config.APIKeyList{{Key: "sk-user", Name: "南瓜"}},
+		},
+	}
+	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	r.Header.Set("Authorization", "Bearer sk-user")
+	w := httptest.NewRecorder()
+
+	s.serveLogged(w, r, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
+
+	recent := rec.Snapshot().Recent
+	if len(recent) == 0 {
+		t.Fatal("no request recorded")
+	}
+	if got := recent[0].APIKey; got != "南瓜" {
+		t.Errorf("api_key = %q, want 南瓜", got)
+	}
+}
 
 // TestServeLoggedRecordsReasoning 验证 serveLogged 会把 gateway 回填的「上游产出过
 // 思考内容」标记落进请求记录（runable 等不回报 usage 时，思考列靠它兜底）。
@@ -280,5 +309,49 @@ func TestKeyScopePanelKeyLocksGateway(t *testing.T) {
 	}
 	if _, ok := s.keyScope(scopeReq("sk-panel")); !ok {
 		t.Error("面板密钥本身必须通过")
+	}
+}
+
+// TestKeyLabel 入站密钥标签是「用户统计」的唯一身份来源，必须满足三条：
+//   - 写进归档的只能是不可逆的标签，不能是密钥本身；
+//   - 面板密钥不能被当成一个用户；
+//   - 未命名密钥之间不能合并成同一行（否则不同人算成一个人）。
+func TestKeyLabel(t *testing.T) {
+	s := &Server{cfg: &config.Config{
+		APIKeys: config.APIKeyList{
+			{Key: "sk-named", Name: "  南瓜  "},
+			{Key: "sk-anon-a"},
+			{Key: "sk-anon-b"},
+		},
+		PanelKey: "sk-panel",
+	}}
+
+	if got := s.keyLabel(scopeReq("sk-named")); got != "南瓜" {
+		t.Errorf("命名密钥标签 = %q，期望去掉首尾空白的 name", got)
+	}
+	if got := s.keyLabel(scopeReq("sk-panel")); got != panelKeyLabel {
+		t.Errorf("面板密钥标签 = %q，期望 %q", got, panelKeyLabel)
+	}
+
+	a := s.keyLabel(scopeReq("sk-anon-a"))
+	b := s.keyLabel(scopeReq("sk-anon-b"))
+	if a == "" || b == "" {
+		t.Fatal("未命名但已配置的密钥也必须有标签，否则会被统计成「无身份」")
+	}
+	if a == b {
+		t.Errorf("两把不同的未命名密钥得到相同标签 %q，统计会合并成一个人", a)
+	}
+	if strings.Contains(a, "sk-anon-a") || strings.Contains(b, "sk-anon-b") {
+		t.Errorf("标签里不能出现密钥明文: %q / %q", a, b)
+	}
+	if again := s.keyLabel(scopeReq("sk-anon-a")); again != a {
+		t.Errorf("同一把密钥的标签必须稳定: %q != %q", again, a)
+	}
+
+	if got := s.keyLabel(scopeReq("sk-unknown")); got != "" {
+		t.Errorf("未登记密钥不应产生标签，得到 %q", got)
+	}
+	if got := s.keyLabel(scopeReq("")); got != "" {
+		t.Errorf("匿名请求不应产生标签，得到 %q", got)
 	}
 }

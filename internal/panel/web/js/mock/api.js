@@ -9,6 +9,7 @@ import {
   MOCK_USERS,
   buildAccountsPayload,
   buildModelCatalog,
+  buildKeyUsage,
   buildOverview,
   buildRequestLogs,
   buildUsageSnapshot,
@@ -837,6 +838,11 @@ async function handleApi(url, init) {
       ? state.config.providers.map((p) => p.name)
       : Array.from(new Set(accounts.map((a) => a.provider)));
     return json(buildUsageSnapshot(state, { hours, accounts, providers }));
+  }
+  if (path === '/usage/by-key' && method === 'GET') {
+    const auth = requirePrivileged();
+    if (auth.error) return auth.error;
+    return json(buildKeyUsage(state, visibleRequestsFor(state, auth.user.role, auth.user.username)));
   }
   if (path === '/request_logs' && method === 'GET') {
     let rows = visibleRequestsFor(state, role, user?.username || '');

@@ -1481,6 +1481,28 @@ code, pre, .mono { font-family: var(--mono); font-variant-ligatures: none; }
 .detail-source-label { font-size: 9.5px; color: var(--text-3); }
 .detail-source-value { font-size: 10.5px; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .detail-source-note { margin: 0; padding: 7px 10px 8px; border-top: 1px solid var(--border); font-size: 9.5px; color: var(--text-3); line-height: 1.45; }
+
+/* 用户页：抽屉顶部的四格摘要 + 型号拆分小标题。
+   复用 detail-token-stats 的网格观感，但语义是「一个用户的关键指标」，
+   单独命名以免以后调整 token 卡片时误伤这里。 */
+.use-user-summary {
+  display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1px; border: 1px solid var(--border); border-radius: 9px;
+  overflow: hidden; background: var(--border); margin-bottom: 14px;
+}
+.use-user-summary-item {
+  display: flex; flex-direction: column; gap: 3px;
+  padding: 9px 11px; background: var(--panel-2); min-width: 0;
+}
+.user-key-name {
+  font-size: 12px; font-weight: 600; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.section-title {
+  margin: 0 0 8px; font-size: 11px; font-weight: 600;
+  color: var(--text-2); letter-spacing: 0.02em;
+}
+.users-table-card .table-card { border: 0; }
 .detail-fact { display: flex; flex-direction: column; gap: 2px; padding: 8px 10px; background: var(--panel-2); min-width: 0; }
 .detail-fact .fact-value { font-size: 10.5px; word-break: break-word; white-space: normal; }
 .drawer-logs { display: flex; flex-direction: column; gap: 10px; }
@@ -1691,6 +1713,7 @@ code, pre, .mono { font-family: var(--mono); font-variant-ligatures: none; }
   .provider-head-actions { width: 100%; justify-content: flex-start; }
   .context-path { display: none; }
   .detail-facts { grid-template-columns: 1fr; }
+  .use-user-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .request-table-desktop { display: none; }
   .request-card-list { display: flex; }
   .request-toolbar { align-items: flex-start; }

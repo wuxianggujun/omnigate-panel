@@ -58,6 +58,14 @@ const ROUTES = [
     load: () => import('./pages/usage.js'),
   },
   {
+    path: '/users',
+    label: '用户',
+    title: '用户',
+    subtitle: '按入站密钥统计用量',
+    icon: 'user',
+    load: () => import('./pages/users.js'),
+  },
+  {
     path: '/requests',
     label: '请求',
     title: '请求',

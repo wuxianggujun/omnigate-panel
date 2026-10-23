@@ -658,6 +658,11 @@ export function buildRequestLogs(state, limit = 220) {
   }
   const providers = Array.from(byProvider.keys());
   const clients = ['10.8.0.14', '192.168.1.22', '172.16.3.90', '10.8.0.31', '203.0.113.8'];
+  // 入站密钥标签：mock 里的「用户」页需要它与真实后端同名字段（api_key），
+  // 否则 ?mock=1 下按用户统计永远是空表，等于没验证。
+  const keyNames = (state.config.api_keys || [])
+    .map((k) => (typeof k === 'string' ? '' : String(k.name || '').trim()))
+    .filter(Boolean);
   const agents = [
     'OpenAI-Python/1.66.0',
     'openai-node/4.68.0',
@@ -701,6 +706,8 @@ export function buildRequestLogs(state, limit = 220) {
       provider,
       account: account?.label || '',
       account_name: account?.name || '',
+      // 入站密钥标签：与后端 request_logs.api_key 同名列。
+      api_key: keyNames.length ? pick(rng, keyNames) : '',
       model,
       realm: 'cn',
       status: outcome.status,
@@ -742,6 +749,82 @@ export function buildRequestLogs(state, limit = 220) {
   }
   rows.sort((a, b) => new Date(b.time) - new Date(a.time));
   return rows;
+}
+
+export function buildKeyUsage(state, rows) {
+  const acc = new Map();
+  for (const row of rows) {
+    const key = String(row.api_key || '').trim();
+    // 与后端口径一致：没有入站密钥的历史行不参与聚合。
+    if (!key) continue;
+    if (!acc.has(key)) {
+      acc.set(key, {
+        key, requests: 0, errors: 0, prompt_tokens: 0, completion_tokens: 0,
+        total_tokens: 0, duration_ms: 0, last_seen: '', models: new Map(),
+      });
+    }
+    const it = acc.get(key);
+    it.requests += 1;
+    it.errors += row.ok ? 0 : 1;
+    it.prompt_tokens += Number(row.prompt_tokens || 0);
+    it.completion_tokens += Number(row.completion_tokens || 0);
+    it.total_tokens += Number(row.total_tokens || 0);
+    it.duration_ms += Number(row.duration_ms || 0);
+    if (!it.last_seen || new Date(row.time) > new Date(it.last_seen)) it.last_seen = row.time;
+    const model = String(row.model || '');
+    if (!it.models.has(model)) it.models.set(model, { model, requests: 0, errors: 0, prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 });
+    const m = it.models.get(model);
+    m.requests += 1;
+    m.errors += row.ok ? 0 : 1;
+    m.prompt_tokens += Number(row.prompt_tokens || 0);
+    m.completion_tokens += Number(row.completion_tokens || 0);
+    m.total_tokens += Number(row.total_tokens || 0);
+  }
+
+  const configured = (state.config.api_keys || [])
+    .map((k) => (typeof k === 'string' ? '' : String(k.name || '').trim()))
+    .filter(Boolean);
+
+  const list = Array.from(acc.values())
+    .map((it) => ({
+      key: it.key,
+      requests: it.requests,
+      errors: it.errors,
+      prompt_tokens: it.prompt_tokens,
+      completion_tokens: it.completion_tokens,
+      total_tokens: it.total_tokens,
+      avg_duration_ms: it.requests ? Math.round(it.duration_ms / it.requests) : 0,
+      last_seen: it.last_seen,
+      models: Array.from(it.models.values()).sort((a, b) => b.requests - a.requests),
+    }))
+    .sort((a, b) => b.requests - a.requests);
+
+  // 已配置但窗口内没有流量的密钥也返回（与真实后端一致），前端排在最后。
+  for (const name of configured) {
+    if (!list.some((it) => it.key === name)) {
+      list.push({
+        key: name, requests: 0, errors: 0, prompt_tokens: 0, completion_tokens: 0,
+        total_tokens: 0, avg_duration_ms: 0, last_seen: '', models: [],
+      });
+    }
+  }
+
+  const total = list.reduce((sum, it) => ({
+    requests: sum.requests + it.requests,
+    errors: sum.errors + it.errors,
+    prompt_tokens: sum.prompt_tokens + it.prompt_tokens,
+    completion_tokens: sum.completion_tokens + it.completion_tokens,
+    total_tokens: sum.total_tokens + it.total_tokens,
+  }), { requests: 0, errors: 0, prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 });
+
+  return {
+    from: new Date(state.now - 7 * 24 * HOUR).toISOString(),
+    to: new Date(state.now).toISOString(),
+    rows: list,
+    total,
+    retention_days: 7,
+    configured,
+  };
 }
 
 export function buildUsageSnapshot(state, { hours = 24, accounts = null, providers = null } = {}) {

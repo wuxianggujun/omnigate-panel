@@ -23,6 +23,10 @@ type ReqMeta struct {
 	// 一模一样，问题因此一直查不出来）。这里单独记真实目标。
 	UpstreamModel string
 	Account       string // 实际服务账号 label（api-key 上游为 "api-key"）
+	// APIKey 是发起请求的**入站密钥标签**（`api_keys[].name`），由 server 的鉴权
+	// 层填入。它回答「谁在用」，Account 回答「上游谁在服务」——两者不能混：
+	// 一个用户可能落到多个上游账号，按 Account 统计会把同一个人拆成好几行。
+	APIKey string
 	// Usage 是上游回报的 OpenAI 格式 token 用量（raccoon 等会在末尾 chunk 带
 	// usage；不回报时为 nil），供请求记录填充 Token/思考列。
 	Usage *provider.Usage

@@ -187,9 +187,9 @@ func TestRequestLogSink(t *testing.T) {
 
 	now := time.Now()
 	events := []reqlog.Event{
-		{Time: now.Add(-2 * time.Minute), RequestID: "a", Path: "/v1/chat", Account: "u1", Model: "alias-x", UpstreamModel: "u1-real", Provider: "raccoon", Outcome: "success", Status: 200, OK: true, TotalTokens: 10},
-		{Time: now.Add(-1 * time.Minute), RequestID: "b", Path: "/v1/chat", Account: "u2", Model: "m2", Provider: "runable", Outcome: "http_error", Status: 500, Failure: "upstream 429 rate limited"},
-		{Time: now.AddDate(0, 0, -30), RequestID: "c", Path: "/v1/chat", Account: "u3", Model: "m3", Provider: "raccoon", Outcome: "success", Status: 200, OK: true},
+		{Time: now.Add(-2 * time.Minute), RequestID: "a", Path: "/v1/chat", Account: "u1", APIKey: "南瓜", Model: "alias-x", UpstreamModel: "u1-real", Provider: "raccoon", Outcome: "success", Status: 200, OK: true, TotalTokens: 10},
+		{Time: now.Add(-1 * time.Minute), RequestID: "b", Path: "/v1/chat", Account: "u2", APIKey: "南瓜", Model: "m2", Provider: "runable", Outcome: "http_error", Status: 500, Failure: "upstream 429 rate limited"},
+		{Time: now.AddDate(0, 0, -30), RequestID: "c", Path: "/v1/chat", Account: "u3", APIKey: "只读探针", Model: "m3", Provider: "raccoon", Outcome: "success", Status: 200, OK: true},
 	}
 	if err := st.AppendLogs(events); err != nil {
 		t.Fatalf("append: %v", err)
@@ -223,6 +223,13 @@ func TestRequestLogSink(t *testing.T) {
 	if all, _ := st.ReadLogs(10, reqlog.Filter{Model: "m2"}); len(all) != 1 || all[0].Failure != "upstream 429 rate limited" {
 		t.Fatalf("failure 未正确落库/读回: %+v", all)
 	}
+	// api_key 必须原样往返：面板「用户」页的全部数据都来自这一列。
+	if all, _ := st.ReadLogs(10, reqlog.Filter{Model: "alias-x"}); len(all) != 1 || all[0].APIKey != "南瓜" {
+		t.Fatalf("api_key 未正确落库/读回: %+v", all)
+	}
+	if got, _ = st.ReadLogs(10, reqlog.Filter{APIKey: "只读"}); len(got) != 1 || got[0].RequestID != "c" {
+		t.Fatalf("api_key 子串筛选失败: %+v", got)
+	}
 	if got, _ = st.ReadLogs(1, reqlog.Filter{}); len(got) != 1 {
 		t.Fatalf("limit=1 应 1 条，得到 %d", len(got))
 	}
@@ -233,6 +240,78 @@ func TestRequestLogSink(t *testing.T) {
 	}
 	if rows, _, _ = st.LogStats(); rows != 2 {
 		t.Fatalf("prune 后应剩 2 行，得到 %d", rows)
+	}
+}
+
+// TestAggregateKeyUsage 验证「用户」页的聚合口径：按 api_key 分组、失败计数、
+// 逐模型拆分、空 api_key 不参与，以及时间区间能被正确下推。
+func TestAggregateKeyUsage(t *testing.T) {
+	dsn := os.Getenv("PGSTORE_TEST_DSN")
+	if dsn == "" {
+		t.Skip("未设置 PGSTORE_TEST_DSN，跳过 PostgreSQL 集成测试")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	const table = "panel_reqlog_keyusage_test"
+	st, err := openWithTable(ctx, dsn, table)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer st.Close()
+	dropTestTables(t, st, table)
+
+	now := time.Now()
+	events := []reqlog.Event{
+		{Time: now.Add(-10 * time.Minute), RequestID: "1", APIKey: "南瓜", Model: "m-a", Outcome: "success", Status: 200, OK: true, PromptTokens: 100, CompletionTokens: 50, TotalTokens: 150, DurationMs: 1000},
+		{Time: now.Add(-9 * time.Minute), RequestID: "2", APIKey: "南瓜", Model: "m-a", Outcome: "http_error", Status: 502, PromptTokens: 20, CompletionTokens: 0, TotalTokens: 20, DurationMs: 3000},
+		{Time: now.Add(-8 * time.Minute), RequestID: "3", APIKey: "南瓜", Model: "m-b", Outcome: "success", Status: 200, OK: true, PromptTokens: 10, CompletionTokens: 10, TotalTokens: 20, DurationMs: 2000},
+		// 只读探针：一次请求，验证分组之间不串。
+		{Time: now.Add(-7 * time.Minute), RequestID: "4", APIKey: "只读探针", Model: "m-a", Outcome: "success", Status: 200, OK: true, PromptTokens: 5, CompletionTokens: 5, TotalTokens: 10, DurationMs: 500},
+		// 开放模式 / 旧归档：没有身份，必须被排除。
+		{Time: now.Add(-6 * time.Minute), RequestID: "5", APIKey: "", Model: "m-a", Outcome: "success", Status: 200, OK: true, TotalTokens: 999},
+		// 区间外：不应计入。
+		{Time: now.Add(-48 * time.Hour), RequestID: "6", APIKey: "南瓜", Model: "m-old", Outcome: "success", Status: 200, OK: true, TotalTokens: 777},
+	}
+	if err := st.AppendLogs(events); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+
+	rows, err := st.AggregateKeyUsage(now.Add(-time.Hour), now)
+	if err != nil {
+		t.Fatalf("aggregate: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("应得到 2 个用户，实际 %d: %+v", len(rows), rows)
+	}
+	// 主排序：请求数降序。
+	if rows[0].Key != "南瓜" || rows[0].Requests != 3 || rows[0].Errors != 1 {
+		t.Fatalf("南瓜汇总错误: %+v", rows[0])
+	}
+	if rows[0].TotalTokens != 190 || rows[0].PromptTokens != 130 || rows[0].CompletionTokens != 60 {
+		t.Fatalf("token 汇总错误: %+v", rows[0])
+	}
+	// 平均耗时含失败请求：(1000+3000+2000)/3 = 2000。
+	if rows[0].AvgDurationMs != 2000 {
+		t.Fatalf("平均耗时应含失败请求，得到 %d", rows[0].AvgDurationMs)
+	}
+	if len(rows[0].Models) != 2 {
+		t.Fatalf("模型拆分应有 2 个，实际 %+v", rows[0].Models)
+	}
+	if rows[0].Models[0].Model != "m-a" || rows[0].Models[0].Requests != 2 {
+		t.Fatalf("模型拆分排序/计数错误: %+v", rows[0].Models)
+	}
+	if rows[1].Key != "只读探针" || rows[1].Requests != 1 {
+		t.Fatalf("第二个用户错误: %+v", rows[1])
+	}
+
+	// 空区间：没有请求时不返回任何行（而不是一行空 key）。
+	empty, err := st.AggregateKeyUsage(now.Add(-100*24*time.Hour), now.Add(-99*24*time.Hour))
+	if err != nil {
+		t.Fatalf("aggregate empty: %v", err)
+	}
+	if len(empty) != 0 {
+		t.Fatalf("空区间应返回 0 行，得到 %+v", empty)
 	}
 }
 

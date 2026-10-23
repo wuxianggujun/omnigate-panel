@@ -80,7 +80,15 @@ type Event struct {
 	RequestID        string    `json:"request_id"`
 	Path             string    `json:"path"`
 	Account          string    `json:"account,omitempty"`
-	Model            string    `json:"model,omitempty"`
+	// APIKey 是**入站密钥的展示标签**（`api_keys[].name`），用来回答「这条请求是
+	// 哪个用户/哪把密钥打进来的」。
+	//
+	// 只存标签，绝不存密钥本身：请求记录要落库、要进备份、要给非管理员看，
+	// 写入 sk- 明文等于把凭证散落到每一份备份里。没写 name 的密钥退化成
+	// 不可逆短摘要（见 server.keyLabel），不同密钥不会合并成同一行。
+	// 空 = 开放模式（网关未配任何密钥）或旧归档条目。
+	APIKey string `json:"api_key,omitempty"`
+	Model  string `json:"model,omitempty"`
 	Realm            string    `json:"realm,omitempty"` // 实际调度域 cn/global：由**实际服务账号**决定，非请求里的 "[realm:]" 前缀
 	Status           int       `json:"status"`
 	OK               bool      `json:"ok"`
@@ -140,6 +148,9 @@ type Event struct {
 type Filter struct {
 	Outcome   string
 	Account   string
+	// APIKey 按入站密钥标签筛选（大小写不敏感子串）。面板「请求」页据此看单个
+	// 用户打过什么，与「用户」页的聚合口径一致。
+	APIKey    string
 	Model     string
 	Provider  string
 	ClientIP  string
@@ -157,6 +168,10 @@ type ArchiveStats struct {
 	Backend       string `json:"backend,omitempty"`
 	Files         int    `json:"files"`
 	Bytes         int64  `json:"bytes"`
+	// RetentionDays 是归档保留天数。面板「用户」页要把它显示在时间范围旁边：
+	// 按密钥统计只能覆盖归档窗口，选「近 30 天」但归档只留 7 天时必须说清楚，
+	// 否则会把「查不到」误读成「没用过」。
+	RetentionDays int  `json:"retention_days,omitempty"`
 	DroppedWrites uint64 `json:"dropped_writes"`
 	LastError     string `json:"last_error,omitempty"`
 }
@@ -280,6 +295,18 @@ func (r *Recorder) ReadArchive(limit int, filter Filter) ([]Event, error) {
 		return nil, nil
 	}
 	return r.archive.read(limit, filter)
+}
+
+// RetentionDays 返回归档保留天数；0 表示未启用归档。
+//
+// 单独一个方法而不是让调用方读 Snapshot().Archive：Snapshot 会顺带统计归档
+// 行数（PostgreSQL 上是 count(*)），而面板只想在页面上写一句「最多回溯 N 天」，
+// 不值得为此扫一遍热表。
+func (r *Recorder) RetentionDays() int {
+	if r == nil || r.archive == nil || !r.archive.enabled() {
+		return 0
+	}
+	return r.archive.cfg.RetentionDays
 }
 
 // Close 刷盘并停止后台归档。
@@ -675,6 +702,9 @@ func (f Filter) match(e Event) bool {
 	if !containsFold(e.Account, f.Account) {
 		return false
 	}
+	if !containsFold(e.APIKey, f.APIKey) {
+		return false
+	}
 	if !containsFold(e.Model, f.Model) {
 		return false
 	}
@@ -706,6 +736,7 @@ func containsFold(haystack, needle string) bool {
 
 func (w *archiveWriter) stats() ArchiveStats {
 	s := ArchiveStats{Enabled: w.enabled(), DroppedWrites: w.dropped.Load(), LastError: w.errString()}
+	s.RetentionDays = w.cfg.RetentionDays
 	if !s.Enabled {
 		return s
 	}

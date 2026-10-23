@@ -262,6 +262,11 @@ export const api = {
       query: { hours, from, to },
       ...opts,
     }),
+    // 按入站密钥（用户）聚合。from/to 为 ISO 时间；都不传时后端默认近 7 天。
+    byKey: ({ from, to, ...opts } = {}) => request('/usage/by-key', {
+      query: { from, to },
+      ...opts,
+    }),
   },
 
   requestLogs: {

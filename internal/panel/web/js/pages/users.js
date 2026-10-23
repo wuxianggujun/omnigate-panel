@@ -10,7 +10,7 @@
 import { api, describeError } from '../core/api.js';
 import { authState, isAuthenticated, openLoginModal } from '../core/auth.js';
 import {
-  el, card, badge, emptyState, loadingBlock, icon,
+  el, card, emptyState, loadingBlock, icon,
 } from '../core/dom.js';
 import {
   fmtCompact, fmtDateTime, fmtDuration, fmtInt, fmtPercent, fmtRelative,
@@ -332,7 +332,7 @@ function usersTable(rows) {
     rows,
     empty: '当前窗口没有可按用户归属的请求',
     onRowClick: (row) => openUserDrawer(row),
-  });
+  }).el;
 }
 
 function rowStatusText(row) {

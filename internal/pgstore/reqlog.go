@@ -59,15 +59,19 @@ create table if not exists %s (
     upstream_model     text             not null default '',
     failure            text             not null default ''
 );
+-- 补列必须排在**建索引之前**：旧表上线时还没有这些列，先 create index 会
+-- 直接报 "column does not exist"，而这里一失败整个进程都起不来（实测踩过：
+-- 新版本首启把服务打成了 restart loop）。create table 只对新库生效，旧库
+-- 全靠这几条 alter 补。
+alter table %s add column if not exists upstream_model text not null default '';
+alter table %s add column if not exists failure text not null default '';
+alter table %s add column if not exists api_key text not null default '';
 create index if not exists %s_time_idx on %s (time desc, id desc);
 create index if not exists %s_outcome_idx on %s (outcome);
 -- 按入站密钥聚合（面板「用户」页）：api_key + time 复合索引让「某用户的最近请求」
 -- 和「区间内按 key 分组」都走索引，不必扫全表。请求记录表是热表，这个索引是
 -- 面板唯一会做聚合查询的维度，值得单独建。
 create index if not exists %s_key_idx on %s (api_key, time desc);
-alter table %s add column if not exists upstream_model text not null default '';
-alter table %s add column if not exists failure text not null default '';
-alter table %s add column if not exists api_key text not null default '';
 `
 
 // requestLogColumns 与建表顺序一致，供 CopyFrom 与 SELECT 复用。

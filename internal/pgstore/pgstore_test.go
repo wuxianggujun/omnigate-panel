@@ -2,6 +2,7 @@ package pgstore
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -312,6 +313,86 @@ func TestAggregateKeyUsage(t *testing.T) {
 	}
 	if len(empty) != 0 {
 		t.Fatalf("空区间应返回 0 行，得到 %+v", empty)
+	}
+}
+
+// TestEnsureRequestLogsUpgradesLegacyTable 复现线上踩过的坑：旧库里的 request_logs
+// 没有 api_key / upstream_model / failure 三列。补列语句必须排在**建索引之前**，
+// 否则 `create index ... (api_key, ...)` 会报 column does not exist，而建表失败
+// 会让整个进程起不来（不是降级，是 restart loop）。
+func TestEnsureRequestLogsUpgradesLegacyTable(t *testing.T) {
+	dsn := os.Getenv("PGSTORE_TEST_DSN")
+	if dsn == "" {
+		t.Skip("未设置 PGSTORE_TEST_DSN，跳过 PostgreSQL 集成测试")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	const table = "panel_reqlog_upgrade_test"
+	st, err := openWithTable(ctx, dsn, table)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer st.Close()
+	dropTestTables(t, st, table)
+
+	// 升级前的表结构：没有 upstream_model / failure / api_key 三列。
+	if _, err := st.pool.Exec(ctx, fmt.Sprintf(`
+		create table %s (
+			id bigserial primary key,
+			time timestamptz not null,
+			request_id text not null default '',
+			path text not null default '',
+			account text not null default '',
+			model text not null default '',
+			realm text not null default '',
+			status int not null default 0,
+			ok boolean not null default false,
+			outcome text not null default '',
+			duration_ms bigint not null default 0,
+			ttfb_ms bigint not null default 0,
+			attempts int not null default 0,
+			prompt_tokens bigint not null default 0,
+			completion_tokens bigint not null default 0,
+			total_tokens bigint not null default 0,
+			credit double precision not null default 0,
+			credit_known boolean not null default false,
+			cache_hit_tokens bigint not null default 0,
+			cache_miss_tokens bigint not null default 0,
+			reasoning_effort text not null default '',
+			reasoning_tokens bigint not null default 0,
+			reasoning boolean not null default false,
+			client_ip text not null default '',
+			user_agent text not null default '',
+			provider text not null default ''
+		)`, st.logTable)); err != nil {
+		t.Fatalf("建旧表: %v", err)
+	}
+
+	// 新版本首次启动会再跑一遍 ensureRequestLogs。
+	if err := ensureRequestLogs(ctx, st); err != nil {
+		t.Fatalf("升级旧表失败（补列必须排在索引之前）: %v", err)
+	}
+
+	for _, col := range []string{"api_key", "upstream_model", "failure"} {
+		var n int
+		if err := st.pool.QueryRow(ctx,
+			`select count(*) from information_schema.columns where table_name=$1 and column_name=$2`,
+			st.logTable, col).Scan(&n); err != nil {
+			t.Fatalf("查列 %s: %v", col, err)
+		}
+		if n != 1 {
+			t.Errorf("升级后缺少列 %s", col)
+		}
+	}
+	var idx int
+	if err := st.pool.QueryRow(ctx,
+		`select count(*) from pg_indexes where tablename=$1 and indexname=$2`,
+		st.logTable, st.logTable+"_key_idx").Scan(&idx); err != nil {
+		t.Fatalf("查索引: %v", err)
+	}
+	if idx != 1 {
+		t.Errorf("升级后缺少 api_key 索引")
 	}
 }
 

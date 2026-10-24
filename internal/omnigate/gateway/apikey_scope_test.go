@@ -89,8 +89,8 @@ func TestProviderOfMatchesRoute(t *testing.T) {
 	for _, tc := range []struct{ model, want string }{
 		{"raccoon/glm-5.3", "raccoon"}, // 已知前缀 → 该供应商
 		{"runable/zai/x", "runable"},
-		{"glm-5.3", "raccoon"},  // 裸名 → 默认供应商
-		{"", "raccoon"},         // 空 → 默认供应商
+		{"glm-5.3", "raccoon"},    // 裸名 → 默认供应商
+		{"", "raccoon"},           // 空 → 默认供应商
 		{"typo/gpt-6", "raccoon"}, // 前缀不是已知供应商 → 回落默认
 	} {
 		got := g.ProviderOf(tc.model)
@@ -103,10 +103,127 @@ func TestProviderOfMatchesRoute(t *testing.T) {
 	}
 }
 
+// TestRouteScopedPicksAllowedAliasTarget：别名链首在权限外、链上另一个目标在
+// 权限内时，收窄密钥必须真的落到权限内的目标，而不是被入口一刀切拒掉。
+// 目录里的别名归属与 alias_of 也必须按权限裁剪。
+func TestRouteScopedPicksAllowedAliasTarget(t *testing.T) {
+	g := catalogGateway(t,
+		&catalogProvider{name: "raccoon", models: []openai.Model{{ID: "m"}}},
+		&catalogProvider{name: "runable", models: []openai.Model{{ID: "m1"}}},
+	)
+	g.modelMap = NewModelMappingStore(filepath.Join(t.TempDir(), "m.json"))
+	if err := g.SetModelMappingTargets("deepseek", []string{"raccoon/m", "runable/m1"}); err != nil {
+		t.Fatalf("配链: %v", err)
+	}
+
+	if got := g.ProviderFor("deepseek", []string{"runable"}); got != "runable" {
+		t.Errorf("ProviderFor(别名, 只授 runable)=%q want runable", got)
+	}
+	if p, m, ok := g.routeScoped("deepseek", []string{"runable"}); !ok || p != "runable" || m != "m1" {
+		t.Errorf("routeScoped(别名, 只授 runable)=(%q,%q,%v) want (runable,m1,true)", p, m, ok)
+	}
+	if got := g.ProviderFor("deepseek", []string{"nope"}); got != "" {
+		t.Errorf("链上没有任何权限内目标时应返回空，得到 %q", got)
+	}
+	if got := g.ProviderFor("raccoon/m", []string{"runable"}); got != "" {
+		t.Errorf("显式指定权限外供应商应返回空，得到 %q", got)
+	}
+
+	models := g.ListModelsFor(context.Background(), []string{"runable"})
+	var alias *openai.Model
+	for i := range models {
+		if models[i].ID == "deepseek" {
+			alias = &models[i]
+		}
+	}
+	if alias == nil {
+		t.Fatalf("权限内别名不该从目录消失: %v", modelIDs(models))
+	}
+	if alias.OwnedBy != "runable" {
+		t.Errorf("别名 OwnedBy=%q want runable", alias.OwnedBy)
+	}
+	if !reflect.DeepEqual(alias.AliasOf, []string{"runable/m1"}) {
+		t.Errorf("别名 AliasOf=%v want [runable/m1]", alias.AliasOf)
+	}
+}
+
+// TestRouteScopedPrefersAllowedProvider：裸名按 routing.prefer 选供应商时，
+// 必须跳过权限外的偏好项，落到权限内且目录里真有该模型的供应商。
+func TestRouteScopedPrefersAllowedProvider(t *testing.T) {
+	g := catalogGateway(t,
+		&catalogProvider{name: "raccoon", models: []openai.Model{{ID: "shared"}}},
+		&catalogProvider{name: "runable", models: []openai.Model{{ID: "shared"}}},
+	)
+	g.cfg.Routing = &config.RoutingConfig{Prefer: []string{"raccoon", "runable"}}
+	g.modelCache = map[string]modelEntry{
+		"raccoon": {models: []openai.Model{{ID: "shared"}}},
+		"runable": {models: []openai.Model{{ID: "shared"}}},
+	}
+	if p, m, ok := g.routeScoped("shared", []string{"runable"}); !ok || p != "runable" || m != "shared" {
+		t.Errorf("routeScoped(shared, 只授 runable)=(%q,%q,%v) want (runable,shared,true)", p, m, ok)
+	}
+	if p, _, _ := g.routeScoped("shared", []string{"raccoon"}); p != "raccoon" {
+		t.Errorf("只授 raccoon 时应选 raccoon，得到 %q", p)
+	}
+}
+
+// TestScopedChainFallbackSkipsSelectedPrimary：链首被权限跳过、实际主目标是链上
+// 第二个目标时，回退列表不能把主目标再列一遍（否则失败后会重复打同一个上游）。
+func TestScopedChainFallbackSkipsSelectedPrimary(t *testing.T) {
+	g := catalogGateway(t,
+		&catalogProvider{name: "raccoon", models: []openai.Model{{ID: "m"}}},
+		&catalogProvider{name: "runable", models: []openai.Model{{ID: "m1"}}},
+	)
+	g.modelMap = NewModelMappingStore(filepath.Join(t.TempDir(), "m.json"))
+	if err := g.SetModelMappingTargets("drain", []string{"raccoon/m", "runable/m1"}); err != nil {
+		t.Fatalf("配链: %v", err)
+	}
+	fb := g.modelChainFallbacksScoped("drain", "runable", "m1", []string{"runable"})
+	if len(fb) != 0 {
+		t.Errorf("主目标之后没有权限内候选，兜底应为空，得到 %v", fb)
+	}
+}
+
 func modelIDs(ms []openai.Model) []string {
 	out := make([]string, 0, len(ms))
 	for _, m := range ms {
 		out = append(out, m.ID)
 	}
 	return out
+}
+
+// TestCompleteTextRespectsScope：深度研究等内部多步流程用 CompleteText，必须
+// 和 HandleChat 一样按 ctx 上的 KeyProviders 选目标；否则收窄密钥可以借研究
+// 链路绕开 /v1beta 的入口校验。
+func TestCompleteTextRespectsScope(t *testing.T) {
+	g := testGateway(textProvider("fake", "from fake"))
+	g.modelCachePath = filepath.Join(t.TempDir(), "model-cache.json")
+	g.providers["alt"] = textProvider("alt", "from alt")
+	g.order = []string{"fake", "alt"}
+	g.cfg.Providers = []config.ProviderConfig{
+		{Name: "fake", Type: "openai"},
+		{Name: "alt", Type: "openai", Models: []string{"m1"}},
+	}
+	g.modelMap = NewModelMappingStore(filepath.Join(t.TempDir(), "m.json"))
+	if err := g.SetModelMappingTargets("deepseek", []string{"fake/m", "alt/m1"}); err != nil {
+		t.Fatalf("配链: %v", err)
+	}
+
+	// 链首 fake 在范围外、链上 alt 在范围内：研究步骤应直接落到 alt。
+	out, err := g.CompleteText(
+		WithReqMeta(context.Background(), &ReqMeta{KeyProviders: []string{"alt"}}),
+		"deepseek", "hi")
+	if err != nil {
+		t.Fatalf("CompleteText: %v", err)
+	}
+	if out != "from alt" {
+		t.Errorf("CompleteText=%q want from alt（不能打范围外的链首）", out)
+	}
+
+	// 链上没有任何范围内的目标：明确报错，而不是回落到全量路由。
+	if _, err := g.CompleteText(
+		WithReqMeta(context.Background(), &ReqMeta{KeyProviders: []string{"nope"}}),
+		"deepseek", "hi"); err == nil {
+		t.Error("范围内没有目标时应报错")
+	}
 }

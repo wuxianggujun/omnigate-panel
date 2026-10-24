@@ -42,6 +42,35 @@ func TestServeLoggedRecordsAPIKey(t *testing.T) {
 	}
 }
 
+// TestServeLoggedInjectsScopeWithoutRecorders 验证没有请求记录/用量记录器时，
+// serveLogged 仍会把入站密钥的供应商范围挂到 ctx 上。否则 HandleChat 的
+// routeScoped 拿到 nil，收窄密钥会退化成全量路由。
+func TestServeLoggedInjectsScopeWithoutRecorders(t *testing.T) {
+	s := &Server{
+		cfg: &config.Config{
+			APIKeys: config.APIKeyList{{
+				Key: "sk-user", Name: "南瓜", Providers: []string{"atria"},
+			}},
+		},
+	}
+	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	r.Header.Set("Authorization", "Bearer sk-user")
+	w := httptest.NewRecorder()
+
+	var got []string
+	s.serveLogged(w, r, func(w http.ResponseWriter, r *http.Request) {
+		m := gateway.ReqMetaFrom(r.Context())
+		if m != nil {
+			got = m.KeyProviders
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+
+	if len(got) != 1 || got[0] != "atria" {
+		t.Fatalf("KeyProviders = %v, want [atria]", got)
+	}
+}
+
 // TestServeLoggedRecordsReasoning 验证 serveLogged 会把 gateway 回填的「上游产出过
 // 思考内容」标记落进请求记录（runable 等不回报 usage 时，思考列靠它兜底）。
 func TestServeLoggedRecordsReasoning(t *testing.T) {

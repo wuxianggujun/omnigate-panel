@@ -1503,6 +1503,52 @@ code, pre, .mono { font-family: var(--mono); font-variant-ligatures: none; }
   color: var(--text-2); letter-spacing: 0.02em;
 }
 .users-table-card .table-card { border: 0; }
+
+/* 用户页：权限分组卡与访问范围编辑。分组只是视图，权限仍落在
+   api_keys[].providers；样式与 routing 页的 scope 卡片保持同一套观感。 */
+.access-groups-card .card-body { padding-top: 10px; }
+.access-groups { display: flex; flex-wrap: wrap; gap: 6px; }
+.access-group {
+  display: flex; align-items: center; gap: 9px;
+  padding: 7px 9px; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--panel-2); color: var(--text-2);
+  font-size: 10.5px; cursor: pointer; text-align: left;
+}
+.access-group:hover { border-color: var(--border-strong); }
+.access-group.active { border-color: var(--accent); background: var(--accent-soft); }
+.access-group-name { display: inline-flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.access-group-count { color: var(--text-3); font-size: 9.5px; white-space: nowrap; }
+.use-user-access {
+  margin: 2px 0 16px; padding: 10px 11px;
+  border: 1px solid var(--border); border-radius: 9px; background: var(--panel-2);
+}
+.use-user-access .section-title { margin-bottom: 7px; }
+.use-user-access .tag-row { margin-bottom: 6px; }
+.use-user-access .section-note { padding: 0; }
+.use-user-access-actions { display: flex; gap: 6px; margin-top: 8px; }
+.scope-editor { display: flex; flex-direction: column; gap: 12px; }
+.scope-preset-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.scope-preset-label { font-size: 10px; color: var(--text-3); margin-right: 2px; }
+.scope-preset {
+  padding: 4px 8px; border-radius: 999px; border: 1px solid var(--border);
+  background: var(--panel-2); color: var(--text-2); font-size: 10px; cursor: pointer;
+}
+.scope-preset:hover { border-color: var(--border-strong); }
+.scope-preset.active { border-color: var(--accent); background: var(--accent-soft); color: var(--text); }
+.scope-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+.scope-option {
+  display: flex; align-items: center; gap: 7px;
+  padding: 8px 9px; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--panel); cursor: pointer; min-width: 0;
+}
+.scope-option:hover { border-color: var(--border-strong); }
+.scope-option input { accent-color: var(--accent); flex: none; }
+.scope-option-name { font-size: 10.5px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.scope-option-hint { margin-left: auto; font-size: 9px; color: var(--text-3); flex: none; }
+.scope-summary { margin: 0; font-size: 10.5px; color: var(--text-2); }
+.section-title-row { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.section-title-row .section-title { margin-bottom: 0; }
+
 .detail-fact { display: flex; flex-direction: column; gap: 2px; padding: 8px 10px; background: var(--panel-2); min-width: 0; }
 .detail-fact .fact-value { font-size: 10.5px; word-break: break-word; white-space: normal; }
 .drawer-logs { display: flex; flex-direction: column; gap: 10px; }
@@ -1763,6 +1809,8 @@ code, pre, .mono { font-family: var(--mono); font-variant-ligatures: none; }
   .page-actions .segmented { order: -1; }
   .mapping-row { flex-direction: column; gap: 7px; }
   .mapping-actions { width: 100%; justify-content: flex-start; }
+  .access-group { flex: 1 1 100%; justify-content: space-between; }
+  .scope-options { grid-template-columns: 1fr; }
   .resolution-controls .select { flex-basis: 100%; }
   .chart-legend { flex-wrap: wrap; }
   .drawer-head { padding: 13px 14px 11px; }

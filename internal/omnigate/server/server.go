@@ -229,22 +229,27 @@ func (s *Server) serveLogged(w http.ResponseWriter, r *http.Request, fn func(htt
 	// 真能取到的图片 URL。放在这里是因为所有 AI 端点都经过它，而只有这一层知道
 	// 自己被怎么寻址。前缀要补回来——本服务收到的是 StripPrefix 之后的路径。
 	r = r.WithContext(provider.WithImageBase(r.Context(), util.PublicBase(r)+omniMountPrefix))
+	// 把入站密钥的收窄范围带进网关：入口的 allowModel 只校验主目标，而别名链
+	// 的后续目标 / 全局 cfg.Fallback 的候选不走那道校验，只能靠网关侧按这个
+	// 范围过滤兜底候选（见 gateway.tryFallback）。keyScope 返回的零值 = 全量。
+	//
+	// 必须在「没有请求记录/用量记录器」的早退分支之前注入：那种部署形态下
+	// HandleChat 仍要靠 meta 选择范围内目标，否则收窄密钥会退化成全量路由。
+	meta := &gateway.ReqMeta{}
+	if k, _ := s.keyScope(r); len(k.Providers) > 0 {
+		meta.KeyProviders = k.Providers
+	}
+	if s.reqlog != nil || s.usage != nil {
+		// 入站身份：记录到请求归档，面板「用户」页据此按人聚合。只写标签，不写密钥。
+		meta.APIKey = s.keyLabel(r)
+	}
+	r = r.WithContext(gateway.WithReqMeta(r.Context(), meta))
 	if s.reqlog == nil && s.usage == nil {
 		fn(w, r)
 		return
 	}
 	start := time.Now()
 	id := reqlog.NewRequestID()
-	meta := &gateway.ReqMeta{}
-	// 把入站密钥的收窄范围带进网关：入口的 allowModel 只校验主目标，而引流链
-	// 的后续目标 / 全局 cfg.Fallback 的候选不走那道校验，只能靠网关侧按这个
-	// 范围过滤兜底候选（见 gateway.tryFallback）。keyScope 返回的零值 = 全量。
-	if k, _ := s.keyScope(r); len(k.Providers) > 0 {
-		meta.KeyProviders = k.Providers
-	}
-	// 入站身份：记录到请求归档，面板「用户」页据此按人聚合。只写标签，不写密钥。
-	meta.APIKey = s.keyLabel(r)
-	r = r.WithContext(gateway.WithReqMeta(r.Context(), meta))
 	lw := &logWriter{ResponseWriter: w, start: start}
 	if s.reqlog != nil {
 		s.reqlog.Begin()
@@ -543,12 +548,15 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 // 自己调的是 A 实际打到 B。也刻意不假装 404：排障时「不存在」比「无权限」更难查。
 func (s *Server) allowModel(w http.ResponseWriter, r *http.Request, model string) bool {
 	k, _ := s.keyScope(r) // 已过 authorized
-	prov := s.gw.ProviderOf(model)
-	if k.Allows(prov) {
+	// ProviderFor 与 HandleChat 的 routeScoped 同源：别名链会挑第一个权限内的
+	// 目标，而不是拿链首的供应商做一刀切判断。返回空串只可能是「链上没有任何
+	// 权限内目标」或「显式指定了权限外供应商」。
+	prov := s.gw.ProviderFor(model, k.Providers)
+	if prov != "" {
 		return true
 	}
 	writeJSON(w, http.StatusForbidden, openai.ErrorJSON("model_not_allowed",
-		"api key is scoped to providers ["+strings.Join(k.Providers, ", ")+"]; requested model routes to provider "+prov))
+		"api key is scoped to providers ["+strings.Join(k.Providers, ", ")+"]; requested model "+model+" has no target in scope"))
 	return false
 }
 

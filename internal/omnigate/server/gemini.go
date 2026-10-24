@@ -111,11 +111,11 @@ func (s *Server) authorizedGemini(w http.ResponseWriter, r *http.Request) bool {
 // allowModelGemini 同 allowModel，但越权错误用 Gemini 形态。
 func (s *Server) allowModelGemini(w http.ResponseWriter, r *http.Request, model string) bool {
 	k, _ := s.keyScope(r) // 已过 authorized
-	prov := s.gw.ProviderOf(model)
-	if k.Allows(prov) {
+	prov := s.gw.ProviderFor(model, k.Providers)
+	if prov != "" {
 		return true
 	}
 	writeJSON(w, http.StatusForbidden, gemini.ErrorJSON(http.StatusForbidden,
-		"api key is scoped to providers ["+strings.Join(k.Providers, ", ")+"]; requested model routes to provider "+prov))
+		"api key is scoped to providers ["+strings.Join(k.Providers, ", ")+"]; requested model "+model+" has no target in scope"))
 	return false
 }

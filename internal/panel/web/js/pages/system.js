@@ -229,7 +229,6 @@ function render() {
     page.appendChild(el('div', { class: 'context-strip' },
       badge(roleLabel(auth.role), auth.role === 'admin' ? 'accent' : 'info'),
       el('span', { class: 'context-note', text: canWrite() ? '管理员拥有完整读写权限' : (auth.role === 'viewer' ? '只读角色：可查看配置，但不能保存' : '普通用户：仅能管理自己的面板账号与归属账号') }),
-      ui.loading ? el('span', { class: 'muted small', text: '加载中…' }) : null,
     ));
   }
 
@@ -262,7 +261,10 @@ function accessTab(auth) {
     return wrap;
   }
   if (!ui.config) {
-    wrap.appendChild(notice('warn', '配置不可读', ui.configError || '无法读取引擎配置。'));
+    // 首次加载只放一个 loadingBlock；不要在页面顶部再写一行「加载中…」。
+    wrap.appendChild(ui.loading
+      ? loadingBlock('加载系统配置')
+      : notice('warn', '配置不可读', ui.configError || '无法读取引擎配置。'));
     return wrap;
   }
   const keys = normalizeKeyList(ui.config.api_keys);
@@ -320,6 +322,14 @@ function accessTab(auth) {
     ),
   ));
   wrap.appendChild(card({ body: table.el, class: 'table-card' }));
+  wrap.appendChild(el('div', { class: 'notice notice-info' },
+    icon('user', 16),
+    el('div', { class: 'notice-content' },
+      el('strong', { text: '按用户分配渠道' }),
+      el('span', { text: '同一用户名下可能有多把密钥（newapi 多 token）。到「用户」页可以按人勾选供应商范围，一次更新同名全部密钥，并按范围查看分组。' }),
+    ),
+    el('a', { class: 'btn btn-ghost btn-sm', href: '#/users' }, '前往用户页'),
+  ));
   wrap.appendChild(el('div', { class: 'notice notice-info' },
     icon('info', 16),
     el('div', { class: 'notice-content' },
@@ -777,6 +787,11 @@ function openKeyModal(index) {
         el('label', { class: 'field-label' }, '供应商 scope'),
         scopeBox,
         el('p', { class: 'field-help', text: '不勾选任何供应商 = 全量。勾选后模型目录会收窄到这些供应商。' }),
+        el('p', { class: 'field-help' },
+          '同一个名字下可能有多把密钥（newapi 多 token）；这里只改当前这一把。要按用户统一改，请到 ',
+          el('a', { href: '#/users' }, '用户页'),
+          ' 编辑访问权限。',
+        ),
       ),
       errorBox,
     ),

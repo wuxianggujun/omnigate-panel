@@ -158,6 +158,8 @@ func (p *Panel) routes() {
 	// 供应商配置与插件元数据。
 	p.mux.HandleFunc("GET /panel/api/omni/config", p.privileged(p.getOmniConfig))
 	p.mux.HandleFunc("POST /panel/api/omni/config", p.admin(p.saveOmniConfig))
+	// 按用户（api_keys[].name）更新供应商范围；同名多把密钥一起改。
+	p.mux.HandleFunc("POST /panel/api/access/scope", p.admin(p.updateAccessScope))
 	p.mux.HandleFunc("GET /panel/api/omni/provider-types", p.read(p.providerTypes))
 	p.mux.HandleFunc("GET /panel/api/omni/provider-secret", p.admin(p.providerSecret))
 	p.mux.HandleFunc("GET /panel/api/omni/provider-quota", p.privileged(p.omniProviderQuota))

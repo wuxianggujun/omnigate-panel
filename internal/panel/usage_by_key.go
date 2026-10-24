@@ -56,7 +56,7 @@ func (p *Panel) usageByKey(w http.ResponseWriter, r *http.Request) {
 	// 已配置但本窗口内没有流量的密钥也要出现：用户页的第一用途是「对账」，
 	// 只显示有流量的人会让运营以为某把密钥不存在，实际是刚发出去还没用。
 	// 顺序上把这些零流量行排在最后，不打扰正常阅读。
-	configured := p.configuredKeyNames()
+	configuredKeys := p.configuredKeys()
 	if rows == nil {
 		rows = []reqlog.KeyUsage{}
 	}
@@ -67,13 +67,15 @@ func (p *Panel) usageByKey(w http.ResponseWriter, r *http.Request) {
 			rows[i].Models = []reqlog.KeyUsageModel{}
 		}
 	}
-	for _, name := range configured {
-		if seen[name] {
+	configured := make([]string, 0, len(configuredKeys))
+	for _, k := range configuredKeys {
+		configured = append(configured, k.Name)
+		if seen[k.Name] {
 			continue
 		}
-		seen[name] = true
+		seen[k.Name] = true
 		rows = append(rows, reqlog.KeyUsage{
-			Key:    name,
+			Key:    k.Name,
 			Models: []reqlog.KeyUsageModel{},
 		})
 	}
@@ -99,20 +101,99 @@ func (p *Panel) usageByKey(w http.ResponseWriter, r *http.Request) {
 		// 让前端能区分「配置里有这把钥匙」与「只见过历史流量」——后者常见于
 		// 密钥已删除但归档还在，标出来以免对账时找不到人。
 		"configured": configured,
+		// configured_keys 比 configured 多带每把密钥的供应商范围，用户页据此
+		// 展示「这个用户能访问哪些渠道」，并按范围自动分组。同名多把密钥
+		// （newapi 一个用户多 token）合并成一行，范围取并集。
+		"configured_keys": configuredKeys,
 	})
 }
 
-// configuredKeyNames 从引擎配置里取所有写了 name 的入站密钥标签。
+// configuredKeyAccess 是用户页需要的「密钥 → 供应商范围」视图。它只暴露标签和
+// 供应商名，绝不带 key 明文——用户页是 viewer 也能看的页面。
+type configuredKeyAccess struct {
+	Name      string   `json:"name"`
+	Providers []string `json:"providers,omitempty"`
+	// Mixed 表示同名多把密钥写了不同的范围；UI 需要提示「改一次会一起改」。
+	Mixed bool `json:"mixed,omitempty"`
+}
+
+// configuredKeys 从引擎配置里取所有写了 name 的入站密钥及其供应商范围。
 //
 // 裸串形式的密钥（api_keys: ["sk-..."]）没有名字，无法与归档里的匿名摘要对应，
 // 直接跳过；这种密钥在用户页本来也只能显示成 unnamed-xxxx，强行合并反而更乱。
-func (p *Panel) configuredKeyNames() []string {
+//
+// 同名多把密钥合并：全部是空范围（全量）时结果为全量；否则取并集。并集与网关
+// 的实际授权口径一致——同一个人拿任意一把钥匙能摸到的供应商，就是他的总范围。
+func (p *Panel) configuredKeys() []configuredKeyAccess {
 	m, err := p.loadOmniConfigMap()
 	if err != nil {
-		return nil
+		return []configuredKeyAccess{}
 	}
+	order := providerOrder(m)
 	list, _ := m["api_keys"].([]any)
-	names := make([]string, 0, len(list))
+	byName := make(map[string]*configuredKeyAccess, len(list))
+	full := make(map[string]bool, len(list))
+	for _, item := range list {
+		obj, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		name, _ := obj["name"].(string)
+		if name = strings.TrimSpace(name); name == "" {
+			continue
+		}
+		provs, _ := stringList(obj["providers"])
+		entry := byName[name]
+		if entry == nil {
+			entry = &configuredKeyAccess{Name: name}
+			byName[name] = entry
+		}
+		if len(provs) == 0 {
+			// 空范围 = 全量，优先级最高；同名里只要有一把全量，这个用户就是全量。
+			// 但「一把全量 + 一把收窄」确实不一致，仍要标记 mixed，提示用户页
+			// 「编辑后所有同名密钥会合并成同一组」。
+			if len(entry.Providers) > 0 {
+				entry.Mixed = true
+			}
+			full[name] = true
+			continue
+		}
+		if full[name] {
+			entry.Mixed = true
+			continue
+		}
+		if len(entry.Providers) > 0 && !sameStringSet(entry.Providers, provs) {
+			entry.Mixed = true
+		}
+		entry.Providers = unionStrings(entry.Providers, provs)
+	}
+	out := make([]configuredKeyAccess, 0, len(byName))
+	for name, entry := range byName {
+		if full[name] {
+			entry.Providers = nil
+		} else {
+			entry.Providers = sortByOrder(entry.Providers, order)
+		}
+		out = append(out, *entry)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+// configuredKeyNames 保留给既有调用方/测试：只取合并后的名字列表。
+func (p *Panel) configuredKeyNames() []string {
+	keys := p.configuredKeys()
+	names := make([]string, 0, len(keys))
+	for _, k := range keys {
+		names = append(names, k.Name)
+	}
+	return names
+}
+
+// providerOrder 取配置里 providers 的声明顺序，用于范围标签的稳定排序。
+func providerOrder(m map[string]any) []string {
+	list, _ := m["providers"].([]any)
+	out := make([]string, 0, len(list))
 	for _, item := range list {
 		obj, ok := item.(map[string]any)
 		if !ok {
@@ -120,9 +201,82 @@ func (p *Panel) configuredKeyNames() []string {
 		}
 		name, _ := obj["name"].(string)
 		if name = strings.TrimSpace(name); name != "" {
-			names = append(names, name)
+			out = append(out, name)
 		}
 	}
-	sort.Strings(names)
-	return names
+	return out
+}
+
+func stringList(v any) ([]string, bool) {
+	switch list := v.(type) {
+	case []string:
+		return append([]string(nil), list...), true
+	case []any:
+		out := make([]string, 0, len(list))
+		for _, item := range list {
+			if s, ok := item.(string); ok && strings.TrimSpace(s) != "" {
+				out = append(out, strings.TrimSpace(s))
+			}
+		}
+		return out, true
+	default:
+		return nil, false
+	}
+}
+
+func sameStringSet(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	seen := make(map[string]bool, len(a))
+	for _, s := range a {
+		seen[s] = true
+	}
+	for _, s := range b {
+		if !seen[s] {
+			return false
+		}
+	}
+	return true
+}
+
+func unionStrings(a, b []string) []string {
+	seen := make(map[string]bool, len(a)+len(b))
+	out := make([]string, 0, len(a)+len(b))
+	for _, list := range [][]string{a, b} {
+		for _, s := range list {
+			if s == "" || seen[s] {
+				continue
+			}
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func sortByOrder(values, order []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	rank := make(map[string]int, len(order))
+	for i, name := range order {
+		rank[name] = i
+	}
+	out := append([]string(nil), values...)
+	sort.SliceStable(out, func(i, j int) bool {
+		ri, iok := rank[out[i]]
+		rj, jok := rank[out[j]]
+		switch {
+		case iok && jok:
+			return ri < rj
+		case iok:
+			return true
+		case jok:
+			return false
+		default:
+			return out[i] < out[j]
+		}
+	})
+	return out
 }

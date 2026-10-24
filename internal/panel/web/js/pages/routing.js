@@ -410,6 +410,7 @@ function mappingCard(canEdit) {
         el('div', { class: 'mapping-targets' }, targets.length
           ? targets.map((target, index) => el('span', { class: 'mapping-target' },
             index > 0 ? el('span', { class: 'mapping-arrow', text: '↓' }) : null,
+            index === 0 ? badge('首选', 'accent') : badge(`回退 ${index}`, 'muted'),
             el('span', { class: 'mono', text: target }),
           ))
           : el('span', { class: 'muted small', text: '没有目标（配置异常）' })),
@@ -439,6 +440,10 @@ function mappingCard(canEdit) {
       on: { click: () => openMappingModal('') },
     }, icon('plus', 14), '添加映射') : badge('只读', 'muted'),
     body: el('div', {},
+      el('div', { class: 'notice notice-info notice-inline' },
+        icon('info', 15),
+        el('span', { text: '实际首选 = 这条别名目标链的第一项；default_provider 与「裸模型优先级」只在没有别名命中时生效。要换首选，编辑别名并调整目标顺序。' }),
+      ),
       ui.mappingError ? el('div', { class: 'notice notice-warn notice-inline' }, icon('alert', 15), el('span', { text: ui.mappingError })) : null,
       el('div', { class: 'mapping-list' }, rows),
     ),

@@ -781,9 +781,42 @@ export function buildKeyUsage(state, rows) {
     m.total_tokens += Number(row.total_tokens || 0);
   }
 
-  const configured = (state.config.api_keys || [])
-    .map((k) => (typeof k === 'string' ? '' : String(k.name || '').trim()))
-    .filter(Boolean);
+  // 与后端 /usage/by-key 的 configured_keys 同口径：同名多把密钥合并成一行，
+  // 范围取并集；只要有一把是全量，这个用户就是全量。
+  const accessByName = new Map();
+  for (const raw of state.config.api_keys || []) {
+    if (!raw || typeof raw !== 'object') continue;
+    const name = String(raw.name || '').trim();
+    if (!name) continue;
+    const provs = Array.isArray(raw.providers)
+      ? raw.providers.map((p) => String(p || '').trim()).filter(Boolean)
+      : [];
+    const entry = accessByName.get(name) || {
+      name, providers: [], mixed: false, full: false,
+    };
+    if (!provs.length) {
+      if (entry.providers.length) entry.mixed = true;
+      entry.full = true;
+    } else if (entry.full) {
+      entry.mixed = true;
+    } else {
+      if (entry.providers.length && !sameStringSet(entry.providers, provs)) {
+        entry.mixed = true;
+      }
+      for (const p of provs) {
+        if (!entry.providers.includes(p)) entry.providers.push(p);
+      }
+    }
+    accessByName.set(name, entry);
+  }
+  const configuredKeys = Array.from(accessByName.values())
+    .map((entry) => ({
+      name: entry.name,
+      ...(entry.full ? {} : { providers: entry.providers }),
+      ...(entry.mixed ? { mixed: true } : {}),
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'));
+  const configured = configuredKeys.map((k) => k.name);
 
   const list = Array.from(acc.values())
     .map((it) => ({
@@ -824,7 +857,12 @@ export function buildKeyUsage(state, rows) {
     total,
     retention_days: 7,
     configured,
+    configured_keys: configuredKeys,
   };
+}
+
+function sameStringSet(a, b) {
+  return a.length === b.length && a.every((item) => b.includes(item));
 }
 
 export function buildUsageSnapshot(state, { hours = 24, accounts = null, providers = null } = {}) {

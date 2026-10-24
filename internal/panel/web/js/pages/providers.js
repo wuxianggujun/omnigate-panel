@@ -348,7 +348,11 @@ function render() {
     ),
     el('div', { class: 'page-actions' },
       el('span', { class: 'auto-refresh-note' },
-        ui.lastUpdated ? `更新于 ${fmtTime(ui.lastUpdated)}` : (ui.loading ? '加载中…' : ''),
+        // 首次加载由列表区的 loadingBlock 提示；这里只在「已有内容、正在刷新」
+        // 时写一行刷新状态，避免手机窄屏上两个加载提示上下叠着。
+        ui.lastUpdated
+          ? `更新于 ${fmtTime(ui.lastUpdated)}`
+          : (ui.loading && list.length ? '刷新中…' : ''),
       ),
       refreshBtn,
       (isAdmin() && ui.config)

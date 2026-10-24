@@ -269,6 +269,13 @@ export const api = {
     }),
   },
 
+  // 按用户（api_keys[].name）更新供应商范围；同名多把密钥由后端一起改。
+  access: {
+    setScope: (payload, opts = {}) => request('/access/scope', {
+      method: 'POST', body: payload, dedupe: false, ...opts,
+    }),
+  },
+
   requestLogs: {
     get: (query = {}, opts = {}) => request('/request_logs', { query, ...opts }),
   },

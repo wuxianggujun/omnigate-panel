@@ -166,10 +166,15 @@ func (g *Gateway) tryFallback(ctx context.Context, req *openai.ChatRequest, prim
 			continue
 		}
 		// Attribute the request to the provider that actually served it.
-		meta.Provider = c.Provider
-		// 兜底命中后上游已换成候选的模型，真实模型名必须跟着走，否则请求记录
-		// 会显示一个根本没被调用的模型（主目标那个）。
-		meta.UpstreamModel = c.Model
+		// meta 可能为 nil：HandleChat 是导出的网关入口，单元测试/嵌入式调用
+		// 不一定经过 serveLogged。范围判断已由 ProviderAllowed 的 nil 接收器
+		// 兜住，这里也不能因为记账对象缺失而 panic。
+		if meta != nil {
+			meta.Provider = c.Provider
+			// 兜底命中后上游已换成候选的模型，真实模型名必须跟着走，否则请求记录
+			// 会显示一个根本没被调用的模型（主目标那个）。
+			meta.UpstreamModel = c.Model
+		}
 		g.log.Info("兜底命中 %s", c.qualified())
 		return res
 	}

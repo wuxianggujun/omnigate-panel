@@ -503,6 +503,30 @@ async function handleApi(url, init) {
     pushLog(`[panel] ${auth.user.username} 保存了引擎配置（${restored.providers.length} 个供应商）`, 'sys');
     return ok({ restart_required: [] });
   }
+  if (path === '/access/scope' && method === 'POST') {
+    const auth = requireAdmin();
+    if (auth.error) return auth.error;
+    const name = String(body.name || '').trim();
+    if (!name) return fail(400, 'name 不能为空');
+    const providers = Array.isArray(body.providers)
+      ? body.providers.map((p) => String(p || '').trim()).filter(Boolean)
+      : [];
+    const valid = new Set((state.config.providers || []).map((p) => p.name));
+    for (const p of providers) {
+      if (!valid.has(p)) return fail(400, `未知供应商: ${p}`);
+    }
+    let updated = 0;
+    for (const key of state.config.api_keys || []) {
+      if (!key || typeof key !== 'object') continue;
+      if (String(key.name || '').trim() !== name) continue;
+      if (providers.length) key.providers = providers.slice();
+      else delete key.providers;
+      updated += 1;
+    }
+    if (!updated) return fail(404, `配置里没有名为 ${name} 的入站密钥`);
+    pushLog(`[panel] ${auth.user.username} 更新用户 ${name} 的供应商范围：${providers.length ? providers.join(' / ') : '全量'}`, 'sys');
+    return ok({ name, providers, updated, restart_required: [] });
+  }
 
   // ---- 账号 ----
   if (path === '/omni/accounts' && method === 'GET') {

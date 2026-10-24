@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/gateway"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/openai"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/provider"
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/util"
@@ -158,8 +159,18 @@ func (s *Server) researchModel(ctx context.Context, requested string) (string, e
 
 // withImageBase 复刻 serveLogged 的图片基址注入：研究链路里若用到生图类 provider，
 // 拼出的图片 URL 才能被客户端取到。
+//
+// 同时把入站密钥的供应商范围挂到 ctx：深度研究不走 serveLogged，而它内部的三步
+// CompleteText 需要与 HandleChat 同源的路由收窄，否则收窄密钥能借研究链路绕开
+// allowModelGemini 只校验主目标的那一道检查。
 func (s *Server) withImageBase(r *http.Request) *http.Request {
-	return r.WithContext(provider.WithImageBase(r.Context(), util.PublicBase(r)+omniMountPrefix))
+	ctx := provider.WithImageBase(r.Context(), util.PublicBase(r)+omniMountPrefix)
+	meta := &gateway.ReqMeta{}
+	if k, _ := s.keyScope(r); len(k.Providers) > 0 {
+		meta.KeyProviders = k.Providers
+	}
+	meta.APIKey = s.keyLabel(r)
+	return r.WithContext(gateway.WithReqMeta(ctx, meta))
 }
 
 func decodeResearchBody(w http.ResponseWriter, r *http.Request, v any) bool {

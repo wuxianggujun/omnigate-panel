@@ -750,16 +750,33 @@ func (g *Gateway) ListModelsFor(ctx context.Context, allowed []string) []openai.
 		if g.ModelMappings().IsDisabled(alias) {
 			continue
 		}
-		pn, _ := g.route(alias)
-		if allow != nil && !allow[pn] {
+		chain := g.ModelMappings().Chain(alias)
+		if len(chain) == 0 {
+			continue
+		}
+		// 别名按「链上第一个有权访问的目标」归属；收窄密钥看到的目标链也只
+		// 保留它有权用的那些，避免目录里列出一个调下去必 403 的供应商。
+		owned := ""
+		visible := make([]string, 0, len(chain))
+		for _, target := range chain {
+			pn, _, ok := g.routeResolvedScoped(target, allow)
+			if !ok || pn == "" {
+				continue
+			}
+			if owned == "" {
+				owned = pn
+			}
+			visible = append(visible, target)
+		}
+		if owned == "" {
 			continue
 		}
 		seen[alias] = true
 		out = append(out, openai.Model{
 			ID:      alias,
 			Object:  "model",
-			OwnedBy: pn,
-			AliasOf: g.ModelMappings().Chain(alias),
+			OwnedBy: owned,
+			AliasOf: visible,
 		})
 	}
 	// 全局模型白名单（MODEL_WHITELIST）：非空时只暴露其中列出的对外模型 ID。
@@ -782,6 +799,17 @@ func (g *Gateway) ListModelsFor(ctx context.Context, allowed []string) []openai.
 // 「拦住了却能打」。
 func (g *Gateway) ProviderOf(model string) string {
 	name, _ := g.route(model)
+	return name
+}
+
+// ProviderFor 返回 model 在 allowed 收窄范围内的实际落点；没有可用目标时返回 ""。
+// allowed 为空 = 全量，与 route/ProviderOf 完全同源；收窄时按同一条别名链挑选
+// 第一个「供应商在范围内」的目标——这保证授权校验与实际路由不会各说各话。
+func (g *Gateway) ProviderFor(model string, allowed []string) string {
+	name, _, ok := g.routeScoped(model, allowed)
+	if !ok {
+		return ""
+	}
 	return name
 }
 
@@ -816,17 +844,115 @@ func (g *Gateway) routeResolved(model string) (string, string) {
 	return g.cfg.DefaultProvider, model
 }
 
+// providerAllowSet 把入站密钥的供应商白名单转成查询表；空列表返回 nil（= 全量）。
+func providerAllowSet(allowed []string) map[string]bool {
+	if len(allowed) == 0 {
+		return nil
+	}
+	out := make(map[string]bool, len(allowed))
+	for _, name := range allowed {
+		out[name] = true
+	}
+	return out
+}
+
+// routeScoped 是 route 的收窄版本：allowed 非空时，只会在这些供应商里选落点。
+//
+// 与「先 route 再校验」的区别在别名链：一条 deepseek 别名可能同时指向
+// cline-pass 和 yijia，只授 yijia 的密钥应该走链上的 yijia，而不是因为链首是
+// cline-pass 被整个拒掉。反过来，如果链首就在范围内，也绝不能先打链首再靠兜底
+// 回到范围内——那等于让客户端用了没授权的供应商。两个方向都由这里一次决定。
+func (g *Gateway) routeScoped(model string, allowed []string) (string, string, bool) {
+	allow := providerAllowSet(allowed)
+	if allow == nil {
+		prov, m := g.route(model)
+		return prov, m, true
+	}
+	if g.modelMap != nil {
+		if chain := g.modelMap.Chain(model); len(chain) > 0 {
+			for _, target := range chain {
+				if prov, m, ok := g.routeResolvedScoped(target, allow); ok {
+					return prov, m, true
+				}
+			}
+			return "", "", false
+		}
+	}
+	return g.routeResolvedScoped(model, allow)
+}
+
+// routeResolvedScoped 在已知的 allow 表下解析一个「已经过别名解析」的目标。
+// 语义与 routeResolved 一致，只是所有裸名回落都限制在 allow 内。
+func (g *Gateway) routeResolvedScoped(model string, allow map[string]bool) (string, string, bool) {
+	if allow == nil {
+		prov, m := g.routeResolved(model)
+		return prov, m, true
+	}
+	if model == "" {
+		prov := g.defaultProviderScoped(allow)
+		if prov == "" {
+			return "", "", false
+		}
+		return prov, g.cfg.DefaultModel, true
+	}
+	if i := strings.Index(model, "/"); i > 0 {
+		if _, ok := g.providers[model[:i]]; ok {
+			if !allow[model[:i]] {
+				return "", "", false
+			}
+			return model[:i], model[i+1:], true
+		}
+	}
+	if p := g.preferProviderIn(model, allow); p != "" {
+		return p, model, true
+	}
+	if allow[g.cfg.DefaultProvider] {
+		return g.cfg.DefaultProvider, model, true
+	}
+	// 默认供应商不在范围内：按配置顺序取第一个允许的供应商。模型目录可能还没
+	// 缓存这个裸名，此时宁可让请求落到权限内的供应商，也不该用 403 假装模型不存在。
+	if p := g.firstAllowedProvider(allow); p != "" {
+		return p, model, true
+	}
+	return "", "", false
+}
+
+// defaultProviderScoped 返回范围内的默认供应商；默认不在范围内时取第一个允许项。
+func (g *Gateway) defaultProviderScoped(allow map[string]bool) string {
+	if allow[g.cfg.DefaultProvider] {
+		return g.cfg.DefaultProvider
+	}
+	return g.firstAllowedProvider(allow)
+}
+
+func (g *Gateway) firstAllowedProvider(allow map[string]bool) string {
+	for _, name := range g.order {
+		if allow[name] {
+			return name
+		}
+	}
+	return ""
+}
+
 // preferProvider 在裸模型名下按 routing.prefer 顺序返回第一个「模型目录里真有该
 // 模型」的供应商名；没有偏好、或都没命中时返回 ""（调用方回落 default_provider）。
 //
 // 只看缓存目录（cachedModels，不触发网络拉取）——路由必须是无阻塞的纯内存判断。
 // 目录由 models() 在列举 / 兜底时刷新，并在启动时从落盘缓存（文件或 KV 后端）恢复。
 func (g *Gateway) preferProvider(model string) string {
+	return g.preferProviderIn(model, nil)
+}
+
+// preferProviderIn 是 preferProvider 的收窄版本：allow 非空时跳过范围外供应商。
+func (g *Gateway) preferProviderIn(model string, allow map[string]bool) string {
 	prefer := g.cfg.PreferProviders()
 	if len(prefer) == 0 || model == "" {
 		return ""
 	}
 	for _, name := range prefer {
+		if allow != nil && !allow[name] {
+			continue
+		}
 		if _, ok := g.providers[name]; !ok {
 			continue
 		}
@@ -876,11 +1002,34 @@ func (g *Gateway) modelChainFallbacks(model string) []fallbackCandidate {
 		return nil
 	}
 	primProv, primModel := g.route(model)
+	return g.chainFallbacksFrom(chain, primProv, primModel, nil)
+}
+
+// modelChainFallbacksScoped 同 modelChainFallbacks，但以「收窄后实际选中的
+// 主目标」为排除项，并只保留权限内的链目标。链首可能因为权限被跳过，这时
+// 主目标其实是链上的第二个目标；若仍按链首排除，会在失败后把同一个目标再
+// 试一遍，白白多打一次上游。
+func (g *Gateway) modelChainFallbacksScoped(model, primaryProvider, primaryModel string, allowed []string) []fallbackCandidate {
+	if g.modelMap == nil {
+		return nil
+	}
+	chain := g.modelMap.Chain(model)
+	if len(chain) <= 1 {
+		return nil
+	}
+	return g.chainFallbacksFrom(chain, primaryProvider, primaryModel, allowed)
+}
+
+func (g *Gateway) chainFallbacksFrom(chain []string, primProv, primModel string, allowed []string) []fallbackCandidate {
+	allow := providerAllowSet(allowed)
 	out := make([]fallbackCandidate, 0, len(chain)-1)
 	seen := map[string]bool{}
-	for _, target := range chain[1:] {
-		pn, m := g.routeResolved(target)
-		if pn == "" || m == "" || (pn == primProv && m == primModel) {
+	for _, target := range chain {
+		pn, m, ok := g.routeResolvedScoped(target, allow)
+		if !ok || pn == "" || m == "" {
+			continue
+		}
+		if pn == primProv && m == primModel {
 			continue
 		}
 		q := pn + "/" + m
@@ -923,9 +1072,22 @@ func (g *Gateway) HandleChat(ctx context.Context, req *openai.ChatRequest, w htt
 		writeJSON(w, 400, openai.ErrorJSON("messages_required", "messages is required"))
 		return
 	}
-	provName, model := g.route(req.Model)
+	// 入口 allowModel 已按同一范围校验过；这里再取一次范围，是为了让「别名链首在
+	// 权限外、链上另一个目标在权限内」的请求真的落到权限内的那个目标，而不是被
+	// 入口拦掉或先打权限外目标再兜底。直接调用 HandleChat 的路径（单测、内部
+	// 研究流程）没有 ReqMeta 时等价于全量。
+	var keyProviders []string
+	if m := ReqMetaFrom(ctx); m != nil {
+		keyProviders = m.KeyProviders
+	}
+	provName, model, routeOK := g.routeScoped(req.Model, keyProviders)
+	if !routeOK {
+		writeJSON(w, http.StatusForbidden, openai.ErrorJSON("model_not_allowed",
+			"api key is scoped to providers ["+strings.Join(keyProviders, ", ")+"]; model "+req.Model+" has no allowed target"))
+		return
+	}
 	// 模型别名引流链：主目标失败/额度耗尽时的有序回退候选（见 modelChainFallbacks）。
-	chainFB := g.modelChainFallbacks(req.Model)
+	chainFB := g.modelChainFallbacksScoped(req.Model, provName, model, keyProviders)
 	prov := g.providers[provName]
 	if prov == nil {
 		writeJSON(w, 400, openai.ErrorJSON("unknown_provider", "未知 provider: "+provName))

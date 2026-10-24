@@ -212,7 +212,8 @@ function successRate(totals) {
 }
 
 function rangeText(data) {
-  if (!data) return '加载中';
+  // 卡片正文已有 loadingBlock（动画 + 文案），这里不再重复写「加载中」。
+  if (!data) return '';
   if (data.window_from || data.window_to) {
     return `${data.window_from ? fmtDateTime(data.window_from) : '最早'} 至 ${data.window_to ? fmtDateTime(data.window_to) : '现在'}（${WINDOWS.find((w) => w.hours === ui.hours)?.label || `${ui.hours} 小时`}）`;
   }

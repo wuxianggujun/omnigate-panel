@@ -292,7 +292,9 @@ function applyFilters() {
       },
     ],
     rows,
-    empty: ui.loading ? '加载中…' : '没有符合筛选条件的模型',
+    // 首次加载由 load() 的 loadingBlock（动画 + 文案）独占提示；表格在
+    // ui.loading=false 之后才渲染，这里不需要再放一份「加载中」。
+    empty: '没有符合筛选条件的模型',
   });
   tableHost.replaceChildren(table.el);
 }

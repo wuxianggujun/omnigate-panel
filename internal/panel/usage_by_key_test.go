@@ -3,6 +3,7 @@ package panel
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -99,14 +100,19 @@ func TestUsageByKeyMergesConfiguredAndTotals(t *testing.T) {
 		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
 	}
 	var got struct {
-		Rows []reqlog.KeyUsage `json:"rows"`
+		Rows  []reqlog.KeyUsage `json:"rows"`
 		Total struct {
 			Requests    int64 `json:"requests"`
 			Errors      int64 `json:"errors"`
 			TotalTokens int64 `json:"total_tokens"`
 		} `json:"total"`
-		RetentionDays int      `json:"retention_days"`
-		Configured    []string `json:"configured"`
+		RetentionDays  int      `json:"retention_days"`
+		Configured     []string `json:"configured"`
+		ConfiguredKeys []struct {
+			Name      string   `json:"name"`
+			Providers []string `json:"providers"`
+			Mixed     bool     `json:"mixed"`
+		} `json:"configured_keys"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatalf("decode: %v", err)
@@ -175,5 +181,66 @@ func TestConfiguredKeyNamesSkipsUnnamed(t *testing.T) {
 	seen := map[string]bool{names[0]: true, names[1]: true}
 	if !seen["从未使用"] || !seen["生产客户端"] {
 		t.Fatalf("names = %v", names)
+	}
+}
+
+// 同名多把密钥（newapi 一个用户多个 token）合并成一行：范围取并集并标记
+// mixed；只要有一把是全量，这个用户就是全量。裸串没有名字，不进入配置视图。
+func TestConfiguredKeysMergesDuplicateNamesAndScopes(t *testing.T) {
+	p, _ := newUsagePanel(t, &fakeKeyUsageSink{})
+	p.cfg.LoadOmniConfig = func() (any, error) {
+		return map[string]any{
+			"providers": []any{
+				map[string]any{"name": "a"},
+				map[string]any{"name": "b"},
+				map[string]any{"name": "c"},
+			},
+			"api_keys": []any{
+				map[string]any{"key": "sk-1", "name": "混合用户", "providers": []any{"b"}},
+				map[string]any{"key": "sk-2", "name": "混合用户", "providers": []any{"a"}},
+				map[string]any{"key": "sk-3", "name": "全量用户"},
+				map[string]any{"key": "sk-4", "name": "全量用户", "providers": []any{"c"}},
+				"sk-bare",
+			},
+		}, nil
+	}
+
+	keys := p.configuredKeys()
+	if len(keys) != 2 {
+		t.Fatalf("keys = %+v", keys)
+	}
+	byName := map[string]configuredKeyAccess{}
+	for _, k := range keys {
+		byName[k.Name] = k
+	}
+	mixed := byName["混合用户"]
+	if !mixed.Mixed {
+		t.Errorf("同名不同范围应标记 mixed: %+v", mixed)
+	}
+	if len(mixed.Providers) != 2 || mixed.Providers[0] != "a" || mixed.Providers[1] != "b" {
+		t.Errorf("范围应按 providers 声明顺序给出并集 [a b]，得到 %v", mixed.Providers)
+	}
+	full := byName["全量用户"]
+	if len(full.Providers) != 0 {
+		t.Errorf("同名里有一把全量时应收敛成全量，得到 %v", full.Providers)
+	}
+	if !full.Mixed {
+		t.Errorf("全量与收窄并存应标记 mixed: %+v", full)
+	}
+}
+
+// 用户页的 configured_keys 必须带范围，且不能泄露 key 明文。
+func TestUsageByKeyConfiguredKeysExposeScopeOnly(t *testing.T) {
+	p, cookies := newUsagePanel(t, &fakeKeyUsageSink{})
+	rec := do(p, http.MethodGet, "/panel/api/usage/by-key", "", cookies[panelauth.RoleAdmin], nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, "sk-a") || strings.Contains(body, "sk-b") {
+		t.Fatalf("configured_keys 泄露了 key 明文: %s", body)
+	}
+	if !strings.Contains(body, `"configured_keys"`) || !strings.Contains(body, `"providers":["p"]`) {
+		t.Fatalf("configured_keys 缺少范围: %s", body)
 	}
 }

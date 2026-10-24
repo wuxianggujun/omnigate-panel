@@ -102,6 +102,40 @@ func TestUpdateAccessScopeEmptyMeansFull(t *testing.T) {
 	}
 }
 
+// 两个 JSON 对象 / 尾部垃圾必须拒绝：拒绝比「静默忽略第二个对象」安全。拼错
+// 字段名由 DisallowUnknownFields 拦住；否则 {"name":"u"} 会解成「providers 为空」，
+// 等于把用户从收窄静默放开成全量。
+func TestUpdateAccessScopeRejectsTrailingBody(t *testing.T) {
+	p, cookies := newUsagePanel(t, &fakeKeyUsageSink{})
+	p.cfg.LoadOmniConfig = func() (any, error) {
+		return map[string]any{
+			"providers": []any{map[string]any{"name": "a"}},
+			"api_keys": []any{
+				map[string]any{"key": "sk-1", "name": "u", "providers": []any{"a"}},
+			},
+		}, nil
+	}
+	saved := false
+	p.cfg.SaveOmniConfig = func([]byte) ([]string, error) {
+		saved = true
+		return nil, nil
+	}
+
+	for _, body := range []string{
+		`{"name":"u","provider":["a"]}`,    // 字段名拼错
+		`{"name":"u","providers":["a"]}{}`, // 多个对象
+		`{"name":"u","providers":["a"]} x`, // 尾部垃圾
+	} {
+		rec := do(p, http.MethodPost, "/panel/api/access/scope", body, cookies[panelauth.RoleAdmin], nil)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("body=%s status = %d want 400", body, rec.Code)
+		}
+	}
+	if saved {
+		t.Error("非法请求体不应该触发保存")
+	}
+}
+
 func TestUpdateAccessScopeRejectsUnknown(t *testing.T) {
 	p, cookies := newUsagePanel(t, &fakeKeyUsageSink{})
 	p.cfg.LoadOmniConfig = func() (any, error) {

@@ -39,8 +39,17 @@ func (p *Panel) updateAccessScope(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req accessScopeRequest
-	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+	// DisallowUnknownFields + 只允许一个 JSON 对象：这个接口直接改「谁能调什么」，
+	// 静默忽略拼错的字段（"provider" / "providerss"）会变成「清空 = 全量」，
+	// 也就是一次误操作把收窄的用户放开回全量。
+	dec := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
+	if dec.More() {
+		writeErr(w, http.StatusBadRequest, "请求体只能是单个 JSON 对象")
 		return
 	}
 	name := strings.TrimSpace(req.Name)

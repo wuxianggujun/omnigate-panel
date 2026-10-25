@@ -837,7 +837,9 @@ export function buildKeyUsage(state, rows) {
     if (!list.some((it) => it.key === name)) {
       list.push({
         key: name, requests: 0, errors: 0, prompt_tokens: 0, completion_tokens: 0,
-        total_tokens: 0, avg_duration_ms: 0, last_seen: '', models: [],
+        // 与真实后端一致：time.Time 零值序列化为 0001-01-01T00:00:00Z，
+        // 用户页必须把它当「无记录」而不是公元 1 年。
+        total_tokens: 0, avg_duration_ms: 0, last_seen: '0001-01-01T00:00:00Z', models: [],
       });
     }
   }

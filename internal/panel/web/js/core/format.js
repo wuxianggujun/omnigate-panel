@@ -177,19 +177,20 @@ export function fmtUptime(seconds) {
 
 export function parseDate(value) {
   if (value == null || value === '') return null;
-  if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value;
-  if (typeof value === 'number') {
-    const ms = value > 1e12 ? value : value * 1000;
-    const d = new Date(ms);
-    return Number.isNaN(d.getTime()) ? null : d;
+  let d;
+  if (value instanceof Date) {
+    d = value;
+  } else if (typeof value === 'number') {
+    d = new Date(value > 1e12 ? value : value * 1000);
+  } else {
+    const s = String(value);
+    if (/^\d+$/.test(s)) return parseDate(Number(s));
+    d = new Date(s);
   }
-  const s = String(value);
-  if (/^\d+$/.test(s)) {
-    const n = Number(s);
-    return parseDate(n);
-  }
-  const d = new Date(s);
-  return Number.isNaN(d.getTime()) ? null : d;
+  // Go 的 time.Time 零值会被序列化成 0001-01-01T00:00:00Z。它表示「没有记录」，
+  // 不是公元 1 年的业务时间；若不拦掉，零流量用户会显示成「两万个月前」。
+  if (Number.isNaN(d.getTime()) || d.getUTCFullYear() <= 1) return null;
+  return d;
 }
 
 export function fmtDateTime(value, { seconds = false } = {}) {

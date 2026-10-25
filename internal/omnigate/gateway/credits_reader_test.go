@@ -73,11 +73,14 @@ func creditReaderGateway(t *testing.T, prov provider.Provider, accts ...*provide
 // 快过期优先选号立刻可用。类型字符串完全不参与判断。
 func TestRefreshCreditsUsesBalanceReader(t *testing.T) {
 	prov := &fakeBalanceProvider{name: "p", bal: &provider.Balance{
-		Available: 7100,
+		Available: 6100,
 		Unit:      "积分",
 		Wallets: []provider.BalanceWallet{
 			{Type: "daily", Amount: 100, Resets: provider.ResetDaily},
-			{Type: "monthly", Amount: 1000, Resets: provider.ResetMonthly},
+			// 月钱包设为 0（本月已用尽）：CreditExpiring 不受「当前日期离下月 1 号
+			// 是否已小于 168h」影响，否则月末跑测试会多算 1000。月度的重置映射
+			// 由 TestCreditKindOfResetCadence 覆盖。
+			{Type: "monthly", Amount: 0, Resets: provider.ResetMonthly},
 			{Type: "reward", Amount: 6000, Resets: provider.ResetNever},
 		},
 	}}
@@ -89,13 +92,13 @@ func TestRefreshCreditsUsesBalanceReader(t *testing.T) {
 		t.Fatalf("QueryBalance calls = %d, want 1", prov.calls)
 	}
 	snap, ok := g.credits.get(creditKey("p", "a"))
-	if !ok || snap.Available != 7100 {
-		t.Fatalf("snapshot = %+v ok=%v, want available 7100", snap, ok)
+	if !ok || snap.Available != 6100 {
+		t.Fatalf("snapshot = %+v ok=%v, want available 6100", snap, ok)
 	}
 	if len(snap.Wallets) != 3 {
 		t.Fatalf("wallets = %+v", snap.Wallets)
 	}
-	// 只有每日钱包在快过期窗口内（每月 1 号才到期）。
+	// 只有每日钱包有可用金额且在快过期窗口内；月钱包已用尽，奖励钱包无到期。
 	exp, earliest, ok := g.CreditExpiring("p", "a")
 	if !ok || exp != 100 || earliest.IsZero() {
 		t.Fatalf("CreditExpiring = %d/%v ok=%v, want 100/非零/true", exp, earliest, ok)

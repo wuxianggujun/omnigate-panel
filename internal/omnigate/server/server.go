@@ -433,12 +433,17 @@ func (lw *logWriter) ttfbMs() int64 {
 	return lw.firstByte.Sub(lw.start).Milliseconds()
 }
 
-// apiKeyFrom 取请求携带的网关密钥（Authorization: Bearer / x-api-key 两种都认）。
+// apiKeyFrom 取请求携带的网关密钥（Authorization: Bearer / x-api-key /
+// x-goog-api-key 三种都认）。x-goog-api-key 是 Google GenAI SDK 的默认入站头；
+// 显式 Authorization 优先，避免同时带两个头时静默改用到另一个密钥。
 func apiKeyFrom(r *http.Request) string {
 	if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
 		return strings.TrimSpace(strings.TrimPrefix(h, "Bearer "))
 	}
-	return strings.TrimSpace(r.Header.Get("x-api-key"))
+	if k := strings.TrimSpace(r.Header.Get("x-api-key")); k != "" {
+		return k
+	}
+	return strings.TrimSpace(r.Header.Get("x-goog-api-key"))
 }
 
 // keyScope 解析请求携带的网关密钥，返回该密钥的授权范围。未配置任何密钥时网关

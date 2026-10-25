@@ -636,6 +636,10 @@ Gemini 三个入站方言则各自翻译成该方言自己的心跳（`ping` 事
 | `/v1beta/models/…` | Gemini |
 | `/v1/models` | 模型目录（含别名解析后的 ID） |
 
+> 入站统一使用网关密钥：`Authorization: Bearer`、`x-api-key` 都可用；此外也
+> 接受 Google GenAI SDK 默认的 `x-goog-api-key`（主要为 Gemini 客户端；显式
+> Authorization 优先）。上游 provider 的 `protocol` 鉴权见上表，两者不是一回事。
+
 **B. 域名与 URL 一个都不改，只在反代上按路径分流**。适合「客户端配置不能动 / 手上
 有一批已经发出去的旧密钥」的场景：同一个域名，`/v1` 直连本服务，`/` 仍然给中转站
 的管理台。

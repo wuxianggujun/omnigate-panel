@@ -73,6 +73,30 @@ func TestGeminiAuthShape(t *testing.T) {
 	}
 }
 
+// TestGeminiAcceptsXGoogAPIKey：Google GenAI SDK 默认把密钥放在
+// x-goog-api-key，而不是 Authorization / x-api-key。新增这个头不能放宽校验：
+// 错值仍必须是 Gemini 形态的 401。
+func TestGeminiAcceptsXGoogAPIKey(t *testing.T) {
+	s := &Server{cfg: &config.Config{APIKeys: config.APIKeyList{{Key: "sk-full"}}}}
+
+	ok := httptest.NewRequest(http.MethodGet, "/v1beta/models", nil)
+	ok.Header.Set("x-goog-api-key", "sk-full")
+	okW := httptest.NewRecorder()
+	if !s.authorizedGemini(okW, ok) {
+		t.Fatalf("x-goog-api-key 应通过鉴权: status=%d body=%s", okW.Code, okW.Body.String())
+	}
+
+	bad := httptest.NewRequest(http.MethodGet, "/v1beta/models", nil)
+	bad.Header.Set("x-goog-api-key", "wrong")
+	badW := httptest.NewRecorder()
+	if s.authorizedGemini(badW, bad) {
+		t.Fatal("错误的 x-goog-api-key 不应通过鉴权")
+	}
+	if badW.Code != http.StatusUnauthorized {
+		t.Fatalf("错误密钥 status = %d, want 401", badW.Code)
+	}
+}
+
 // TestGeminiRejectsScopedKeyModel：收窄密钥调用无权模型时必须是 403（Gemini 形态），
 // 与 /v1/chat/completions 同口径，而不是静默改道。
 func TestGeminiRejectsScopedKeyModel(t *testing.T) {

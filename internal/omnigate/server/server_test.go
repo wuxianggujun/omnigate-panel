@@ -260,6 +260,11 @@ func TestKeyOK(t *testing.T) {
 		{"bearer", func(r *http.Request) { r.Header.Set("Authorization", "Bearer secret-key") }, true},
 		{"bearer_spaces", func(r *http.Request) { r.Header.Set("Authorization", "Bearer   secret-key ") }, true},
 		{"x_api_key", func(r *http.Request) { r.Header.Set("x-api-key", "secret-key") }, true},
+		{"x_goog_api_key", func(r *http.Request) { r.Header.Set("x-goog-api-key", "secret-key") }, true},
+		{"bearer_wins_over_goog", func(r *http.Request) {
+			r.Header.Set("Authorization", "Bearer nope")
+			r.Header.Set("x-goog-api-key", "secret-key")
+		}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

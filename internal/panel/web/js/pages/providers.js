@@ -45,6 +45,10 @@ function initialState() {
     types: BUILTIN_PROVIDER_TYPES,
     models: [],
     modelsError: '',
+    // mappings 用于判断「改默认供应商到底有没有用」：命中别名的模型一律走别名
+    // 目标链，默认供应商对它们完全无效。拿不到时按空表处理，只是少一条提示。
+    mappings: {},
+    mappingsError: '',
     keyHealth: null,
     keyHealthError: '',
     quota: {},
@@ -97,12 +101,13 @@ async function loadAll({ initial = false } = {}) {
   ui.loadError = '';
   if (initial || (!ui.config && !ui.accountsPayload)) render();
 
-  const [accountsRes, configRes, typesRes, modelsRes, keyHealthRes] = await Promise.allSettled([
+  const [accountsRes, configRes, typesRes, modelsRes, keyHealthRes, mappingRes] = await Promise.allSettled([
     api.accounts.list({ signal: pageSignal.signal }),
     api.config.get({ signal: pageSignal.signal }),
     api.providerTypes.get({ signal: pageSignal.signal }),
     api.models.get({ signal: pageSignal.signal }),
     api.keyHealth.get({ signal: pageSignal.signal }),
+    api.mapping.get({ signal: pageSignal.signal }),
   ]);
   if (!pageSignal || pageSignal.signal.aborted) return;
 
@@ -147,6 +152,20 @@ async function loadAll({ initial = false } = {}) {
   } else {
     ui.keyHealth = null;
     ui.keyHealthError = isForbidden(keyHealthRes.reason) ? '当前角色无法查看密钥健康' : describeError(keyHealthRes.reason);
+  }
+
+  if (mappingRes.status === 'fulfilled') {
+    const payload = mappingRes.value || {};
+    const raw = payload?.mappings ?? payload?.data?.mappings ?? payload ?? {};
+    const out = {};
+    for (const [alias, targets] of Object.entries(raw || {})) {
+      out[String(alias)] = Array.isArray(targets) ? targets.map(String) : [String(targets)];
+    }
+    ui.mappings = out;
+    ui.mappingsError = '';
+  } else {
+    ui.mappings = {};
+    ui.mappingsError = isForbidden(mappingRes.reason) ? '当前角色无法查看别名表' : describeError(mappingRes.reason);
   }
 
   const list = providerList();
@@ -257,6 +276,60 @@ function routeRank(provider) {
   if (idx >= 0) return idx + 1;
   if (!prefer.length && config.default_provider === provider.name) return 1;
   return null;
+}
+
+// routeRoleLabel：讲清「这个供应商在裸模型名下到底还起不起作用」。
+//
+// routeRank 只表达 routing.prefer 里的顺位。默认供应商不在 prefer 里时顺位为空，
+// 但它依然是「别名的模型 + prefer 全都没命中」时的兜底，直接显示「未参与路由」是
+// 错的——那会让人以为把它设为默认毫无意义。这里区分三种状态：prefer 顺位、默认
+// 兜底、真的不参与。
+function routeRoleLabel(provider) {
+  const config = ui.config || {};
+  const isDefault = config.default_provider === provider.name;
+  const rank = routeRank(provider);
+  if (rank && isDefault) return `默认 · 优先级 #${rank}`;
+  if (rank) return `路由第 ${rank} 顺位`;
+  if (isDefault) return '默认兜底';
+  return '未参与路由';
+}
+
+// bareModelNames：该供应商自有模型去掉供应商前缀后的裸名集合。别名表以裸名为键，
+// 用它才能判断「这个供应商的模型是不是被别名接管了」。
+function bareModelNames(provider, models) {
+  const names = new Set();
+  for (const model of models || []) {
+    const id = String(model?.id || '');
+    if (id) names.add(id.startsWith(`${provider.name}/`) ? id.slice(provider.name.length + 1) : id);
+  }
+  for (const name of provider.config?.models || []) names.add(String(name));
+  return names;
+}
+
+// aliasHeadProvider：一条别名实际首选落到哪个供应商（目标链首项）。
+function aliasHeadProvider(alias) {
+  const chain = ui.mappings[alias] || [];
+  if (!chain.length) return '';
+  const value = String(chain[0] || '').trim();
+  const names = providerList().map((p) => p.name).sort((a, b) => b.length - a.length);
+  for (const name of names) {
+    if (value === name || value.startsWith(`${name}/`)) return name;
+  }
+  return '';
+}
+
+// shadowingAliases：返回「模型名相同、但实际首选不是本供应商」的别名。
+// 这些别名会让「把本供应商设为默认」对同名裸模型完全无效——这是路由里最反直觉
+// 的一条规则，必须在供应商页说清楚，否则会一直以为是配置没生效。
+function shadowingAliases(provider, models) {
+  const out = [];
+  for (const bare of bareModelNames(provider, models)) {
+    const alias = ui.mappings[bare];
+    if (!alias || !alias.length) continue;
+    const head = aliasHeadProvider(bare);
+    if (head && head !== provider.name) out.push({ alias: bare, head, chain: alias.join(' → ') });
+  }
+  return out;
 }
 
 function providerStatus(provider) {
@@ -450,7 +523,7 @@ function providerPane(list, selected, current) {
         ),
       ),
       el('div', { class: 'provider-item-foot' },
-        el('span', { class: rank ? 'route-rank' : 'route-rank muted', text: rank ? `路由第 ${rank} 顺位` : '未参与路由' }),
+        el('span', { class: rank || isDefault ? 'route-rank' : 'route-rank muted', text: routeRoleLabel(provider) }),
         el('span', { class: 'provider-arrow', 'aria-hidden': 'true' }, icon('chevron', 14)),
       ),
     );
@@ -549,7 +622,7 @@ function overviewTab(provider, meta, current, models) {
       ? ['凭证', keyCount ? `上游密钥 ${keyCount} 组` : '未配置']
       : ['账号数', String(provider.accounts.length)],
     ['额度合计', credits != null ? `${fmtCredits(credits)} 积分` : '未知'],
-    ['路由顺位', rank ? `第 ${rank} 顺位` : '未参与路由'],
+    ['路由顺位', routeRoleLabel(provider)],
     ['默认供应商', ui.config?.default_provider === provider.name ? '是' : '否'],
     ['模型数量', String(models.length)],
     // 密钥型供应商上面已有「凭证」一行，不再重复。
@@ -683,7 +756,7 @@ function adoptionCard(provider, models) {
   ));
   rows.push(el('div', { class: 'fact' },
     el('span', { class: 'fact-label', text: '路由优先级' }),
-    el('span', { class: 'fact-value', text: rank ? `第 ${rank} 顺位` : '未参与' }),
+    el('span', { class: 'fact-value', text: rank ? `第 ${rank} 顺位` : (isDefault ? '默认兜底（不在优先级中）' : '未参与') }),
   ));
   rows.push(el('div', { class: 'fact' },
     el('span', { class: 'fact-label', text: '模型目录' }),
@@ -708,11 +781,14 @@ function adoptionCard(provider, models) {
   actions.push(el('a', { class: 'btn btn-ghost btn-sm', href: '#/routing' }, '前往路由设置'));
 
   const hints = [];
+  const shadowed = shadowingAliases(provider, models);
   hints.push(`带 ${provider.name}/ 前缀的模型请求会直接命中该供应商，无需额外配置。`);
   if (!isDefault && !rank) {
     hints.push('裸模型名目前不会路由到它：需要把它设为默认供应商，或加入路由优先级。');
   } else if (!isDefault && rank) {
     hints.push('裸模型名会按路由优先级顺序尝试；命中前若前序供应商已提供同名模型，会优先用前序供应商。');
+  } else if (isDefault && shadowed.length) {
+    hints.push(`它已是默认供应商，但下列模型的同名别名会先命中其它供应商，默认设置对它们无效。`);
   } else {
     hints.push('它是默认供应商：未命中其它规则时，请求会回落到这里。');
   }
@@ -728,6 +804,15 @@ function adoptionCard(provider, models) {
     actions: actions.length ? actions : null,
     body: el('div', {},
       el('div', { class: 'facts-grid compact' }, rows),
+      shadowed.length
+        ? notice(
+          'warn',
+          `${shadowed.length} 个模型被别名接管`,
+          `${shadowed.map((s) => `${s.alias} → ${s.head}`).join('；')}。`
+          + '别名优先于默认供应商与路由优先级，这些模型不会走到本供应商；'
+          + '要改首选，请到「路由 · 模型别名映射」调整目标链顺序。',
+        )
+        : null,
       el('ul', { class: 'hint-list' }, hints.map((t) => el('li', { text: t }))),
     ),
   });

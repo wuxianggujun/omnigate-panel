@@ -150,6 +150,51 @@ func TestModelMappingChainRoundTrip(t *testing.T) {
 	}
 }
 
+// TestModelMappingOverridesDefaultProvider 钉住最容易误解的一条语义：别名是硬
+// 规则，命中别名的模型一律走目标链第一项，即使它恰好就是默认模型、即使
+// default_provider 指向另一个供应商。
+//
+// 线上事故形态：把 default_provider 从 A 改成 B，客户端发裸名 deepseek-v4.1-flash
+// 仍然落在 A，因为该名字有一条 A 在链首的别名。这里用最小配置复现，保证「改默认
+// 供应商对该模型无效」是**有意设计**而不是回归；面板据此在默认路由卡片上给出
+// 显式告警（见 web/js/pages/routing.js 的 aliasShadowInfo）。
+func TestModelMappingOverridesDefaultProvider(t *testing.T) {
+	g := testGateway(&scriptProvider{})
+	g.providers["alt"] = &scriptProvider{}
+	g.order = append(g.order, "alt")
+	// 默认供应商是 alt，别名却把模型指向 fake。
+	g.cfg.DefaultProvider = "alt"
+	g.cfg.DefaultModel = "alt/m"
+	g.cfg.Routing = &config.RoutingConfig{Prefer: []string{"alt", "fake"}}
+	g.modelCache["fake"] = modelEntry{models: []openai.Model{{ID: "shared"}}}
+	g.modelCache["alt"] = modelEntry{models: []openai.Model{{ID: "shared"}, {ID: "m"}}}
+	g.modelMap = NewModelMappingStore(filepath.Join(t.TempDir(), "m.json"))
+	if err := g.modelMap.Set("shared", "fake/shared"); err != nil {
+		t.Fatal(err)
+	}
+
+	// 无别名时裸名按 prefer 走 alt（默认供应商 + 目录命中）。
+	if pn := g.ProviderOf("m"); pn != "alt" {
+		t.Fatalf("ProviderOf(m) = %q, want alt", pn)
+	}
+	// 有别名时一律走链首 fake，default_provider=alt 与 prefer 都不生效。
+	if pn, m := g.route("shared"); pn != "fake" || m != "shared" {
+		t.Fatalf("route(shared) = (%q,%q), want (fake,shared); alias must beat default_provider", pn, m)
+	}
+	if pn := g.ProviderOf("shared"); pn != "fake" {
+		t.Fatalf("ProviderOf(shared) = %q, want fake", pn)
+	}
+	// 带前缀的请求同样绕过别名表：alt/shared 直接命中 alt。
+	if pn, m := g.route("alt/shared"); pn != "alt" || m != "shared" {
+		t.Fatalf("route(alt/shared) = (%q,%q), want (alt,shared)", pn, m)
+	}
+	// 收窄到只授 alt 时，别名链首的 fake 被跳过；链上没有其它目标即拒绝——
+	// 这正是面板「别名链回退目标被 scope 跳过」告警对应的后端行为。
+	if pn := g.ProviderFor("shared", []string{"alt"}); pn != "" {
+		t.Fatalf("ProviderFor(shared, [alt]) = %q, want empty (alias chain escapes scope)", pn)
+	}
+}
+
 // TestModelMappingJSONBackCompat 钉住落盘/接口形状：单目标是裸字符串（与旧格式
 // 字节级兼容），多目标才是数组；两种写法都要能读回。
 func TestModelMappingJSONBackCompat(t *testing.T) {

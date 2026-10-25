@@ -402,6 +402,8 @@ export const MOCK_MAPPINGS = {
   fast: ['opencode/qwen3-coder', 'runable/zai/glm-5.3'],
   coder: ['opencode/gpt-5-codex', 'trae/solo-coder'],
   deepseek: ['deepseek/deepseek-chat'],
+  // 与 deepseek 供应商自有模型同名的别名：用来演示「别名接管同名模型」的告警。
+  'deepseek-chat': ['runable/deepseek-v3', 'deepseek/deepseek-chat'],
   'legacy-claude': ['runable/zai/glm-5.3'],
 };
 

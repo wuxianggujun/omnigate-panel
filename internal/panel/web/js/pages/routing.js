@@ -271,6 +271,98 @@ function render() {
   rootEl.replaceChildren(page);
 }
 
+// stripProviderPrefix 去掉已知供应商前缀，得到客户端实际会发来的裸模型名。
+// 默认模型允许存成 "provider/model"，但别名表以裸名（有时是上游原始 ID）为键，
+// 两边不对齐就会漏掉「这个默认模型其实是别名」的判断。
+function stripProviderPrefix(model, providers) {
+  const value = String(model || '').trim();
+  if (!value) return '';
+  const names = providers.map((p) => p.name).sort((a, b) => b.length - a.length);
+  for (const name of names) {
+    if (value.startsWith(`${name}/`)) return value.slice(name.length + 1);
+  }
+  return value;
+}
+
+// aliasShadowInfo 解释「明明设了默认供应商，请求却还是走别的供应商」。
+//
+// 语义上别名是硬规则：命中别名的模型一律走目标链的第一项，default_provider 与
+// routing.prefer 只在**没有别名命中**时参与选择（与后端 routeScoped 同口径）。
+// 所以改默认供应商对已经有别名的模型完全无效——这是最容易被当成 bug 的地方，
+// 也是这套路由最难自己看出来的一点。这里把结论直接摊在卡片上，并点名要去改哪条
+// 别名，而不是让运维反复改默认供应商却看不到任何效果。
+function aliasShadowInfo() {
+  const providers = providerList();
+  const aliases = Object.keys(ui.mappings);
+  const defaultProvider = ui.defaultProvider || '';
+  const info = { notes: [], warnings: [], others: [] };
+  if (!aliases.length) return info;
+
+  // 别名的「实际首选供应商」= 目标链第一项解析出来的供应商。走与解析预览完全
+  // 相同的解析函数（含 routing.prefer），保证面板结论不会和后端路由各说各话。
+  const headProviderOf = (alias) => {
+    const chain = ui.mappings[alias] || [];
+    if (!chain.length) return '';
+    const parsed = parseTarget(chain[0], providers);
+    if (!parsed) return '';
+    const resolution = resolveProviderForTarget(parsed, {
+      providers, prefer: ui.prefer, defaultProvider, modelCatalog: ui.models,
+    });
+    return resolution?.provider || '';
+  };
+
+  const bare = stripProviderPrefix(ui.defaultModel, providers);
+  if (!bare) return info;
+
+  if (ui.mappings[bare]) {
+    const head = headProviderOf(bare);
+    if (ui.disabled[bare]) {
+      info.notes.push(
+        `默认模型「${bare}」的别名已停用，会按裸模型名解析：先在 routing.prefer 里找目录命中，`
+        + `都没有才回落默认供应商 ${defaultProvider || '（未设置）'}。`,
+      );
+    } else if (head && head === defaultProvider) {
+      info.notes.push(`默认模型「${bare}」命中别名，首选供应商 ${head}，与默认供应商一致。`);
+    } else if (head) {
+      const chain = (ui.mappings[bare] || []).join(' → ');
+      info.warnings.push(
+        `默认模型「${bare}」命中别名，实际首选是 ${head}，不是默认供应商 ${defaultProvider || '（未设置）'}。`
+        + `别名优先于默认供应商与路由优先级，所以改默认供应商对这个模型无效。`
+        + `要换首选，请在「模型别名映射」里编辑「${bare}」，把 ${defaultProvider || '目标供应商'}/... 移到目标链首位。`
+        + `当前链：${chain}`,
+      );
+    }
+  }
+
+  // 其余别名同样不会走默认供应商。列出来是为了让「默认供应商到底还管不管用」有
+  // 一个明确答案：在这个模型集合下，它只兜住没有别名的裸模型。
+  for (const alias of aliases) {
+    if (alias === bare || ui.disabled[alias]) continue;
+    const head = headProviderOf(alias);
+    if (!head || head === defaultProvider) continue;
+    info.others.push(`${alias} → ${head}`);
+  }
+  return info;
+}
+
+// unusedDefaultInfo 说明「默认供应商对所有受限密钥都不可达」。
+//
+// scope 是入站密钥维度的硬限制：受限密钥只能打自己 providers 列表里的供应商。
+// 默认供应商若不在任何受限密钥的列表里，它对那些密钥等于不存在——后端会按顺序
+// 跳过后回落到第一个允许的供应商。面板仍会显示「默认兜底」，于是「设了默认却
+// 走了别家」再次被当成 bug。这里把它单独点出来，并给出结论：要么给密钥加授权，
+// 要么换一个所有密钥都能访问的默认供应商。
+function unusedDefaultInfo() {
+  const defaultProvider = ui.defaultProvider || '';
+  if (!defaultProvider) return null;
+  const keys = keyList().filter((key) => (key.providers || []).length);
+  if (!keys.length) return null; // 全是全量密钥：默认供应商对谁都可达
+  if (keys.some((key) => (key.providers || []).includes(defaultProvider))) return null;
+  return `默认供应商 ${defaultProvider} 不在任何受限密钥的授权范围内（共 ${keys.length} 把受限密钥），`
+    + `请求会被路由到各密钥自己范围内的第一个供应商，这里的「默认兜底」对它们不生效。`
+    + `要么在「用户 / 访问范围」里给对应密钥加上 ${defaultProvider}，要么换一个所有密钥都能访问的默认供应商。`;
+}
+
 function defaultsCard(canEdit) {
   const providers = providerList();
   const providerSelect = el('select', {
@@ -298,17 +390,28 @@ function defaultsCard(canEdit) {
   const modelInput = el('input', {
     class: 'input mono', type: 'text', value: ui.defaultModel, disabled: !canEdit,
     placeholder: 'provider/model 或裸模型名', attrs: { list: 'routing-model-list' },
-    on: { input: () => { ui.defaultModel = modelInput.value.trim(); } },
+    on: {
+      input: () => {
+        ui.defaultModel = modelInput.value.trim();
+        // 只刷新提示区：整卡重绘会让输入框失焦，边打字边重绘根本没法用。
+        shadowNotice(shadowHost);
+        hintText.textContent = ui.defaultProvider ? `当前模板供应商：${ui.defaultProvider}` : '尚未选择默认供应商';
+      },
+    },
   });
+  const shadowHost = el('div', { class: 'form-stack' });
+  shadowNotice(shadowHost);
+  const hintText = el('span', { class: 'muted small', text: ui.defaultProvider ? `当前模板供应商：${ui.defaultProvider}` : '尚未选择默认供应商' });
   return card({
     title: '默认路由',
     subtitle: '裸模型名的兜底供应商与默认模型',
     actions: canEdit ? null : badge('只读', 'muted'),
     body: el('div', { class: 'form-stack' },
+      shadowHost,
       el('div', { class: 'field' },
         el('label', { class: 'field-label' }, '默认供应商'),
         providerSelect,
-        el('p', { class: 'field-help', text: '所有供应商都没有该裸模型时的最后兜底。' }),
+        el('p', { class: 'field-help', text: '兜底顺序：先按「裸模型名优先级」找目录命中的供应商，全都没命中才用这里。' }),
       ),
       el('div', { class: 'field' },
         el('label', { class: 'field-label' }, '默认模型'),
@@ -318,10 +421,40 @@ function defaultsCard(canEdit) {
       ),
       el('div', { class: 'default-hint' },
         statusDot(providerHealth(ui.defaultProvider).tone, providerHealth(ui.defaultProvider).label),
-        el('span', { class: 'muted small', text: ui.defaultProvider ? `当前模板供应商：${ui.defaultProvider}` : '尚未选择默认供应商' }),
+        hintText,
       ),
     ),
   });
+}
+
+// shadowNotice 渲染 aliasShadowInfo 的结论。没有冲突时返回 null，不占版面。
+// host 由调用方持有，输入时只替换内容，不重绘整张卡片——否则输入框会失焦。
+function shadowNotice(host = null) {
+  const target = host || el('div', { class: 'form-stack' });
+  const info = aliasShadowInfo();
+  const unused = unusedDefaultInfo();
+  if (!info.warnings.length && !info.notes.length && !unused) {
+    target.replaceChildren();
+    return host ? null : target;
+  }
+  target.replaceChildren(
+    ...info.warnings.map((text) => el('div', { class: 'notice notice-warn notice-inline' },
+      icon('alert', 15),
+      el('div', { class: 'notice-content' }, el('span', { text })),
+    )),
+    ...info.notes.map((text) => el('div', { class: 'notice notice-info notice-inline' },
+      icon('info', 15),
+      el('div', { class: 'notice-content' }, el('span', { text })),
+    )),
+    ...(unused ? [el('div', { class: 'notice notice-warn notice-inline' },
+      icon('alert', 15),
+      el('div', { class: 'notice-content' }, el('span', { text: unused })),
+    )] : []),
+  );
+  if (info.others.length) {
+    target.appendChild(el('p', { class: 'section-note', text: `以下别名同样优先于默认供应商：${info.others.join('，')}` }));
+  }
+  return host ? null : target;
 }
 
 function priorityCard(canEdit) {
@@ -710,6 +843,18 @@ function resolveModel(raw) {
     } else {
       chain = (aliases[raw] || []).slice();
       result.notes.push(`别名映射目标链：${chain.join(' → ')}`);
+    }
+  }
+  // 带 provider/ 前缀的请求不经过别名表（与后端 routeResolved 同口径）。若裸名
+  // 恰好有一条别名，这里必须说清楚：客户端发带前缀的名字会绕过别名，而发裸名
+  // 才会走别名链——否则「同一个模型两种写法落到不同供应商」会被当成随机行为。
+  if (!result.aliasHit) {
+    const bare = stripProviderPrefix(raw, providers);
+    if (bare && bare !== raw && aliases[bare] && !disabled[bare]) {
+      result.warnings.push(
+        `「${raw}」带供应商前缀，会直接命中该上游，不经过别名表。`
+        + `客户端若发裸名「${bare}」，则会走别名链 ${(aliases[bare] || []).join(' → ')}。`,
+      );
     }
   }
   if (!chain.length) chain = [raw];

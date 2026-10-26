@@ -79,6 +79,41 @@ func TestListModelsForScopesToAllowedProviders(t *testing.T) {
 	}
 }
 
+// TestListModelsForOwnsEveryModel 钉住 owned_by 的语义：它是本网关里的供应商身份，
+// 不是上游自报的渠道名。
+//
+// 线上形态：aotera 的 /models 把每个模型都标成 owned_by="sub2api"（它自己的内部
+// 渠道名）。若原样透出，目录里会凭空多出一个不存在的供应商 sub2api，而 aotera
+// 自己的模型数变成 0——面板的供应商筛选、密钥 scope 的可见模型计数（两边都按
+// owned_by 归类）随之全错。
+func TestListModelsForOwnsEveryModel(t *testing.T) {
+	g := catalogGateway(t,
+		&catalogProvider{name: "aotera", models: []openai.Model{
+			{ID: "gpt-6-sol", OwnedBy: "sub2api"},
+			{ID: "gpt-6-luna", OwnedBy: "sub2api"},
+		}},
+		&catalogProvider{name: "yijia", models: []openai.Model{{ID: "glm-5.3-flash"}}},
+	)
+	ctx := context.Background()
+
+	all := g.ListModels(ctx)
+	for _, m := range all {
+		if m.OwnedBy != "aotera" && m.OwnedBy != "yijia" {
+			t.Fatalf("模型 %q 的 owned_by=%q，应是真实供应商名", m.ID, m.OwnedBy)
+		}
+	}
+	// 按供应商收窄后，aotera 的模型必须归在 aotera 名下（而不是 0 条）。
+	only := g.ListModelsFor(ctx, []string{"aotera"})
+	if len(only) != 2 {
+		t.Fatalf("aotera 收窄目录=%v want 2 条", modelIDs(only))
+	}
+	for _, m := range only {
+		if m.OwnedBy != "aotera" {
+			t.Errorf("模型 %q 的 owned_by=%q want aotera", m.ID, m.OwnedBy)
+		}
+	}
+}
+
 // TestProviderOfMatchesRoute 授权校验用的 ProviderOf 必须与实际路由 route 同源：
 // 两者不一致会出现「放行了却打不到」或「拦住了却能打」。
 func TestProviderOfMatchesRoute(t *testing.T) {

@@ -728,9 +728,11 @@ func (g *Gateway) ListModelsFor(ctx context.Context, allowed []string) []openai.
 		}
 		for _, m := range models {
 			m.ID = name + "/" + m.ID
-			if m.OwnedBy == "" {
-				m.OwnedBy = name
-			}
+			// owned_by 是本网关里的「供应商身份」：客户端（面板筛选、scope 计数、
+			// 解析预览）都拿它当供应商名用。上游常在这里填自己的内部渠道名
+			// （aotera 就返回 "sub2api"），原样透出会在目录里凭空多出一个不存在的
+			// 供应商，同时让 aotera 自己的模型数变成 0、被密钥 scope 统计漏掉。
+			m.OwnedBy = name
 			out = append(out, m)
 		}
 	}

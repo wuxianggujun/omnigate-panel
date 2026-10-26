@@ -599,7 +599,7 @@ function providerDetail(provider, current) {
           ? badge('路由未知', 'muted', { title: '当前角色无法读取平台配置，无法判断它的默认/优先级身份' })
           : (rank ? badge(`路由 #${rank}`, 'info') : badge('未参与路由', 'muted')),
       ),
-      el('p', { class: 'provider-subtitle', text: providerAddress(provider) || '地址未配置' }),
+      el('p', { class: 'provider-subtitle', text: addressLabel(provider) }),
     ),
     el('div', { class: 'provider-head-actions' },
       current.authenticated
@@ -630,6 +630,13 @@ function providerDetail(provider, current) {
 function providerAddress(provider) {
   const c = provider.config || {};
   return c.base_url || c.main_origin || c.agent_host || c.ug_host || c.oauth_host || '';
+}
+
+// addressLabel：详情头那一行地址副标题。
+// 地址来自平台配置，匿名与普通用户读不到 config，此时 providerAddress 返回空串。
+// 写「地址未配置」等于断言「管理员没配」——实际只是「看不到」。
+function addressLabel(provider) {
+  return providerAddress(provider) || (provider.config ? '地址未配置' : '地址不可见');
 }
 
 function overviewTab(provider, meta, current, models) {

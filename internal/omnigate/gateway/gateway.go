@@ -730,23 +730,46 @@ func (g *Gateway) ListModelsFor(ctx context.Context, allowed []string) []openai.
 			allow[name] = true
 		}
 	}
-	out := []openai.Model{}
+	// 并发拉取：各家上游的 /models 相互独立，串行会让「重启后第一次打开模型页」
+	// 的等待时间等于各家延迟之和（实测 5 家 38 秒）。这里的顺序只影响结果拼装，
+	// 所以按 g.order 收集、按 g.order 输出，保持目录顺序稳定。
+	type fetched struct {
+		name   string
+		models []openai.Model
+		err    error
+	}
+	names := make([]string, 0, len(g.order))
 	for _, name := range g.order {
 		if allow != nil && !allow[name] {
 			continue
 		}
-		models, err := g.models(ctx, name)
-		if err != nil {
-			g.log.Warn("获取 %s 模型失败: %v", name, err)
+		names = append(names, name)
+	}
+	results := make([]fetched, len(names))
+	var wg sync.WaitGroup
+	for i, name := range names {
+		wg.Add(1)
+		go func(i int, name string) {
+			defer wg.Done()
+			models, err := g.models(ctx, name)
+			results[i] = fetched{name: name, models: models, err: err}
+		}(i, name)
+	}
+	wg.Wait()
+
+	out := []openai.Model{}
+	for _, r := range results {
+		if r.err != nil {
+			g.log.Warn("获取 %s 模型失败: %v", r.name, r.err)
 			continue
 		}
-		for _, m := range models {
-			m.ID = name + "/" + m.ID
+		for _, m := range r.models {
+			m.ID = r.name + "/" + m.ID
 			// owned_by 是本网关里的「供应商身份」：客户端（面板筛选、scope 计数、
 			// 解析预览）都拿它当供应商名用。上游常在这里填自己的内部渠道名
 			// （aotera 就返回 "sub2api"），原样透出会在目录里凭空多出一个不存在的
 			// 供应商，同时让 aotera 自己的模型数变成 0、被密钥 scope 统计漏掉。
-			m.OwnedBy = name
+			m.OwnedBy = r.name
 			out = append(out, m)
 		}
 	}

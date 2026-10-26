@@ -278,6 +278,15 @@ function routeRank(provider) {
   return null;
 }
 
+// routingKnown：本角色是否真的拿到了平台配置。
+//
+// 匿名/普通用户的 /panel/api/config 是 401，ui.config 为 null。此时 routeRank
+// 恒为 null，界面若直接据此写「未参与路由」，等于把「看不到」说成「不参与」——
+// 实际该供应商可能在优先级里排第 3。凡是拿路由身份下结论的地方都要先问这里。
+function routingKnown() {
+  return !!ui.config;
+}
+
 // bareModelNames：该供应商自有模型去掉供应商前缀后的裸名集合。别名表以裸名为键，
 // 用它才能判断「这个供应商的模型是不是被别名接管了」。
 function bareModelNames(provider, models) {
@@ -551,7 +560,9 @@ function providerDetail(provider, current) {
         badge(meta.label || providerLabel(provider.type), 'muted'),
         statusDot(status.tone, status.label),
         ui.config?.default_provider === provider.name ? badge('默认供应商', 'accent') : null,
-        rank ? badge(`路由 #${rank}`, 'info') : badge('未参与路由', 'muted'),
+        !routingKnown()
+          ? badge('路由未知', 'muted', { title: '当前角色无法读取平台配置，无法判断它的默认/优先级身份' })
+          : (rank ? badge(`路由 #${rank}`, 'info') : badge('未参与路由', 'muted')),
       ),
       el('p', { class: 'provider-subtitle', text: providerAddress(provider) || '地址未配置' }),
     ),
@@ -745,7 +756,10 @@ function adoptionCard(provider, models) {
   const hints = [];
   const shadowed = shadowingAliases(provider, models);
   hints.push(`带 ${provider.name}/ 前缀的模型请求会直接命中该供应商，无需额外配置。`);
-  if (!isDefault && !rank) {
+  if (!routingKnown()) {
+    // 配置读不到时不要替用户下「走不到它」的结论：那只是看不到，不是不参与。
+    hints.push('当前角色无法读取平台配置，无法判断裸模型名是否会路由到它；需要管理员或只读角色查看。');
+  } else if (!isDefault && !rank) {
     hints.push('裸模型名目前不会路由到它：需要把它设为默认供应商，或加入路由优先级。');
   } else if (!isDefault && rank) {
     hints.push('裸模型名会按路由优先级顺序尝试；命中前若前序供应商已提供同名模型，会优先用前序供应商。');

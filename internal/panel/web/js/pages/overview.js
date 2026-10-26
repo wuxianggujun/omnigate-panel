@@ -79,12 +79,19 @@ function render(root, ctx, { loading = false } = {}) {
   const usage = localState.usage || {};
   const providerRows = providerRowsOf(data, accountsPayload);
   const totals = computeTotals(data, usage, providerRows);
-  const noAccounts = totals.accounts === 0;
+  // loaded：三个只读接口里至少有一个真的回来了。
+  //
+  // 首次渲染发生在 await 之前，data/accounts/usage 全是空对象。此时若照常计算，
+  // 页面会先断言「0 个供应商 / 暂无可用凭证 / 还没有配置供应商 / 等待服务端响应」，
+  // 然后在数据到达后被改写——把「还没读到」当成「没有」，正是这些卡片最容易
+  // 误导人的地方。未加载完成时数字位统一留空，不写结论。
+  const loaded = !!(localState.data || localState.accounts || localState.usage);
+  const noAccounts = loaded && totals.accounts === 0;
   const supplierBits = [];
   if (totals.keyReady) supplierBits.push(`${fmtInt(totals.keyReady)} 个密钥直连`);
   if (totals.keyEmpty) supplierBits.push(`${fmtInt(totals.keyEmpty)} 个密钥待配置`);
   if (totals.accountProviders) supplierBits.push(`${fmtInt(totals.accountProviders)} 个账号型`);
-  const supplierMeta = supplierBits.join(' · ') || '暂无可用凭证';
+  const supplierMeta = !loaded ? '' : (supplierBits.join(' · ') || '暂无可用凭证');
   const recent = Array.isArray(data.recent) ? data.recent : [];
   const series = Array.isArray(data.series) && data.series.length ? data.series : (Array.isArray(usage.series) ? usage.series : []);
 
@@ -158,30 +165,38 @@ function render(root, ctx, { loading = false } = {}) {
 
   page.appendChild(el('div', { class: 'kpi-grid kpi-grid-4' },
     kpiCard('服务状态', data.version ? '运行中' : (loading ? '连接中' : '未知'), data.version ? `版本 ${data.version}` : '', data.version ? 'ok' : 'muted', { iconName: 'power', tone: data.version ? 'ok' : 'muted' }),
-    kpiCard(noAccounts ? '供应商' : '账号健康',
-      noAccounts ? fmtInt(totals.providers) : `${fmtInt(totals.healthy)} / ${fmtInt(totals.accounts)}`,
-      noAccounts ? supplierMeta : healthMeta(totals),
-      noAccounts ? 'muted' : (totals.failed ? 'warn' : 'ok'),
+    kpiCard(!loaded ? '供应商 / 账号' : (noAccounts ? '供应商' : '账号健康'),
+      !loaded ? '—' : (noAccounts ? fmtInt(totals.providers) : `${fmtInt(totals.healthy)} / ${fmtInt(totals.accounts)}`),
+      loaded ? (noAccounts ? supplierMeta : healthMeta(totals)) : '',
+      !loaded ? 'muted' : (noAccounts ? 'muted' : (totals.failed ? 'warn' : 'ok')),
       { iconName: noAccounts ? 'key' : 'shield' }),
-    kpiCard('近 24h 请求', fmtCompact(totals.requests), totals.requests ? `成功率 ${fmtPercent(totals.successRate)}` : '暂无流量', 'accent', { iconName: 'activity' }),
-    kpiCard('近 24h 消耗', fmtCompact(totals.tokens),
-      `${fmtCredits(totals.credits)} 积分 · 均延迟 ${fmtDuration(totals.avgLatency)}`, 'muted', { iconName: 'models' }),
+    // 匿名的用量接口按归属过滤，返回的 0 意思是「没有你看得到的记录」，
+    // 不是「平台这段时间没有请求」。直接写 0 等于替平台宣布空转。
+    kpiCard('近 24h 请求', !loaded ? '—' : (state.authenticated ? fmtCompact(totals.requests) : '—'),
+      !loaded ? '' : (state.authenticated ? (totals.requests ? `成功率 ${fmtPercent(totals.successRate)}` : '暂无流量') : '登录后统计'),
+      'accent', { iconName: 'activity' }),
+    kpiCard('近 24h 消耗', !loaded ? '—' : (state.authenticated ? fmtCompact(totals.tokens) : '—'),
+      !loaded ? '' : (state.authenticated ? `${fmtCredits(totals.credits)} 积分 · 均延迟 ${fmtDuration(totals.avgLatency)}` : '登录后统计'),
+      'muted', { iconName: 'models' }),
   ));
 
   // 顺序按「先看结论，再看构成」：健康与流量表在最前，其次引擎版本与趋势，
   // 最后是模型锁与近期请求。原来健康/供应商是两张卡并排，说的却是同一批供应商。
-  page.appendChild(healthCard(totals, providerRows, ctx));
+  page.appendChild(healthCard(totals, providerRows, ctx, { loaded }));
 
   page.appendChild(el('div', { class: 'overview-main-grid' },
-    engineCard(data, totals, contextOf(data)),
-    trendCard(series, ctx),
+    engineCard(data, totals, contextOf(data), { loading }),
+    trendCard(series, ctx, { loaded }),
   ));
 
-  page.appendChild(locksCard(data.model_locks || [], totals));
-  page.appendChild(recentCard(recent, ctx, state));
+  page.appendChild(locksCard(data.model_locks || [], totals, {
+    locksKnown: Array.isArray(data.model_locks),
+    loaded,
+  }));
+  page.appendChild(recentCard(recent, ctx, state, { loaded }));
 
   const footer = el('div', { class: 'page-footer-note' },
-    el('span', { text: `运行 ${fmtUptime(data.uptime_sec)}` }),
+    loaded ? el('span', { text: `运行 ${fmtUptime(data.uptime_sec)}` }) : null,
     data.build ? el('span', { class: 'mono', text: `build ${data.build}` }) : null,
     el('button', {
       class: 'link-btn',
@@ -217,6 +232,9 @@ async function loadAndRerender(root, ctx) {
 function providerRowsOf(data, accountsPayload) {
   const rows = [];
   const seen = new Map();
+  // 匿名访客：后端把 providers 明细与账号列表一起按归属过滤掉了，accounts 恒为空。
+  // 这个空代表「看不到」，行里不能据此写「未配置 / 无账号」。
+  const anonymous = !authState().authenticated;
   if (Array.isArray(data.providers)) {
     for (const item of data.providers) {
       if (!item || !item.name) continue;
@@ -230,6 +248,9 @@ function providerRowsOf(data, accountsPayload) {
         accountMode: item.account_mode || '',
         keyBased,
         keys,
+        // 账号接口下发的 keys 计数是匿名也可见的元信息；缺字段才是「不可见」。
+        keysKnown: item.keys != null,
+        accountsKnown: !anonymous,
         accounts,
         healthy: Number(item.healthy ?? 0),
         cooling: Number(item.cooling ?? 0),
@@ -258,6 +279,7 @@ function providerRowsOf(data, accountsPayload) {
       row.accountMode = row.accountMode || provider.account_mode || '';
       row.keyBased = row.keyBased || keyBased;
       row.keys = Math.max(row.keys || 0, keys);
+      if (provider.keys != null) row.keysKnown = true;
       row.accounts = Math.max(row.accounts, accounts);
       row.healthy = Math.max(row.healthy, healthy);
       row.cooling = Math.max(row.cooling, cooling);
@@ -270,6 +292,8 @@ function providerRowsOf(data, accountsPayload) {
       accountMode: provider.account_mode || '',
       keyBased,
       keys,
+      keysKnown: provider.keys != null,
+      accountsKnown: !anonymous,
       accounts,
       healthy,
       cooling,
@@ -337,7 +361,7 @@ function healthMeta(totals) {
   return bits.join(' · ');
 }
 
-function engineCard(data, totals, context) {
+function engineCard(data, totals, context, { loading = false } = {}) {
   // 引擎卡原来的四格事实（供应商 / 健康账号 / 成功率 / 平均延迟）与顶部 KPI
   // 完全重复。现在只回答 KPI 回答不了的问题：跑的是什么版本、跑了多久、
   // 当前生效的路由默认值。数字统一留给 KPI 条。
@@ -346,9 +370,19 @@ function engineCard(data, totals, context) {
       el('span', { class: 'engine-mark', 'aria-hidden': 'true' }, 'OG'),
       el('div', {},
         el('div', { class: 'engine-name', text: 'OmniGate Engine' }),
-        el('div', { class: 'engine-sub', text: data.version ? `${data.version} · 运行 ${fmtUptime(data.uptime_sec)}` : '等待服务端响应' }),
+        // 「等待服务端响应」只在首屏还没回来时出现；若真的失败了，下面的错误卡
+        // 会说清原因，这里不能把「不知道」写成「运行中」，也不能长期挂着等待。
+        el('div', {
+          class: 'engine-sub',
+          text: data.version
+            ? `${data.version} · 运行 ${fmtUptime(data.uptime_sec)}`
+            : (loading ? '读取中…' : '版本未知'),
+        }),
       ),
-      el('span', { class: 'engine-state' }, statusDot(data.version ? 'ok' : 'muted', data.version ? '运行中' : '未知')),
+      el('span', { class: 'engine-state' }, statusDot(
+        data.version ? 'ok' : (loading ? 'info' : 'muted'),
+        data.version ? '运行中' : (loading ? '读取中' : '未知'),
+      )),
     ),
     context.length ? el('div', { class: 'fact-tags' }, context.map((text) => badge(text, 'muted'))) : null,
     el('div', { class: 'quick-actions' },
@@ -360,7 +394,7 @@ function engineCard(data, totals, context) {
   return card({ title: '引擎状态', subtitle: '版本、运行时长与当前生效的路由默认值', body, class: 'engine-card' });
 }
 
-function healthCard(totals, providerRows, ctx) {
+function healthCard(totals, providerRows, ctx, { loaded = true } = {}) {
   const total = Math.max(1, totals.accounts || 0);
   const segments = [
     { key: 'healthy', value: totals.healthy, tone: 'ok', label: '正常' },
@@ -400,8 +434,12 @@ function healthCard(totals, providerRows, ctx) {
         align: 'right',
         render: (row) => {
           if (row.keyBased) {
+            if (!row.keysKnown) return el('span', { class: 'muted', text: '凭证不可见' });
             return el('span', { class: row.keys ? 'mono' : 'mono muted', text: row.keys ? `${row.keys} 把密钥` : '缺凭证' });
           }
+          // 匿名的账号数组被后端按归属过滤成空：那是「看不到」，不是「没配置」。
+          // 与「健康」列说同一件事时只保留一处，避免同一行出现两遍「账号不可见」。
+          if (!row.accountsKnown) return el('span', { class: 'muted', text: '—' });
           if (!row.accounts) return el('span', { class: 'muted', text: '未配置' });
           return el('span', { class: 'mono', text: `${fmtInt(row.healthy)} / ${fmtInt(row.accounts)}` });
         },
@@ -411,8 +449,10 @@ function healthCard(totals, providerRows, ctx) {
         label: '健康',
         render: (row) => {
           if (row.keyBased) {
+            if (!row.keysKnown) return statusDot('muted', '状态不可见');
             return statusDot(row.keys ? 'ok' : 'warn', row.keys ? '密钥直连' : '未配置密钥');
           }
+          if (!row.accountsKnown) return statusDot('muted', '账号不可见');
           const parts = [];
           if (row.healthy) parts.push(`${row.healthy} 正常`);
           if (row.cooling) parts.push(`${row.cooling} 冷却`);
@@ -431,31 +471,37 @@ function healthCard(totals, providerRows, ctx) {
       },
     ],
     rows: tableRows,
-    empty: '还没有配置供应商',
+    empty: loaded ? '还没有配置供应商' : '正在读取供应商…',
     onRowClick: (row) => ctx.navigate(`/providers?name=${encodeURIComponent(row.name)}`),
   });
 
+  const anonymous = !authState().authenticated;
   return card({
-    title: totals.accounts ? '账号与供应商健康' : '供应商状态',
-    subtitle: totals.accounts
-      ? `账号可用率 ${fmtPercent((totals.healthy / total) * 100)} · 异常优先`
-      : '当前使用供应商级密钥直连，不维护账号池',
+    title: (totals.accounts && !anonymous) ? '账号与供应商健康' : '供应商状态',
+    subtitle: !loaded
+      ? '正在读取供应商状态'
+      : (anonymous
+        ? '匿名视角只显示供应商级凭证信息，账号池明细需登录'
+        : (totals.accounts
+          ? `账号可用率 ${fmtPercent((totals.healthy / total) * 100)} · 异常优先`
+          : '当前使用供应商级密钥直连，不维护账号池')),
     body: el('div', { class: 'stack-sm' },
-      totals.accounts
+      // 匿名时 accounts 恒为 0，那不是「账号全都不可用」，所以不画健康条。
+      (totals.accounts && !anonymous)
         ? el('div', { class: 'health-legend health-legend-inline' }, segments.map((s) => el('div', { class: 'legend-row' },
           el('span', { class: `legend-dot health-${s.tone}`, 'aria-hidden': 'true' }),
           el('span', { class: 'legend-label', text: s.label }),
           el('span', { class: 'legend-value', text: String(s.value) }),
         )))
         : null,
-      bar,
+      (totals.accounts && !anonymous) ? bar : null,
       table.el,
     ),
     actions: el('a', { class: 'btn btn-ghost btn-sm', href: '#/providers' }, '管理供应商'),
   });
 }
 
-function trendCard(series, ctx) {
+function trendCard(series, ctx, { loaded = true } = {}) {
   const points = series.slice(-32).map((p) => ({
     t: p.t,
     requests: Number(p.requests ?? 0),
@@ -483,32 +529,53 @@ function trendCard(series, ctx) {
   const totalReq = points.reduce((s, p) => s + p.requests, 0);
   return card({
     title: '近 24 小时趋势',
-    subtitle: `${fmtInt(totalReq)} 次请求 · 峰值 ${fmtInt(max)} 次/桶`,
+    subtitle: loaded
+      ? `${fmtInt(totalReq)} 次请求 · 峰值 ${fmtInt(max)} 次/桶`
+      : '正在读取用量',
     body: el('div', { class: 'trend-card-body' },
-      points.length ? svg : emptyState('暂无趋势', '有请求后这里会显示每小时请求量。'),
+      !loaded
+        ? loadingBlock('加载用量')
+        : (points.length ? svg : emptyState('暂无趋势', '有请求后这里会显示每小时请求量。')),
     ),
     actions: el('a', { class: 'btn btn-ghost btn-sm', href: '#/usage' }, '用量详情'),
   });
 }
 
-function locksCard(locks, totals) {
+function locksCard(locks, totals, { locksKnown = false, loaded = true } = {}) {
   const hasAccounts = totals?.accounts > 0;
+  // 三个状态必须分开：读得到且有锁、读得到且没锁、读不到。
+  // 之前只判断数组长度，缺字段（匿名 / 普通用户）会渲染成「没有模型锁」——
+  // 而线上 atria 两把密钥正被额度耗尽禁用中。
+  // 加载中既不是「没有」也不是「不可见」：那是还没读到，给加载块。
+  const body = !loaded
+    ? loadingBlock('加载密钥状态')
+    : (!locksKnown
+      ? emptyState('锁定状态不可见', '密钥锁定与恢复时间属于平台级状态；登录管理员或只读账号后可见。')
+      : (locks.length
+        ? el('div', { class: 'lock-list' }, locks.map((lock) => {
+          const target = lock.provider || lock.model || '未知对象';
+          const kindLabel = lock.kind === 'quota' ? '额度' : (lock.kind === 'rate_limit' ? '限流' : (lock.kind === 'auth' ? '凭证失效' : (lock.kind || '锁定')));
+          return el('div', { class: 'lock-row' },
+            el('div', { class: 'lock-main' },
+              el('span', { class: 'lock-model mono', text: target }),
+              badge(kindLabel, lock.kind === 'quota' ? 'warn' : 'danger'),
+            ),
+            el('div', { class: 'lock-meta' },
+              el('span', { text: lock.keys != null ? `${lock.keys} 把密钥` : (lock.accounts != null ? `${lock.accounts} 个账号` : '') }),
+              lock.until ? el('span', { text: `恢复 ${fmtRelative(lock.until)}` }) : el('span', { text: '暂无恢复时间' }),
+            ),
+            lock.reason ? el('p', { class: 'lock-reason', text: lock.reason }) : null,
+          );
+        }))
+        : emptyState('没有模型锁', hasAccounts ? '当前没有账号或密钥处于限流、额度耗尽状态。' : '当前没有密钥处于限流、额度耗尽状态。')));
   return card({
     title: '模型锁与冷却',
-    subtitle: hasAccounts ? '账号与密钥的限流、额度耗尽与恢复时间' : '上游密钥的限流、额度耗尽与恢复时间',
-    body: locks.length
-      ? el('div', { class: 'lock-list' }, locks.map((lock) => el('div', { class: 'lock-row' },
-        el('div', { class: 'lock-main' },
-          el('span', { class: 'lock-model mono', text: lock.model || '未知模型' }),
-          badge(lock.kind === 'quota' ? '额度' : (lock.kind === 'rate_limit' ? '限流' : (lock.kind || '锁定')), lock.kind === 'quota' ? 'warn' : 'danger'),
-        ),
-        el('div', { class: 'lock-meta' },
-          el('span', { text: lock.accounts != null ? `${lock.accounts} 个账号` : (hasAccounts ? '' : '密钥') }),
-          lock.until ? el('span', { text: `恢复 ${fmtRelative(lock.until)}` }) : null,
-        ),
-        lock.reason ? el('p', { class: 'lock-reason', text: lock.reason }) : null,
-      )))
-      : emptyState('没有模型锁', hasAccounts ? '当前没有账号或密钥处于限流、额度耗尽状态。' : '当前没有密钥处于限流、额度耗尽状态。'),
+    subtitle: !loaded
+      ? '正在读取密钥状态'
+      : (locksKnown
+        ? (hasAccounts ? '账号与密钥的限流、额度耗尽与恢复时间' : '上游密钥的限流、额度耗尽与恢复时间')
+        : '需要平台读取权限'),
+    body,
   });
 }
 
@@ -517,17 +584,19 @@ function requestSource(account) {
   return (!value || value === 'api-key') ? '密钥直连' : value;
 }
 
-function recentCard(recent, ctx, state) {
+function recentCard(recent, ctx, state, { loaded = true } = {}) {
   if (!Array.isArray(recent) || !recent.length) {
     return card({
       title: '近期请求',
       subtitle: '来自请求归档的最近记录',
-      body: emptyState(state.authenticated ? '暂无请求' : '登录后查看请求明细',
-        state.authenticated ? '引擎收到请求后会在这里显示。' : '匿名访客没有账号级请求记录。',
-        state.authenticated ? null : el('button', {
-          class: 'btn btn-primary btn-sm', type: 'button',
-          on: { click: () => openLoginModal({ message: '登录后查看请求记录。' }) },
-        }, '登录')),
+      body: !loaded
+        ? loadingBlock('加载请求记录')
+        : emptyState(state.authenticated ? '暂无请求' : '登录后查看请求明细',
+          state.authenticated ? '引擎收到请求后会在这里显示。' : '匿名访客没有账号级请求记录。',
+          state.authenticated ? null : el('button', {
+            class: 'btn btn-primary btn-sm', type: 'button',
+            on: { click: () => openLoginModal({ message: '登录后查看请求记录。' }) },
+          }, '登录')),
       actions: el('a', { class: 'btn btn-ghost btn-sm', href: '#/requests' }, '全部请求'),
     });
   }

@@ -226,11 +226,15 @@ function render() {
     return;
   }
 
+  // 首次渲染发生在 await 之前，data 仍为 null。此时按空集合渲染四个数字，
+  // 等于先断言「活跃用户 0 / 请求 0 / Tokens 0」，再被真实数据改写。
+  // 加载中只留横线：表格区已有加载动画，不必再写四遍「读取中」。
+  const loaded = !!data;
   page.appendChild(el('div', { class: 'kpi-grid' },
-    kpi('活跃用户', fmtInt(active.length), `已配置 ${fmtInt(configuredUsers)} 个用户`, 'accent', 'user'),
-    kpi('请求数', fmtCompact(totalReq), `失败 ${fmtInt(mutated)}`, 'muted', 'activity'),
-    kpi('成功率', rate(totalReq, mutated), `${fmtInt(totalReq)} 次请求`, mutated ? 'warn' : 'ok', 'shield'),
-    kpi('Tokens', fmtCompact(totalTokens), '入 + 出（上游回报口径）', 'muted', 'models'),
+    kpi('活跃用户', loaded ? fmtInt(active.length) : '—', loaded ? `已配置 ${fmtInt(configuredUsers)} 个用户` : '', 'accent', 'user'),
+    kpi('请求数', loaded ? fmtCompact(totalReq) : '—', loaded ? `失败 ${fmtInt(mutated)}` : '', 'muted', 'activity'),
+    kpi('成功率', loaded ? rate(totalReq, mutated) : '—', loaded ? `${fmtInt(totalReq)} 次请求` : '', loaded && mutated ? 'warn' : 'ok', 'shield'),
+    kpi('Tokens', loaded ? fmtCompact(totalTokens) : '—', loaded ? '入 + 出（上游回报口径）' : '', 'muted', 'models'),
   ));
 
   // 分组卡只在拿到数据后出现；加载中由下方 loadingBlock 独占提示，避免

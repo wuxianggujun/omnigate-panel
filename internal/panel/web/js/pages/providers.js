@@ -466,15 +466,22 @@ function render() {
 
   const layout = el('div', { class: 'master-detail' });
   layout.appendChild(providerPane(list, selected, current));
+  // 首次加载时 list 必为空。此时说「还没有供应商」是把「还没读到」当成「没有」，
+  // 而真实情况往往有 5 家只是还没回来。左栏的 loadingBlock 已经在提示，右栏
+  // 不再放第二个加载块（手机窄屏上会上下叠成两条），留一块安静的空位。
+  const firstLoad = ui.loading && !list.length;
   layout.appendChild(selected ? providerDetail(selected, current) : el('section', { class: 'provider-detail empty-detail' },
-    emptyState('还没有供应商', '添加第一个供应商后即可配置账号与上游密钥。', isAdmin() ? el('button', {
-      class: 'btn btn-primary btn-sm', type: 'button', dataset: { action: 'add-provider' },
-    }, '添加供应商') : null),
+    firstLoad
+      ? null
+      : emptyState('还没有供应商', '添加第一个供应商后即可配置账号与上游密钥。', isAdmin() ? el('button', {
+        class: 'btn btn-primary btn-sm', type: 'button', dataset: { action: 'add-provider' },
+      }, '添加供应商') : null),
   ));
   page.appendChild(layout);
 
   page.appendChild(el('div', { class: 'page-footer-note' },
-    el('span', { text: ui.configPath ? `配置存储 ${ui.configPath}` : '配置存储不可见' }),
+    // 「配置存储不可见」在加载完成前同样是假结论：还没问到，不等于没有权限。
+    el('span', { text: ui.configPath ? `配置存储 ${ui.configPath}` : (firstLoad ? '配置存储读取中' : '配置存储不可见') }),
     ui.configError ? el('span', { class: 'text-warn', text: ui.configError }) : null,
     el('span', { text: '账号余额来自上游实时查询，可能因网络或风控延迟。' }),
   ));
@@ -488,7 +495,10 @@ function providerPane(list, selected, current) {
   pane.appendChild(el('div', { class: 'pane-head' },
     el('div', {},
       el('h2', { class: 'pane-title', text: '全部供应商' }),
-      el('span', { class: 'pane-sub', text: `${list.length} 个` }),
+      // 加载完成前不报数：0 个是结论，不是状态。
+      // 加载完成前不报数：0 个是结论，不是状态。左栏正文已有加载动画，这里留空，
+      // 避免同一块区域上下叠两行「加载中」。
+      ui.loading && !list.length ? null : el('span', { class: 'pane-sub', text: `${list.length} 个` }),
     ),
     (isAdmin() && ui.config)
       ? el('button', {

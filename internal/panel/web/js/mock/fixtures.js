@@ -1181,6 +1181,27 @@ export function buildOverview(state, role, username) {
   const visibleRequests = visibleRequestsFor(state, role, username);
   const totalTokens = usage.totals.total_tokens;
   const totalRequests = usage.totals.requests;
+  // 与后端同口径：model_locks 只下发给能看到平台配置的角色；匿名与普通用户
+  // 拿到的是「字段缺失」，前端据此显示「锁定状态不可见」，而不是「没有模型锁」。
+  const privileged = role === 'admin' || role === 'viewer';
+  const modelLocks = privileged
+    ? [
+      {
+        provider: 'raccoon',
+        keys: 1,
+        kind: 'rate_limit',
+        until: iso(state.now + 26 * MIN),
+        reason: '上游 429，账号级冷却中',
+      },
+      {
+        provider: 'justwoker',
+        keys: 2,
+        kind: 'quota',
+        until: iso(state.now + 8 * MIN),
+        reason: '共享号额度耗尽，等待额度刷新',
+      },
+    ]
+    : undefined;
   return {
     ok: true,
     version: 'v1.4.0-mock',
@@ -1213,22 +1234,7 @@ export function buildOverview(state, role, username) {
     providers: providerRows,
     accounts: flatAccounts,
     series: usage.series,
-    model_locks: [
-      {
-        model: 'raccoon/claude-sonnet-4.5',
-        kind: 'rate_limit',
-        accounts: 1,
-        until: iso(state.now + 26 * MIN),
-        reason: '上游 429，账号级冷却中',
-      },
-      {
-        model: 'justwoker/o3',
-        kind: 'quota',
-        accounts: 1,
-        until: iso(state.now + 8 * MIN),
-        reason: '共享号额度耗尽，等待额度刷新',
-      },
-    ],
+    model_locks: modelLocks,
     recent: visibleRequests.slice(0, 8),
     storage: usage.storage,
     generated: new Date(state.now).toISOString(),

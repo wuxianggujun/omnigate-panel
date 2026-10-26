@@ -400,7 +400,9 @@ function render() {
   page.appendChild(cardsHost);
 
   page.appendChild(el('div', { class: 'page-footer-note' },
-    el('span', { text: `共 ${fmtInt(ui.entries.length)} 条可见记录` }),
+    // 加载中不报条数：0 条是结论，「还没读完」不是。表格区已有加载动画，
+    // 这里直接省略那条，不再叠一行「正在读取」。
+    (ui.loading && !ui.entries.length) ? null : el('span', { text: `共 ${fmtInt(ui.entries.length)} 条可见记录` }),
     ui.lastLoaded ? el('span', { text: `更新于 ${fmtTime(ui.lastLoaded)}` }) : null,
     el('span', { text: '列表最多 1000 条/次，完整日用量见「用量」页；点击记录可查看终端与缓存明细。' }),
   ));

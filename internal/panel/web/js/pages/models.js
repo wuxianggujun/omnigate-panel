@@ -20,6 +20,7 @@ let ui = initialState();
 function initialState() {
   return {
     loading: true,
+    loaded: false,
     error: '',
     models: [],
     types: BUILTIN_PROVIDER_TYPES,
@@ -59,6 +60,7 @@ async function load() {
   ]);
   if (!pageSignal || pageSignal.signal.aborted) return;
   ui.loading = false;
+  ui.loaded = true;
   if (modelsRes.status === 'fulfilled') {
     const payload = modelsRes.value || {};
     ui.models = Array.isArray(payload.data) ? payload.data : (Array.isArray(payload) ? payload : []);
@@ -88,11 +90,14 @@ function renderShell() {
     }, icon('refresh', 15), '刷新目录')],
   }));
 
+  // 首次渲染发生在数据回来之前，models 还是空数组。此时按 0 渲染四个数字，等于
+  // 对「目录里没有模型」下结论——真实情况是还没读到。加载期间统一留横线。
+  const loaded = ui.loaded;
   page.appendChild(el('div', { class: 'kpi-grid kpi-grid-4' },
-    statCard('模型总数', fmtNum(ui.models.length, 0), '来自引擎聚合目录', 'models'),
-    statCard('供应商', fmtNum(providers.length, 0), providers.slice(0, 4).join(' · ') || '—', 'providers'),
-    statCard('免费模型', fmtNum(freeCount, 0), '上游标记免费或匿名通道', 'ok'),
-    statCard('支持推理', fmtNum(reasoningCount, 0), 'reasoning / think 类模型', 'reasoning'),
+    statCard('模型总数', loaded ? fmtNum(ui.models.length, 0) : '—', loaded ? '来自引擎聚合目录' : '', 'models'),
+    statCard('供应商', loaded ? fmtNum(providers.length, 0) : '—', loaded ? (providers.slice(0, 4).join(' · ') || '—') : '', 'providers'),
+    statCard('免费模型', loaded ? fmtNum(freeCount, 0) : '—', loaded ? '上游标记免费或匿名通道' : '', 'ok'),
+    statCard('支持推理', loaded ? fmtNum(reasoningCount, 0) : '—', loaded ? 'reasoning / think 类模型' : '', 'reasoning'),
   ));
 
   if (ui.error) {

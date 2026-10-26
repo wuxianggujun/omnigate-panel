@@ -288,6 +288,19 @@ func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
 			body["recent"] = rows
 		}
 	}
+	// 密钥锁/冷却：只下发给能看到平台配置的角色。
+	//
+	// 之前总览的「模型锁与冷却」卡片从不拿后端数据，永远渲染「没有模型锁」——
+	// 而线上 atria 两把密钥正因额度耗尽被自动禁用。那张卡片因此是纯粹的假阴性：
+	// 越需要它的时候越说没事。数据与 /panel/api/omni/key-health 同源，但这里只
+	// 提炼成「哪家供应商、几个密钥、因为什么、何时恢复」，不外泄掩码与错误原文。
+	// 匿名与普通用户拿不到平台级状态，前端据此显示「不可见」而不是「没有」。
+	// 放在 OmniAccounts 早退之前：精简部署同样要能报警。
+	if role := roleOf(r); role.IsAdmin() || role == panelauth.RoleViewer {
+		if keys := p.lockedUpstreamKeys(); keys != nil {
+			body["model_locks"] = keys
+		}
+	}
 	if p.cfg.OmniAccounts == nil {
 		writeJSON(w, http.StatusOK, body)
 		return

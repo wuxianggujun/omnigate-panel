@@ -156,22 +156,51 @@ function render() {
     return;
   }
 
-  page.appendChild(el('div', { class: 'kpi-grid' },
-    kpi('请求数', fmtCompact(totals.requests), `失败 ${fmtInt(totals.errors)} · 中断 ${fmtInt(totals.interrupted_requests || 0)}`, 'accent', 'activity'),
-    kpi('成功率', successRate(totals), `${fmtInt(totals.requests)} 次请求`, totals.errors ? 'warn' : 'ok', 'shield'),
-    kpi('Tokens', fmtCompact(totals.total_tokens), `入 ${fmtCompact(totals.prompt_tokens)} · 出 ${fmtCompact(totals.completion_tokens)}`, 'muted', 'models'),
-    kpi('积分 / 成本', fmtCredits(totals.credits), totals.credits_per_1m_tokens ? `${fmtNum(totals.credits_per_1m_tokens, 2)} 积分 / 1M tokens` : '上游未回传 credit 时为空', 'muted', 'usage'),
-    kpi('平均延迟', fmtDuration(totals.avg_latency_ms), `平均 ${fmtNum(totals.avg_tokens_per_second, 1)} tokens/s`, 'muted', 'clock'),
-    kpi('缓存命中率', fmtPercent(totals.cache_hit_rate), `命中 ${fmtCompact(totals.cache_hit_tokens || 0)} tokens`, 'muted', 'server'),
-  ));
+  // 匿名的 totals 是后端按归属过滤后的空集合，服务端确实返回 0——但那句 0 的
+  // 含义是「没有你看得到的记录」，不是「平台这段时间没有请求」。直接用 0 渲染，
+  // 访客会以为服务真的空转（页脚还写着用量文件几百 KB）。这里改成留空 + 一句
+  // 说明，把「不可见」和「真的没有」分开。
+  const hidden = !isAuthenticated();
+  // loaded：数据真的回来了。首次渲染发生在 await 之前，totals 是空对象，
+  // 此时按 0 渲染等于把「还没读到」当成「这段时间没有请求」。
+  const loaded = !!data;
+  if (hidden) {
+    page.appendChild(el('div', { class: 'kpi-grid' },
+      kpi('请求数', '—', '登录后统计', 'muted', 'activity'),
+      kpi('成功率', '—', '登录后统计', 'muted', 'shield'),
+      kpi('Tokens', '—', '登录后统计', 'muted', 'models'),
+      kpi('积分 / 成本', '—', '登录后统计', 'muted', 'usage'),
+      kpi('平均延迟', '—', '登录后统计', 'muted', 'clock'),
+      kpi('缓存命中率', '—', '登录后统计', 'muted', 'server'),
+    ));
+  } else if (!loaded) {
+    // 加载中只留横线，不重复写 6 遍「读取中」：正文已有加载动画在提示状态。
+    page.appendChild(el('div', { class: 'kpi-grid' },
+      kpi('请求数', '—', '', 'muted', 'activity'),
+      kpi('成功率', '—', '', 'muted', 'shield'),
+      kpi('Tokens', '—', '', 'muted', 'models'),
+      kpi('积分 / 成本', '—', '', 'muted', 'usage'),
+      kpi('平均延迟', '—', '', 'muted', 'clock'),
+      kpi('缓存命中率', '—', '', 'muted', 'server'),
+    ));
+  } else {
+    page.appendChild(el('div', { class: 'kpi-grid' },
+      kpi('请求数', fmtCompact(totals.requests), `失败 ${fmtInt(totals.errors)} · 中断 ${fmtInt(totals.interrupted_requests || 0)}`, 'accent', 'activity'),
+      kpi('成功率', successRate(totals), `${fmtInt(totals.requests)} 次请求`, totals.errors ? 'warn' : 'ok', 'shield'),
+      kpi('Tokens', fmtCompact(totals.total_tokens), `入 ${fmtCompact(totals.prompt_tokens)} · 出 ${fmtCompact(totals.completion_tokens)}`, 'muted', 'models'),
+      kpi('积分 / 成本', fmtCredits(totals.credits), totals.credits_per_1m_tokens ? `${fmtNum(totals.credits_per_1m_tokens, 2)} 积分 / 1M tokens` : '上游未回传 credit 时为空', 'muted', 'usage'),
+      kpi('平均延迟', fmtDuration(totals.avg_latency_ms), `平均 ${fmtNum(totals.avg_tokens_per_second, 1)} tokens/s`, 'muted', 'clock'),
+      kpi('缓存命中率', fmtPercent(totals.cache_hit_rate), `命中 ${fmtCompact(totals.cache_hit_tokens || 0)} tokens`, 'muted', 'server'),
+    ));
+  }
 
-  page.appendChild(chartCard(data, totals));
+  page.appendChild(chartCard(data, totals, { hidden, loaded }));
 
   const groupTabs = createTabs({
     items: [
-      { id: 'provider', label: '按供应商', count: data?.byProvider?.length || 0 },
-      { id: 'account', label: '按账号', count: data?.byAccount?.length || 0 },
-      { id: 'model', label: '按模型', count: data?.byModel?.length || 0 },
+      { id: 'provider', label: '按供应商', count: (hidden || !loaded) ? null : (data?.byProvider?.length || 0) },
+      { id: 'account', label: '按账号', count: (hidden || !loaded) ? null : (data?.byAccount?.length || 0) },
+      { id: 'model', label: '按模型', count: (hidden || !loaded) ? null : (data?.byModel?.length || 0) },
     ],
     value: ui.group,
     ariaLabel: '用量分组维度',
@@ -179,9 +208,11 @@ function render() {
   });
   page.appendChild(card({
     title: '分组明细',
-    subtitle: rangeText(data),
+    subtitle: hidden ? '需要登录' : (loaded ? rangeText(data) : ''),
     actions: groupTabs.el,
-    body: groupTable(data, totals),
+    body: hidden
+      ? emptyState('用量明细不可见', '按供应商 / 账号 / 模型的用量属于账号级数据，登录后按角色显示。')
+      : (loaded ? groupTable(data, totals) : loadingBlock('加载用量')),
     class: 'usage-table-card',
   }));
 
@@ -220,7 +251,7 @@ function rangeText(data) {
   return WINDOWS.find((w) => w.hours === ui.hours)?.label || `近 ${ui.hours} 小时`;
 }
 
-function chartCard(data, totals) {
+function chartCard(data, totals, { hidden = false, loaded = true } = {}) {
   const series = data?.series || [];
   const metricMeta = {
     requests: { label: '请求数', format: fmtCompact, color: 'var(--accent)' },
@@ -236,19 +267,24 @@ function chartCard(data, totals) {
     }, meta.label)),
   );
   const chartHost = el('div', { class: 'chart-host' });
-  if (series.length) {
+  if (hidden) {
+    chartHost.appendChild(emptyState('趋势不可见', '时序桶按账号归属聚合；登录后可见。'));
+  } else if (!loaded) {
+    chartHost.appendChild(loadingBlock('加载用量'));
+  } else if (series.length) {
     chartHost.appendChild(lineChart(series, ui.metric, current));
   } else {
     chartHost.appendChild(emptyState('暂无趋势数据', '当前窗口内没有请求，或服务端未返回时序桶。'));
   }
-  const legend = el('div', { class: 'chart-legend' },
+  // 峰值/时间桶数只在数据真的回来后才有意义；加载期间显示 0 与「暂无」同罪。
+  const legend = (hidden || !loaded) ? null : el('div', { class: 'chart-legend' },
     el('span', { class: 'legend-dot-mark', style: { background: current.color } }),
     el('span', { text: current.label }),
     el('span', { class: 'muted', text: `峰值 ${current.format(Math.max(0, ...series.map((p) => metricValue(p, ui.metric))))} · ${series.length} 个时间桶` }),
   );
   return card({
     title: '趋势',
-    subtitle: `按时间桶聚合的 ${current.label}；悬停查看明细`,
+    subtitle: hidden ? '需要登录' : (loaded ? `按时间桶聚合的 ${current.label}；悬停查看明细` : ''),
     actions: metricButtons,
     body: el('div', { class: 'trend-chart' }, chartHost, legend),
     class: 'chart-card',

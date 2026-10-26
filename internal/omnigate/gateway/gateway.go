@@ -522,16 +522,23 @@ func (g *Gateway) models(ctx context.Context, name string) ([]openai.Model, erro
 		g.modelMu.Unlock()
 		return e.models, nil
 	}
-	if cached && len(e.models) > 0 && !g.modelRefreshing[name] {
-		// 标记后立刻放锁：同一供应商只排一次后台刷新，其余并发请求继续读旧目录。
-		// 手工构造的 Gateway（测试）没有这个 map，退化为阻塞刷新而不是 panic。
-		if g.modelRefreshing == nil {
-			g.modelRefreshing = map[string]bool{}
+	if cached && len(e.models) > 0 {
+		// 已有目录就永远不等上游：正在刷新时也只是读旧目录。忘了这个分支会让
+		// 「后台刷新进行中」的请求掉进下面的同步拉取，等于白做了 stale-while-revalidate
+		// （线上表现为第二次打开仍要 3 秒）。
+		start := !g.modelRefreshing[name]
+		if start {
+			// 手工构造的 Gateway（测试）没有这个 map，补一个而不是 panic。
+			if g.modelRefreshing == nil {
+				g.modelRefreshing = map[string]bool{}
+			}
+			g.modelRefreshing[name] = true
 		}
-		g.modelRefreshing[name] = true
 		g.modelMu.Unlock()
-		g.modelRefreshWG.Add(1)
-		go g.refreshModelsAsync(name)
+		if start {
+			g.modelRefreshWG.Add(1)
+			go g.refreshModelsAsync(name)
+		}
 		return e.models, nil
 	}
 	g.modelMu.Unlock()

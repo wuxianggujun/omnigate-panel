@@ -154,6 +154,68 @@ func TestModelsEmptyRefreshKeepsLastGood(t *testing.T) {
 	}
 }
 
+// 缓存过期 + 后台刷新正在进行时，后续请求必须继续读旧目录，不能再同步拉一次上游。
+// 忘记这个分支会让 stale-while-revalidate 形同虚设：线上第二次打开模型页仍要 3 秒。
+func TestModelsDoesNotBlockWhileRefreshInFlight(t *testing.T) {
+	release := make(chan struct{})
+	prov := &blockingLister{release: release}
+	g := testGateway(prov)
+
+	// 预置一份「已过期但可用」的目录。
+	g.modelMu.Lock()
+	g.modelCache["raccoon"] = modelEntry{
+		models: []openai.Model{{ID: "cached", Object: "model"}},
+		at:     time.Now().Add(-modelCacheTTL - time.Minute),
+	}
+	g.modelMu.Unlock()
+
+	// 第一次调用：立刻返回旧目录，并在后台排队刷新（此时会阻塞在 release 上）。
+	start := time.Now()
+	got, err := g.models(context.Background(), "raccoon")
+	if err != nil {
+		t.Fatalf("first: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "cached" {
+		t.Fatalf("got = %+v, want cached model", got)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("有过期缓存时不该阻塞在拉取上，实际 %v", elapsed)
+	}
+
+	// 刷新仍在进行：再调用一次，仍然必须立刻返回旧目录。
+	start = time.Now()
+	again, err := g.models(context.Background(), "raccoon")
+	if err != nil {
+		t.Fatalf("second: %v", err)
+	}
+	if len(again) != 1 || again[0].ID != "cached" {
+		t.Fatalf("again = %+v, want cached model", again)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("后台刷新进行中时不该再同步拉一次，实际 %v", elapsed)
+	}
+
+	close(release)
+	g.modelRefreshWG.Wait()
+}
+
+// blockingLister 的 ListModels 会一直阻塞到 release 被关闭，用来模拟慢上游。
+type blockingLister struct {
+	release chan struct{}
+}
+
+func (p *blockingLister) Name() string { return "raccoon" }
+func (p *blockingLister) Type() string { return "raccoon" }
+
+func (p *blockingLister) ListModels(context.Context) ([]openai.Model, error) {
+	<-p.release
+	return []openai.Model{{ID: "fresh", Object: "model"}}, nil
+}
+
+func (p *blockingLister) StreamChat(context.Context, *provider.Account, provider.ChatInput) (provider.Stream, error) {
+	return nil, errors.New("not used")
+}
+
 // emptyThenGoodLister 模拟「第一次正常、之后无错但返回空目录」的上游。
 type emptyThenGoodLister struct {
 	empty bool

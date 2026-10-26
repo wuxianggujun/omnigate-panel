@@ -227,3 +227,30 @@ func TestCompleteTextRespectsScope(t *testing.T) {
 		t.Error("范围内没有目标时应报错")
 	}
 }
+
+// TestRouteScopedRewritesForeignDefaultModel 空 model 请求在默认供应商被收窄掉时，
+// 落点会换成允许的供应商；此时不能把 default_model 自带的原供应商前缀原样带过去，
+// 否则上游会收到一个自己目录里不存在的模型名（线上就是这样：默认
+// fengshao1227/deepseek-v4.1-flash，而 newapi-* 密钥只授 cline-pass/yijia/atria）。
+func TestRouteScopedRewritesForeignDefaultModel(t *testing.T) {
+	g := catalogGateway(t,
+		&catalogProvider{name: "fengshao1227", models: []openai.Model{{ID: "deepseek-v4.1-flash"}}},
+		&catalogProvider{name: "cline-pass", models: []openai.Model{{ID: "deepseek-v4.1-flash"}}},
+	)
+	g.cfg.DefaultModel = "fengshao1227/deepseek-v4.1-flash"
+
+	// 默认供应商在范围内：非收窄路径保持既有行为，原样返回 default_model
+	// （resolveModel 会在该供应商目录里按末尾段匹配）。
+	if p, m, ok := g.routeScoped("", nil); !ok || p != "fengshao1227" || m != "fengshao1227/deepseek-v4.1-flash" {
+		t.Errorf("全量空 model=(%q,%q,%v) want (fengshao1227,fengshao1227/deepseek-v4.1-flash,true)", p, m, ok)
+	}
+	// 默认供应商在范围外：落点是 cline-pass，模型必须剥掉别家前缀。
+	if p, m, ok := g.routeScoped("", []string{"cline-pass"}); !ok || p != "cline-pass" || m != "deepseek-v4.1-flash" {
+		t.Errorf("收窄空 model=(%q,%q,%v) want (cline-pass,deepseek-v4.1-flash,true)", p, m, ok)
+	}
+	// 默认模型本来就是裸名：不要动它。
+	g.cfg.DefaultModel = "deepseek-v4.1-flash"
+	if p, m, ok := g.routeScoped("", []string{"cline-pass"}); !ok || p != "cline-pass" || m != "deepseek-v4.1-flash" {
+		t.Errorf("裸默认模型收窄=(%q,%q,%v) want (cline-pass,deepseek-v4.1-flash,true)", p, m, ok)
+	}
+}

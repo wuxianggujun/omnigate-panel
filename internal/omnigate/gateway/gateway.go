@@ -893,7 +893,7 @@ func (g *Gateway) routeResolvedScoped(model string, allow map[string]bool) (stri
 		if prov == "" {
 			return "", "", false
 		}
-		return prov, g.cfg.DefaultModel, true
+		return prov, g.defaultModelScoped(prov), true
 	}
 	if i := strings.Index(model, "/"); i > 0 {
 		if _, ok := g.providers[model[:i]]; ok {
@@ -923,6 +923,26 @@ func (g *Gateway) defaultProviderScoped(allow map[string]bool) string {
 		return g.cfg.DefaultProvider
 	}
 	return g.firstAllowedProvider(allow)
+}
+
+// defaultModelScoped 返回落在 prov 上的默认模型裸名。
+//
+// default_model 通常写成 "provider/model"。当请求没带 model、且默认供应商不在
+// 该密钥范围内时，落点会被换成第一个允许的供应商；若仍把带原默认前缀的
+// "fengshao1227/deepseek-v4.1-flash" 交给它，上游会收到一个自己根本不存在的
+// 模型名。这里把「指向别家供应商」的显式前缀剥掉，让落点按自己的目录解析这个
+// 裸名；前缀本来就是落点自己、或本来就是裸名时保持原样。
+func (g *Gateway) defaultModelScoped(prov string) string {
+	model := g.cfg.DefaultModel
+	if model == "" || prov == "" {
+		return model
+	}
+	if i := strings.Index(model, "/"); i > 0 {
+		if _, ok := g.providers[model[:i]]; ok && model[:i] != prov {
+			return model[i+1:]
+		}
+	}
+	return model
 }
 
 func (g *Gateway) firstAllowedProvider(allow map[string]bool) string {

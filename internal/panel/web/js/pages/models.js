@@ -236,10 +236,18 @@ function applyFilters() {
       {
         key: 'owned_by',
         label: '供应商',
-        render: (row) => el('div', { class: 'cell-title' },
-          el('span', { class: 'mono', text: row.owned_by || '—' }),
-          el('span', { class: 'cell-sub', text: typeName(row.owned_by) }),
-        ),
+        render: (row) => {
+          // owned_by 是网关的供应商身份（供应商名），不是供应商类型。typeName 拿
+          // 名字去查类型表必然查不中，最后回落到 providerLabel(name) —— 于是
+          // 「aotera / aotera」在同一格里上下写了两遍。只有真的查到不同的类型
+          // 标签时才补这一行。
+          const name = String(row.owned_by || '');
+          const label = typeName(name);
+          return el('div', { class: 'cell-title' },
+            el('span', { class: 'mono', text: name || '—' }),
+            (label && label !== name) ? el('span', { class: 'cell-sub', text: label }) : null,
+          );
+        },
       },
       {
         key: 'caps',

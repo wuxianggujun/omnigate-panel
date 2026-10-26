@@ -440,7 +440,9 @@ function healthCard(totals, providerRows, ctx, { loaded = true } = {}) {
           // 匿名的账号数组被后端按归属过滤成空：那是「看不到」，不是「没配置」。
           // 与「健康」列说同一件事时只保留一处，避免同一行出现两遍「账号不可见」。
           if (!row.accountsKnown) return el('span', { class: 'muted', text: '—' });
-          if (!row.accounts) return el('span', { class: 'muted', text: '未配置' });
+          // 账号型供应商 0 个账号时，「未配置」与健康列的「无账号」是同一句话，
+          // 同一行写两遍只是噪音；让健康列说，这里留空。
+          if (!row.accounts) return el('span', { class: 'muted', text: '—' });
           return el('span', { class: 'mono', text: `${fmtInt(row.healthy)} / ${fmtInt(row.accounts)}` });
         },
       },

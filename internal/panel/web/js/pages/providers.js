@@ -495,7 +495,6 @@ function providerPane(list, selected, current) {
   pane.appendChild(el('div', { class: 'pane-head' },
     el('div', {},
       el('h2', { class: 'pane-title', text: '全部供应商' }),
-      // 加载完成前不报数：0 个是结论，不是状态。
       // 加载完成前不报数：0 个是结论，不是状态。左栏正文已有加载动画，这里留空，
       // 避免同一块区域上下叠两行「加载中」。
       ui.loading && !list.length ? null : el('span', { class: 'pane-sub', text: `${list.length} 个` }),

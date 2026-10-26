@@ -502,6 +502,9 @@ function healthCard(totals, providerRows, ctx, { loaded = true } = {}) {
 }
 
 function trendCard(series, ctx, { loaded = true } = {}) {
+  // 匿名的用量接口按归属过滤，series 恒为空。这里画「暂无趋势」没问题，但
+  // 副标题写「0 次请求 · 峰值 1 次/桶」等于替平台宣布空转，所以分三种讲法。
+  const anonymous = !isAuthenticated();
   const points = series.slice(-32).map((p) => ({
     t: p.t,
     requests: Number(p.requests ?? 0),
@@ -529,13 +532,17 @@ function trendCard(series, ctx, { loaded = true } = {}) {
   const totalReq = points.reduce((s, p) => s + p.requests, 0);
   return card({
     title: '近 24 小时趋势',
-    subtitle: loaded
-      ? `${fmtInt(totalReq)} 次请求 · 峰值 ${fmtInt(max)} 次/桶`
-      : '正在读取用量',
+    subtitle: !loaded
+      ? ''
+      : (anonymous
+        ? '需要登录'
+        : `${fmtInt(totalReq)} 次请求 · 峰值 ${fmtInt(max)} 次/桶`),
     body: el('div', { class: 'trend-card-body' },
       !loaded
         ? loadingBlock('加载用量')
-        : (points.length ? svg : emptyState('暂无趋势', '有请求后这里会显示每小时请求量。')),
+        : (anonymous
+          ? emptyState('趋势不可见', '按时间桶的请求量属于账号级数据，登录后按角色显示。')
+          : (points.length ? svg : emptyState('暂无趋势', '有请求后这里会显示每小时请求量。'))),
     ),
     actions: el('a', { class: 'btn btn-ghost btn-sm', href: '#/usage' }, '用量详情'),
   });

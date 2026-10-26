@@ -664,8 +664,12 @@ function overviewTab(provider, meta, current, models) {
       : ['账号数', authState().authenticated ? String(provider.accounts.length) : '不可见'],
     ['额度合计', credits != null ? `${fmtCredits(credits)} 积分` : '未知'],
     ['模型数量', String(models.length)],
-    // 密钥型供应商上面已有「凭证」一行，不再重复。
-    keyBased ? null : ['上游密钥', !keyKnown ? '不可见' : (keyCount ? `${keyCount} 组` : '未配置')],
+    // 密钥型供应商上面已有「凭证」一行，不再重复。账号型供应商是账号池，凭据在
+    // 账号里；这里写「上游密钥 未配置」会被读成该供应商没配好。只在真的配了
+    // 密钥、或读不到配置时才列这一行。
+    keyBased ? null : ((!keyKnown || keyCount > 0)
+      ? ['上游密钥', !keyKnown ? '不可见' : `${keyCount} 组`]
+      : null),
   ].filter(Boolean);
   const facts = el('div', { class: 'facts-grid' });
   for (const [label, value] of fields) {

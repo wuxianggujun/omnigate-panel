@@ -228,29 +228,70 @@ func TestCompleteTextRespectsScope(t *testing.T) {
 	}
 }
 
-// TestRouteScopedRewritesForeignDefaultModel 空 model 请求在默认供应商被收窄掉时，
-// 落点会换成允许的供应商；此时不能把 default_model 自带的原供应商前缀原样带过去，
-// 否则上游会收到一个自己目录里不存在的模型名（线上就是这样：默认
-// fengshao1227/deepseek-v4.1-flash，而 newapi-* 密钥只授 cline-pass/yijia/atria）。
-func TestRouteScopedRewritesForeignDefaultModel(t *testing.T) {
+// TestRouteScopedEmptyModelFollowsDefaultModel 钉住「省略 model」与「显式发
+// default_model」必须是同一条路由。
+//
+// 此前的实现里空 model 直接从 default_provider 出发、完全绕过别名表，于是：
+// 同一个默认模型，显式发名字会走别名链（可能落在别家供应商），省略 model 却
+// 硬落到 default_provider；默认供应商被密钥收窄掉时，还会把带别家供应商前缀
+// 的 model 交给权限内的落点，上游收到一个自己目录里不存在的名字。
+// （线上形态：默认 fengshao1227/deepseek-v4.1-flash，而 newapi-* 密钥只授
+// cline-pass/yijia/atria。）
+func TestRouteScopedEmptyModelFollowsDefaultModel(t *testing.T) {
 	g := catalogGateway(t,
 		&catalogProvider{name: "fengshao1227", models: []openai.Model{{ID: "deepseek-v4.1-flash"}}},
 		&catalogProvider{name: "cline-pass", models: []openai.Model{{ID: "deepseek-v4.1-flash"}}},
+		&catalogProvider{name: "yijia", models: []openai.Model{{ID: "deepseek-v4.1-flash"}}},
 	)
 	g.cfg.DefaultModel = "fengshao1227/deepseek-v4.1-flash"
 
-	// 默认供应商在范围内：非收窄路径保持既有行为，原样返回 default_model
-	// （resolveModel 会在该供应商目录里按末尾段匹配）。
-	if p, m, ok := g.routeScoped("", nil); !ok || p != "fengshao1227" || m != "fengshao1227/deepseek-v4.1-flash" {
-		t.Errorf("全量空 model=(%q,%q,%v) want (fengshao1227,fengshao1227/deepseek-v4.1-flash,true)", p, m, ok)
+	// 全量：默认供应商在范围内，剥掉自己的前缀，交给它自己的目录解析。
+	if p, m, ok := g.routeScoped("", nil); !ok || p != "fengshao1227" || m != "deepseek-v4.1-flash" {
+		t.Errorf("全量空 model=(%q,%q,%v) want (fengshao1227,deepseek-v4.1-flash,true)", p, m, ok)
 	}
-	// 默认供应商在范围外：落点是 cline-pass，模型必须剥掉别家前缀。
+	// 省略 model 与显式发默认模型名必须落到同一个地方。
+	if ep, em, _ := g.routeScoped(g.cfg.DefaultModel, nil); ep != "fengshao1227" || em != "deepseek-v4.1-flash" {
+		t.Errorf("显式默认模型=(%q,%q) 与空 model 不一致", ep, em)
+	}
+	// 默认供应商在范围外：落点换成权限内供应商，模型不能带别家前缀。
 	if p, m, ok := g.routeScoped("", []string{"cline-pass"}); !ok || p != "cline-pass" || m != "deepseek-v4.1-flash" {
 		t.Errorf("收窄空 model=(%q,%q,%v) want (cline-pass,deepseek-v4.1-flash,true)", p, m, ok)
 	}
 	// 默认模型本来就是裸名：不要动它。
 	g.cfg.DefaultModel = "deepseek-v4.1-flash"
-	if p, m, ok := g.routeScoped("", []string{"cline-pass"}); !ok || p != "cline-pass" || m != "deepseek-v4.1-flash" {
-		t.Errorf("裸默认模型收窄=(%q,%q,%v) want (cline-pass,deepseek-v4.1-flash,true)", p, m, ok)
+	if p, m, ok := g.routeScoped("", []string{"yijia"}); !ok || p != "yijia" || m != "deepseek-v4.1-flash" {
+		t.Errorf("裸默认模型收窄=(%q,%q,%v) want (yijia,deepseek-v4.1-flash,true)", p, m, ok)
+	}
+}
+
+// TestRouteScopedEmptyModelUsesAliasChain 省略 model 时也要走别名链，并且同样
+// 受范围约束：默认模型带别名时，收窄密钥应落到链上第一个权限内目标。
+func TestRouteScopedEmptyModelUsesAliasChain(t *testing.T) {
+	g := catalogGateway(t,
+		&catalogProvider{name: "fengshao1227", models: []openai.Model{{ID: "flash"}}},
+		&catalogProvider{name: "cline-pass", models: []openai.Model{{ID: "flash-1017"}}},
+		&catalogProvider{name: "yijia", models: []openai.Model{{ID: "flash"}}},
+	)
+	g.modelMap = NewModelMappingStore(filepath.Join(t.TempDir(), "m.json"))
+	if err := g.SetModelMappingTargets("flash-alias",
+		[]string{"cline-pass/flash-1017", "yijia/flash"}); err != nil {
+		t.Fatalf("配链: %v", err)
+	}
+	g.cfg.DefaultModel = "flash-alias"
+
+	// 全量：链首。
+	if p, m, ok := g.routeScoped("", nil); !ok || p != "cline-pass" || m != "flash-1017" {
+		t.Errorf("全量空 model=(%q,%q,%v) want (cline-pass,flash-1017,true)", p, m, ok)
+	}
+	// 只授 yijia：跳过链首，落到链上第二个目标（而不是 403）。
+	if p, m, ok := g.routeScoped("", []string{"yijia"}); !ok || p != "yijia" || m != "flash" {
+		t.Errorf("收窄空 model=(%q,%q,%v) want (yijia,flash,true)", p, m, ok)
+	}
+	// 回退候选同样按链与范围给出，且排除已选中的主目标。
+	if fb := g.modelChainFallbacksScoped("", "yijia", "flash", []string{"yijia"}); len(fb) != 0 {
+		t.Errorf("只授 yijia 时不该有回退候选，得到 %+v", fb)
+	}
+	if fb := g.modelChainFallbacksScoped("", "cline-pass", "flash-1017", []string{"cline-pass", "yijia"}); len(fb) != 1 || fb[0].Provider != "yijia" {
+		t.Errorf("回退候选=%+v want [yijia/flash]", fb)
 	}
 }

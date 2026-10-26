@@ -817,10 +817,23 @@ func (g *Gateway) ProviderFor(model string, allowed []string) string {
 // global alias (modelmap.go) is resolved first, so a client can send "gpt-4o"
 // and have it route to the mapped upstream model.
 func (g *Gateway) route(model string) (string, string) {
+	model = g.requestedModel(model)
 	if g.modelMap != nil {
 		model = g.modelMap.Resolve(model)
 	}
 	return g.routeResolved(model)
+}
+
+// requestedModel 把「没写 model」展开成 default_model。
+//
+// 不展开的话，空 model 会绕过整张别名表：显式发 default_model 的名字会走别名链，
+// 省略 model 却直接落到 default_provider，同一个默认模型出现两种路由结果。
+// default_model 为空时保持空串，让 routeResolved 沿用「默认供应商 + 空模型」。
+func (g *Gateway) requestedModel(model string) string {
+	if model != "" {
+		return model
+	}
+	return g.cfg.DefaultModel
 }
 
 // routeResolved splits an already-resolved model into (provider, upstream model)
@@ -868,17 +881,70 @@ func (g *Gateway) routeScoped(model string, allowed []string) (string, string, b
 		prov, m := g.route(model)
 		return prov, m, true
 	}
-	if g.modelMap != nil {
-		if chain := g.modelMap.Chain(model); len(chain) > 0 {
-			for _, target := range chain {
-				if prov, m, ok := g.routeResolvedScoped(target, allow); ok {
-					return prov, m, true
+	for _, target := range g.requestedTargets(model) {
+		if g.modelMap != nil {
+			if chain := g.modelMap.Chain(target); len(chain) > 0 {
+				for _, hop := range chain {
+					if prov, m, ok := g.routeResolvedScoped(hop, allow); ok {
+						return prov, m, true
+					}
 				}
+				// 这条链上没有权限内目标。省略 model 时继续试下一个写法；
+				// 客户端点名要的模型则直接拒绝。
+				if model != "" {
+					return "", "", false
+				}
+				continue
 			}
-			return "", "", false
+		}
+		if prov, m, ok := g.routeResolvedScoped(target, allow); ok {
+			return prov, m, true
 		}
 	}
-	return g.routeResolvedScoped(model, allow)
+	if model != "" {
+		return "", "", false
+	}
+	// 省略 model 的最后兜底：落点是权限内供应商，模型退回默认模型的裸名。
+	// 客户端什么都没点名，用 403 回答「没写 model」只会让人以为密钥坏了。
+	prov := g.defaultProviderScoped(allow)
+	if prov == "" {
+		return "", "", false
+	}
+	return prov, g.withoutProviderPrefix(g.cfg.DefaultModel), true
+}
+
+// requestedTargets 返回一个请求应依次尝试的「已解析目标」。
+//
+// 非空 model 只有一个目标（就是客户端写的那串）。省略 model 时目标是
+// default_model：先试它的完整写法，再试它剥掉供应商前缀后的裸名。
+//
+// 完整写法优先是为了和「显式发 default_model」完全一致——两者必须是同一条
+// 路由，否则改 default_model 之后，不写 model 的客户端会悄悄走到别的供应商。
+// 裸名是收窄范围时的退路：default_model 常写成 "provider/model"，而该
+// provider 完全可能不在某个入站密钥的 providers 里，此时靠裸名仍能在范围内
+// 解析出落点与别名链，而不是直接 403。
+func (g *Gateway) requestedTargets(model string) []string {
+	if model != "" {
+		return []string{model}
+	}
+	expanded := g.cfg.DefaultModel
+	if expanded == "" {
+		return nil
+	}
+	if bare := g.withoutProviderPrefix(expanded); bare != expanded {
+		return []string{expanded, bare}
+	}
+	return []string{expanded}
+}
+
+// withoutProviderPrefix 剥掉形如 "已知供应商/" 的前缀；不是已知前缀时原样返回。
+func (g *Gateway) withoutProviderPrefix(model string) string {
+	if i := strings.Index(model, "/"); i > 0 {
+		if _, ok := g.providers[model[:i]]; ok {
+			return model[i+1:]
+		}
+	}
+	return model
 }
 
 // routeResolvedScoped 在已知的 allow 表下解析一个「已经过别名解析」的目标。
@@ -1017,12 +1083,28 @@ func (g *Gateway) modelChainFallbacks(model string) []fallbackCandidate {
 	if g.modelMap == nil {
 		return nil
 	}
-	chain := g.modelMap.Chain(model)
+	chain := g.aliasChain(model)
 	if len(chain) <= 1 {
 		return nil
 	}
 	primProv, primModel := g.route(model)
 	return g.chainFallbacksFrom(chain, primProv, primModel, nil)
+}
+
+// aliasChain 返回该请求所请求模型对应的别名链。
+//
+// 省略 model 时按 default_model 找链：那条链就是「默认模型」真正会走的路径，
+// 拿空串去查链只会得到 nil，等于让「没写 model」的请求永远拿不到回退目标。
+func (g *Gateway) aliasChain(model string) []string {
+	if g.modelMap == nil {
+		return nil
+	}
+	for _, target := range g.requestedTargets(model) {
+		if chain := g.modelMap.Chain(target); len(chain) > 0 {
+			return chain
+		}
+	}
+	return nil
 }
 
 // modelChainFallbacksScoped 同 modelChainFallbacks，但以「收窄后实际选中的
@@ -1033,7 +1115,7 @@ func (g *Gateway) modelChainFallbacksScoped(model, primaryProvider, primaryModel
 	if g.modelMap == nil {
 		return nil
 	}
-	chain := g.modelMap.Chain(model)
+	chain := g.aliasChain(model)
 	if len(chain) <= 1 {
 		return nil
 	}

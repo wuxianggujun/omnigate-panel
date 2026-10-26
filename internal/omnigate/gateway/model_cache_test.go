@@ -66,6 +66,12 @@ func TestModelsKeepsLastGoodOnRefreshFailure(t *testing.T) {
 	if len(got) != 1 || got[0].ID != "sn-glm-5-3" || got[0].Credits == nil {
 		t.Fatalf("got = %+v, want cached priced model", got)
 	}
+	// 过期缓存走后台刷新（stale-while-revalidate）：等它落定，确认失败后旧目录仍在。
+	g.modelRefreshWG.Wait()
+	cached, ok := g.cachedModels("raccoon")
+	if !ok || len(cached) != 1 || cached[0].ID != "sn-glm-5-3" {
+		t.Fatalf("后台刷新失败后缓存被改坏: %+v ok=%v", cached, ok)
+	}
 }
 
 // 完全没有缓存时刷新失败：退回上游给的降级目录（仍可路由），但绝不写进缓存。
@@ -124,6 +130,12 @@ func TestModelsEmptyRefreshKeepsLastGood(t *testing.T) {
 	cached, ok := g.cachedModels("raccoon")
 	if !ok || len(cached) != 2 {
 		t.Fatalf("空目录不该覆盖缓存，实际 %+v ok=%v", cached, ok)
+	}
+	// 过期缓存的刷新是后台的：等它落定再检查缓存与落库快照。
+	g.modelRefreshWG.Wait()
+	cached, ok = g.cachedModels("raccoon")
+	if !ok || len(cached) != 2 {
+		t.Fatalf("后台刷新返回空目录后缓存被改坏: %+v ok=%v", cached, ok)
 	}
 	// 落库快照必须仍然包含这家供应商。
 	path := filepath.Join(t.TempDir(), "model-cache.json")

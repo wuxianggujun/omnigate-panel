@@ -53,6 +53,11 @@ type Gateway struct {
 
 	modelMu    sync.Mutex
 	modelCache map[string]modelEntry
+	// modelRefreshing 标记「已有缓存但正在后台刷新」的供应商，避免过期缓存被
+	// 每个并发请求各自触发一次上游拉取（见 models 的 stale-while-revalidate）。
+	modelRefreshing map[string]bool
+	// modelRefreshWG 让测试能等后台刷新落定；生产路径不等待。
+	modelRefreshWG sync.WaitGroup
 
 	// modelCachePath 是模型目录的落盘路径（空 = 不持久化）。见 WithModelCachePath。
 	// 有了它，容器重启 / 改配置重建网关后，仍能立刻给出带计费价的目录。
@@ -271,19 +276,20 @@ var (
 // New builds a Gateway from config and state.
 func New(cfg *config.Config, st *state.State, log *logx.Logger, opts ...Option) (*Gateway, error) {
 	g := &Gateway{
-		cfg:        cfg,
-		st:         st,
-		log:        log,
-		providers:  map[string]provider.Provider{},
-		accounts:   map[string][]*provider.Account{},
-		modelCache: map[string]modelEntry{},
-		convs:      map[string]*conv{},
-		pending:    map[string]raccoonPending{},
-		traePend:   map[string]traePending{},
-		newapiPend: map[string]newapiPending{},
-		cool:       newCooldownLedger(),
-		sess:       newSessionHealth(),
-		credits:    newCreditCache(),
+		cfg:             cfg,
+		st:              st,
+		log:             log,
+		providers:       map[string]provider.Provider{},
+		accounts:        map[string][]*provider.Account{},
+		modelCache:      map[string]modelEntry{},
+		modelRefreshing: map[string]bool{},
+		convs:           map[string]*conv{},
+		pending:         map[string]raccoonPending{},
+		traePend:        map[string]traePending{},
+		newapiPend:      map[string]newapiPending{},
+		cool:            newCooldownLedger(),
+		sess:            newSessionHealth(),
+		credits:         newCreditCache(),
 	}
 	for _, o := range opts {
 		o(g)
@@ -504,10 +510,28 @@ func (g *Gateway) Accounts(name string) []*provider.Account {
 
 // models returns a provider's models, cached for 10 minutes. 刷新失败时退回「最近一次
 // 成功结果」（哪怕已过期）——目录里带着计费 / 积分价，不能因为账号临时不可用就丢掉。
+//
+// 有缓存但已过期时走 stale-while-revalidate：立刻返回旧目录，上游刷新放到后台。
+// 否则重启后第一次打开模型页（进程内缓存 at 为零值 = 全部过期）要等各家上游的
+// 延迟——线上实测 5 家串行 38 秒、并发后仍要等最慢的一家 60 秒，面板一直转圈。
+// 没有缓存时才同步拉取：那种情况没有别的东西可展示。
 func (g *Gateway) models(ctx context.Context, name string) ([]openai.Model, error) {
 	g.modelMu.Lock()
-	if e, ok := g.modelCache[name]; ok && time.Since(e.at) < modelCacheTTL {
+	e, cached := g.modelCache[name]
+	if cached && time.Since(e.at) < modelCacheTTL {
 		g.modelMu.Unlock()
+		return e.models, nil
+	}
+	if cached && len(e.models) > 0 && !g.modelRefreshing[name] {
+		// 标记后立刻放锁：同一供应商只排一次后台刷新，其余并发请求继续读旧目录。
+		// 手工构造的 Gateway（测试）没有这个 map，退化为阻塞刷新而不是 panic。
+		if g.modelRefreshing == nil {
+			g.modelRefreshing = map[string]bool{}
+		}
+		g.modelRefreshing[name] = true
+		g.modelMu.Unlock()
+		g.modelRefreshWG.Add(1)
+		go g.refreshModelsAsync(name)
 		return e.models, nil
 	}
 	g.modelMu.Unlock()
@@ -537,6 +561,23 @@ func (g *Gateway) models(ctx context.Context, name string) ([]openai.Model, erro
 		return nil, fmt.Errorf("%s 的上游模型目录为空", name)
 	}
 	return models, nil
+}
+
+// refreshModelsAsync 在后台刷新某供应商的模型目录。失败只记日志：调用方已经拿到
+// 上一次的目录，后台任务不该把它的结果改坏。
+func (g *Gateway) refreshModelsAsync(name string) {
+	defer g.modelRefreshWG.Done()
+	defer func() {
+		g.modelMu.Lock()
+		delete(g.modelRefreshing, name)
+		g.modelMu.Unlock()
+	}()
+	// 后台刷新没有请求级的 deadline，给一个自己的上限，避免慢上游长期占着标记。
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	if _, err := g.fetchModels(ctx, name); err != nil {
+		g.log.Warn("后台刷新 %s 模型失败，继续沿用缓存: %v", name, err)
+	}
 }
 
 // fetchModels 绕过 TTL 直接向上游拉取某 provider 的模型目录，成功时刷新缓存并

@@ -482,7 +482,9 @@ function render() {
   page.appendChild(el('div', { class: 'page-footer-note' },
     // 「配置存储不可见」在加载完成前同样是假结论：还没问到，不等于没有权限。
     el('span', { text: ui.configPath ? `配置存储 ${ui.configPath}` : (firstLoad ? '配置存储读取中' : '配置存储不可见') }),
-    ui.configError ? el('span', { class: 'text-warn', text: ui.configError }) : null,
+    // 匿名的 configError 是 api.js 的统一文案「需要登录后才能执行此操作」，
+    // 和左边那句说的是同一件事。同一行里并排两遍只是噪音，条数由左句表达。
+    (ui.configError && current.authenticated) ? el('span', { class: 'text-warn', text: ui.configError }) : null,
     el('span', { text: '账号余额来自上游实时查询，可能因网络或风控延迟。' }),
   ));
 
@@ -1190,7 +1192,11 @@ function keysTab(provider, meta, current) {
     wrap.appendChild(notice(
       isAuthenticated() ? 'info' : 'muted',
       '平台配置不可读',
-      ui.configError || (isAuthenticated() ? '需要管理员或只读角色才能查看上游密钥。' : '登录管理员账号后可查看掩码密钥。'),
+      // 匿名时 ui.configError 是 api.js 的统一文案「需要登录后才能执行此操作」，
+      // 读起来像一句命令；这里换成说清能做什么的那句。
+      !isAuthenticated()
+        ? '登录管理员账号后可查看掩码密钥。'
+        : (ui.configError || '需要管理员或只读角色才能查看上游密钥。'),
       isAuthenticated() ? null : { label: '登录', action: 'login' },
     ));
     return wrap;
@@ -1420,7 +1426,9 @@ function advancedTab(provider, meta, current) {
     wrap.appendChild(notice(
       isAuthenticated() ? 'info' : 'muted',
       '平台配置不可编辑',
-      ui.configError || '当前角色无权读取平台配置。',
+      !isAuthenticated()
+        ? '高级配置属于平台级设置，登录管理员或只读角色后可查看。'
+        : (ui.configError || '当前角色无权读取平台配置。'),
       isAuthenticated() ? null : { label: '登录', action: 'login' },
     ));
     return wrap;

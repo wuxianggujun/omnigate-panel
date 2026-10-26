@@ -235,7 +235,13 @@ function render() {
         icon('info', 16),
         el('div', { class: 'notice-content' },
           el('strong', { text: isAuthenticated() ? '路由配置不可读' : '登录后查看路由' }),
-          el('span', { text: ui.configError || '路由配置需要管理员或只读角色。' }),
+          // 匿名的 ui.configError 是 api.js 的统一文案「需要登录后才能执行此操作」，
+          // 与标题重复；这里换成说清这页有什么的那句。
+          el('span', {
+            text: !isAuthenticated()
+              ? '默认供应商、裸模型优先级与模型别名都属于平台级路由设置；登录后按角色显示。'
+              : (ui.configError || '路由配置需要管理员或只读角色。'),
+          }),
         ),
         !isAuthenticated() ? el('button', {
           class: 'btn btn-primary btn-sm', type: 'button',

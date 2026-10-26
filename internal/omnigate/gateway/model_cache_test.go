@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -86,6 +87,78 @@ func TestModelsFallsBackToDegradedWithoutCache(t *testing.T) {
 	if cached {
 		t.Fatal("degraded result must not be cached")
 	}
+}
+
+// 空目录不是「这家供应商没有模型」，而是「这次没读到」。它既不能覆盖上一次的
+// 完好目录，也不能把自己从落库快照里抹掉：线上曾因一次拉取返回空列表，让 aotera
+// 的 7 个模型在重启后永远消失（日志写「已载入 5 个」，库里只剩 4 个）。
+func TestModelsEmptyRefreshKeepsLastGood(t *testing.T) {
+	prov := &emptyThenGoodLister{}
+	g := testGateway(prov)
+	g.accounts["raccoon"] = []*provider.Account{{Label: "a", Cookie: "tok"}}
+
+	first, err := g.models(context.Background(), "raccoon")
+	if err != nil {
+		t.Fatalf("first: %v", err)
+	}
+	if len(first) != 2 {
+		t.Fatalf("first = %+v, want 2 models", first)
+	}
+	if _, ok := g.cachedModels("raccoon"); !ok {
+		t.Fatal("首次成功后应写入缓存")
+	}
+
+	// 让缓存过期，并让上游返回「无错但空」。
+	g.modelMu.Lock()
+	g.modelCache["raccoon"] = modelEntry{models: first, at: time.Now().Add(-modelCacheTTL - time.Minute)}
+	g.modelMu.Unlock()
+	prov.empty = true
+
+	got, err := g.models(context.Background(), "raccoon")
+	if err != nil {
+		t.Fatalf("空目录应回落到缓存而不是报错: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got = %+v, want cached 2 models", got)
+	}
+	cached, ok := g.cachedModels("raccoon")
+	if !ok || len(cached) != 2 {
+		t.Fatalf("空目录不该覆盖缓存，实际 %+v ok=%v", cached, ok)
+	}
+	// 落库快照必须仍然包含这家供应商。
+	path := filepath.Join(t.TempDir(), "model-cache.json")
+	g.modelCachePath = path
+	g.saveModelCache()
+	raw, rerr := os.ReadFile(path)
+	if rerr != nil {
+		t.Fatalf("读回落盘快照失败: %v", rerr)
+	}
+	var saved modelCacheFile
+	if err := json.Unmarshal(raw, &saved); err != nil {
+		t.Fatalf("解析落盘快照失败: %v", err)
+	}
+	if len(saved["raccoon"]) != 2 {
+		t.Fatalf("落盘快照丢了 raccoon: %+v", saved)
+	}
+}
+
+// emptyThenGoodLister 模拟「第一次正常、之后无错但返回空目录」的上游。
+type emptyThenGoodLister struct {
+	empty bool
+}
+
+func (p *emptyThenGoodLister) Name() string { return "raccoon" }
+func (p *emptyThenGoodLister) Type() string { return "raccoon" }
+
+func (p *emptyThenGoodLister) ListModels(context.Context) ([]openai.Model, error) {
+	if p.empty {
+		return nil, nil
+	}
+	return []openai.Model{{ID: "m1", Object: "model"}, {ID: "m2", Object: "model"}}, nil
+}
+
+func (p *emptyThenGoodLister) StreamChat(context.Context, *provider.Account, provider.ChatInput) (provider.Stream, error) {
+	return nil, errors.New("not used")
 }
 
 // 模型目录跨重启持久化：一次成功后落盘；重建网关（上游已不可用）时仍能立刻给出

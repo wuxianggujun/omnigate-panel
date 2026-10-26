@@ -421,3 +421,62 @@ func TestListModelsAutoDiscoversWhenUnset(t *testing.T) {
 		t.Fatalf("models 留空应自动发现上游目录，实际 %+v", models)
 	}
 }
+
+// 自动发现失败必须报错，不能静默返回空目录。网关把「无错但为空」当成功，会覆盖
+// 上一次的完好目录、并把该供应商从落库快照里删掉——一次网络抖动就能让整家上游
+// 从线上模型目录里消失。
+func TestListModelsAutoDiscoverFailureReturnsError(t *testing.T) {
+	cases := []struct {
+		name    string
+		handler http.HandlerFunc
+	}{
+		{
+			name: "上游 5xx",
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				http.Error(w, "boom", http.StatusInternalServerError)
+			},
+		},
+		{
+			name: "上游 401",
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+			},
+		},
+		{
+			name: "返回空目录",
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(`{"object":"list","data":[]}`))
+			},
+		},
+		{
+			name: "返回坏 JSON",
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(`not json`))
+			},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			srv := httptest.NewServer(c.handler)
+			defer srv.Close()
+
+			p := New("fake", srv.URL, "sk-x", nil)
+			models, err := p.ListModels(context.Background())
+			if err == nil {
+				t.Fatalf("自动发现失败应报错，实际返回 %d 个模型且 err=nil", len(models))
+			}
+		})
+	}
+}
+
+// 连不上上游（连接被拒）同样要报错，而不是伪装成「这家供应商没有模型」。
+func TestListModelsAutoDiscoverUnreachableReturnsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	url := srv.URL
+	srv.Close() // 关掉后端口不可达
+
+	p := New("fake", url, "sk-x", nil)
+	if _, err := p.ListModels(context.Background()); err == nil {
+		t.Fatal("上游不可达时应报错")
+	}
+}

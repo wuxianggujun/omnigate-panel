@@ -562,6 +562,12 @@ func (p *Provider) Type() string { return "openai" }
 //
 // 显式配置了 models 时，它就是目录白名单：直接返回该清单，绝不访问上游 /models。
 // 否则「手动只加了一个模型」会被自动发现覆盖成上游的全部模型。models 留空才自动发现。
+//
+// 自动发现失败必须返回 error，不能吞成「成功但目录为空」：网关拿「成功」当作
+// 「这个供应商确实没有模型」，会用它覆盖掉上一次的完好目录，并把该供应商从落库
+// 的模型目录快照里删掉。一次网络抖动就足以让 aotera 的 7 个模型从线上目录消失
+// （重启后日志写「已载入 5 个 provider」，库里却只剩 4 个）。空目录同理：上游偶发
+// 返回 data:[] 时保留旧目录比清空它更接近事实。
 func (p *Provider) ListModels(ctx context.Context) ([]openai.Model, error) {
 	if len(p.models) > 0 {
 		out := make([]openai.Model, 0, len(p.models))
@@ -571,37 +577,38 @@ func (p *Provider) ListModels(ctx context.Context) ([]openai.Model, error) {
 		return out, nil
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.baseURL+"/models", nil)
-	if err == nil {
-		key, _ := p.pick(nil)
-		// 模型目录请求走同一套出站身份：只收 Claude Code 流量的中转站在
-		// /v1/models 上同样会校验客户端形态。这里用 openai 方言的鉴权（Bearer），
-		// 因为 /models 本身是 OpenAI 形态的端点，与聊天所用的方言无关。
-		p.stamp(req, wire.FormatOpenAI, key)
-		if resp, err := p.http.Do(req); err == nil {
-			defer resp.Body.Close()
-			if resp.StatusCode < 400 {
-				var ml openai.ModelList
-				if json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(&ml) == nil {
-					out := make([]openai.Model, 0, len(ml.Data))
-					for _, m := range ml.Data {
-						if m.Object == "" {
-							m.Object = "model"
-						}
-						if m.OwnedBy == "" {
-							m.OwnedBy = p.name
-						}
-						out = append(out, m)
-					}
-					if len(out) > 0 {
-						return out, nil
-					}
-				}
-			}
-		}
+	if err != nil {
+		return nil, fmt.Errorf("拉取 %s 模型目录失败：%w", p.name, err)
 	}
-	out := make([]openai.Model, 0, len(p.models))
-	for _, id := range p.models {
-		out = append(out, openai.Model{ID: id, Object: "model", OwnedBy: p.name})
+	key, _ := p.pick(nil)
+	// 模型目录请求走同一套出站身份：只收 Claude Code 流量的中转站在
+	// /v1/models 上同样会校验客户端形态。这里用 openai 方言的鉴权（Bearer），
+	// 因为 /models 本身是 OpenAI 形态的端点，与聊天所用的方言无关。
+	p.stamp(req, wire.FormatOpenAI, key)
+	resp, err := p.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("拉取 %s 模型目录失败：%w", p.name, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("拉取 %s 模型目录失败：上游返回 HTTP %d", p.name, resp.StatusCode)
+	}
+	var ml openai.ModelList
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(&ml); err != nil {
+		return nil, fmt.Errorf("解析 %s 模型目录失败：%w", p.name, err)
+	}
+	out := make([]openai.Model, 0, len(ml.Data))
+	for _, m := range ml.Data {
+		if m.Object == "" {
+			m.Object = "model"
+		}
+		if m.OwnedBy == "" {
+			m.OwnedBy = p.name
+		}
+		out = append(out, m)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("拉取 %s 模型目录失败：上游返回空目录", p.name)
 	}
 	return out, nil
 }

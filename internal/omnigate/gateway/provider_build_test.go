@@ -251,7 +251,9 @@ func TestProbeProviderCarriesIdentity(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotUA = r.Header.Get("User-Agent")
 		gotPath = r.URL.Path
-		_, _ = w.Write([]byte(`{"object":"list","data":[]}`))
+		// 返回一个模型而不是空目录：空目录现在是「这次没读到」的错误信号
+		// （见 openaibackend.ListModels），会把本用例的身份断言掩盖掉。
+		_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"m1"}]}`))
 	}))
 	defer srv.Close()
 

@@ -527,6 +527,15 @@ func (g *Gateway) models(ctx context.Context, name string) ([]openai.Model, erro
 		}
 		return nil, err
 	}
+	// 空目录同样不能当成功写进缓存：fetchModels 只在真正拿到列表时才落库，但
+	// provider 实现（尤其第三方插件）仍可能返回「无错但为空」。此时保留旧目录
+	// 比清空更接近事实，也避免把该供应商从落库快照里抹掉。
+	if len(models) == 0 {
+		if e, ok := g.cachedModels(name); ok {
+			return e, nil
+		}
+		return nil, fmt.Errorf("%s 的上游模型目录为空", name)
+	}
 	return models, nil
 }
 
@@ -549,6 +558,11 @@ func (g *Gateway) fetchModels(ctx context.Context, name string) ([]openai.Model,
 	}
 	if err != nil {
 		return models, err
+	}
+	// 空目录不落缓存、不落库：见 models 的注释。这里提前拦住，避免「短暂失败 → 空
+	// 目录」把上一次的完好目录从进程缓存与落库快照里一起抹掉。
+	if len(models) == 0 {
+		return nil, fmt.Errorf("%s 的上游模型目录为空", name)
 	}
 	g.modelMu.Lock()
 	g.modelCache[name] = modelEntry{models: models, at: time.Now()}

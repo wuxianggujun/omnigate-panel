@@ -1134,7 +1134,12 @@ export function buildAccountsPayload(state, { withBalance = false, role = '', us
       };
       accounts.push(row);
     }
-    providers.push({ name: provider.name, type: provider.type, accounts });
+    // 与后端一致：账号接口同时给出该供应商的上游密钥组数，这是匿名也可见的
+    // 元信息（密钥本身仍然不可见）。前端用它区分「没有凭证」与「凭证不可见」。
+    const secrets = provider.type === 'opencode'
+      ? (provider.zen_keys || []).length + (provider.go_keys || []).length
+      : [provider.api_key, ...(provider.api_keys || [])].filter(Boolean).length;
+    providers.push({ name: provider.name, type: provider.type, keys: secrets, accounts });
   }
   return { ok: true, providers };
 }

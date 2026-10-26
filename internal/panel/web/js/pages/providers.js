@@ -216,6 +216,7 @@ function providerList() {
       config: provider,
       accounts: [],
       fromConfig: true,
+      keys: null,
     };
     byName.set(provider.name, row);
     rows.push(row);
@@ -226,6 +227,7 @@ function providerList() {
       const row = byName.get(provider.name);
       row.accounts = Array.isArray(provider.accounts) ? provider.accounts : [];
       row.type = row.type || provider.type || '';
+      row.keys = Number.isFinite(Number(provider.keys)) ? Number(provider.keys) : row.keys;
       continue;
     }
     const row = {
@@ -234,6 +236,7 @@ function providerList() {
       config: null,
       accounts: Array.isArray(provider.accounts) ? provider.accounts : [],
       fromConfig: false,
+      keys: Number.isFinite(Number(provider.keys)) ? Number(provider.keys) : null,
     };
     byName.set(provider.name, row);
     rows.push(row);
@@ -327,17 +330,21 @@ function shadowingAliases(provider, models) {
 
 function providerStatus(provider) {
   const accounts = provider.accounts || [];
-  const role = authState().role;
+  const auth = authState();
+  const role = auth.role;
   if (!accounts.length) {
     const meta = typeMeta(provider.type);
     if (isKeyBasedProvider(meta)) {
       // 密钥型供应商的「形态」已经在类型行显示为「密钥型」，状态点必须说别的事，
       // 否则同一行里「密钥型 · 密钥型」是纯噪音。这里只回答凭证是否就绪。
-      if (provider.config && keyFieldValues(provider.config).length === 0) {
-        return { tone: 'warn', label: '缺凭证' };
-      }
-      return { tone: 'ok', label: '凭证就绪' };
+      if (!keysKnown(provider)) return { tone: 'muted', label: '凭证不可见' };
+      return upstreamKeyCount(provider) > 0
+        ? { tone: 'ok', label: '凭证就绪' }
+        : { tone: 'warn', label: '缺凭证' };
     }
+    // 匿名访客的 accounts 被后端按归属过滤成空数组，这是「看不到」而不是
+    // 「没有账号」：把空列表说成「空壳」会让访客以为供应商没配好。
+    if (!auth.authenticated) return { tone: 'muted', label: '账号不可见' };
     if (role === 'user') return { tone: 'muted', label: '无归属账号' };
     return { tone: 'warn', label: '空壳' };
   }
@@ -373,6 +380,25 @@ function keyFieldValues(configProvider) {
     else if (typeof value === 'string' && value) out.push({ name, values: [value], kind: 'single' });
   }
   return out;
+}
+
+// upstreamKeyCount：该供应商到底配了几组上游密钥。
+//
+// 配置可读时按字段数（api_key / api_keys / zen_keys / go_keys）算；配置不可读
+// （匿名、普通用户）时 config 为 null，但账号接口仍会给出该供应商的 keys 计数，
+// 这是匿名可见的元信息。少了这个回退，atria 明明有 2 组密钥也会被写成
+// 「凭证 未配置」，而状态点又同时显示「凭证就绪」，自相矛盾。
+function upstreamKeyCount(provider) {
+  if (provider.config) return keyFieldValues(provider.config).length;
+  const n = Number(provider.keys);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+// keysKnown：是否知道密钥数量。配置读不到且账号接口没给计数时为 false，
+// 此时只能说「不可见」，不能说「没有」。
+function keysKnown(provider) {
+  if (provider.config) return true;
+  return provider.keys != null && Number.isFinite(Number(provider.keys));
 }
 
 function providerModels(provider) {
@@ -505,7 +531,13 @@ function providerPane(list, selected, current) {
       el('div', { class: 'provider-item-type' },
         el('span', { text: meta.label || providerLabel(provider.type) }),
         el('span', { class: 'dot-sep', text: '·' }),
-        el('span', { text: provider.accounts.length ? `${provider.accounts.length} 账号` : (isKeyBasedProvider(meta) ? '密钥型' : '0 账号') }),
+        // 这一行只回答「账号形态」：密钥型还是账号池。数量与可见性交给状态点，
+        // 否则匿名视角下「账号不可见」会在同一行里出现两次。
+        el('span', {
+          text: provider.accounts.length
+            ? `${provider.accounts.length} 账号`
+            : (isKeyBasedProvider(meta) ? '密钥型' : '账号池'),
+        }),
       ),
       el('div', { class: 'provider-item-meta' },
         statusDot(status.tone, status.label),
@@ -540,8 +572,11 @@ function providerDetail(provider, current) {
   if (!showAccounts && ui.tab === 'accounts') ui.tab = 'overview';
   const tabItems = [
     { id: 'overview', label: '概览' },
-    showAccounts ? { id: 'accounts', label: '账号', count: provider.accounts.length } : null,
-    { id: 'keys', label: '上游密钥', count: keyFieldValues(provider.config).length },
+    // 匿名访客的账号列表被后端过滤为空，把 0 写成 Tab 计数等于断言「没有账号」。
+    showAccounts
+      ? { id: 'accounts', label: '账号', count: isAuthenticated() ? provider.accounts.length : null }
+      : null,
+    { id: 'keys', label: '上游密钥', count: upstreamKeyCount(provider) },
     { id: 'models', label: '模型', count: models.length },
     { id: 'advanced', label: '高级' },
   ].filter(Boolean);
@@ -601,17 +636,18 @@ function overviewTab(provider, meta, current, models) {
   const wrap = el('div', { class: 'tab-stack' });
   const credits = providerCredits(provider);
   const keyBased = isKeyBasedProvider(meta);
-  const keyCount = keyFieldValues(provider.config).length;
+  const keyCount = upstreamKeyCount(provider);
+  const keyKnown = keysKnown(provider);
   const fields = [
     // 供应商类型 / 运行状态 / 默认供应商 / 路由顺位 已由详情头部的徽标表达，
     // 这里再列一遍只是把同一句话写两次。事实区只放顶部徽标放不下的量化信息。
     keyBased
-      ? ['凭证', keyCount ? `上游密钥 ${keyCount} 组` : '未配置']
-      : ['账号数', String(provider.accounts.length)],
+      ? ['凭证', !keyKnown ? '不可见' : (keyCount ? `上游密钥 ${keyCount} 组` : '未配置')]
+      : ['账号数', authState().authenticated ? String(provider.accounts.length) : '不可见'],
     ['额度合计', credits != null ? `${fmtCredits(credits)} 积分` : '未知'],
     ['模型数量', String(models.length)],
     // 密钥型供应商上面已有「凭证」一行，不再重复。
-    keyBased ? null : ['上游密钥', keyCount ? `${keyCount} 组` : '未配置'],
+    keyBased ? null : ['上游密钥', !keyKnown ? '不可见' : (keyCount ? `${keyCount} 组` : '未配置')],
   ].filter(Boolean);
   const facts = el('div', { class: 'facts-grid' });
   for (const [label, value] of fields) {
@@ -802,7 +838,11 @@ function accountsTab(provider, meta, current) {
   const toolbar = el('div', { class: 'section-toolbar' },
     el('div', { class: 'toolbar-title' },
       el('h3', { text: '账号与凭证' }),
-      el('span', { class: 'muted small', text: `${provider.accounts.length} 个可见账号` }),
+      // 匿名时账号列表被后端过滤为空，写「0 个可见账号」会被读成「没有账号」，
+      // 实际是「看不到」。这里只对已登录角色给数量。
+      isAuthenticated()
+        ? el('span', { class: 'muted small', text: `${provider.accounts.length} 个可见账号` })
+        : null,
     ),
     el('div', { class: 'toolbar-actions' },
       current.authenticated ? el('button', {
@@ -823,11 +863,15 @@ function accountsTab(provider, meta, current) {
   wrap.appendChild(toolbar);
 
   if (!isAuthenticated()) {
-    wrap.appendChild(notice('info', '账号明细需要登录', '匿名访客只能看到供应商空壳。登录后根据角色返回可见账号。', {
+    // 匿名访客看不到任何账号：一条提示说清「为什么空、怎么才能看到」就够，
+    // 再叠一张「登录后查看账号」的空状态卡只是把同一句话说两遍。
+    wrap.appendChild(notice('info', '账号明细需要登录', '账号按 provider/label 归属过滤；登录后按角色返回可见账号。', {
       label: '登录',
       action: 'login',
     }));
-  } else if (!canOperate) {
+    return wrap;
+  }
+  if (!canOperate) {
     wrap.appendChild(notice('info', '只读角色', 'viewer 可以查看账号、余额与错误，但不能签到、刷新或移除。'));
   }
 

@@ -230,6 +230,44 @@ export function card({ title, subtitle, actions, body, class: className = '', co
   return node;
 }
 
+/**
+ * 页面工具条：只放本页独有的操作与说明，不再重复顶栏已有的标题/副标题。
+ *
+ * 背景：顶栏（#page-title / #page-subtitle）已经常驻显示当前页标题与副标题，
+ * 各页面内再渲染一份 <h1 class="page-title"> 会让同一个词在一屏出现两次，
+ * 视觉上既冗余又让操作按钮离标题太远。这里统一收口成一行：
+ * 左侧是可选的本页说明（context），右侧是操作按钮。
+ *
+ * @param {object} opts
+ * @param {Node|Node[]|string} [opts.context] 本页补充说明（不是标题）
+ * @param {Node|Node[]} [opts.actions] 右侧操作按钮
+ * @param {string} [opts.class] 额外类名
+ */
+export function pageBar({ context = null, actions = null, class: className = '' } = {}) {
+  const bar = el('div', { class: `page-bar ${className}`.trim() });
+  const left = el('div', { class: 'page-bar-context' });
+  if (context != null) appendChild(left, context);
+  const right = el('div', { class: 'page-bar-actions' });
+  if (actions != null) appendChild(right, actions);
+  if (left.childNodes.length) bar.appendChild(left);
+  if (right.childNodes.length) bar.appendChild(right);
+  return bar;
+}
+
+/**
+ * 分区标题带：把一屏内同级卡片分组，避免十几张卡平铺带来的「不知道先看哪」。
+ * 只做视觉分组，不包裹卡片（卡片各自保留边框与操作）。
+ */
+export function sectionBand({ title, note = '', actions = null } = {}) {
+  return el('div', { class: 'section-band' },
+    el('div', { class: 'section-band-main' },
+      el('h2', { class: 'section-band-title', text: title }),
+      note ? el('p', { class: 'section-band-note', text: note }) : null,
+    ),
+    actions ? el('div', { class: 'section-band-actions' }, actions) : null,
+  );
+}
+
 export function badge(text, tone = 'muted', { dot = false, title } = {}) {
   return el('span', { class: `badge badge-${tone}`, title: title || undefined },
     dot ? el('span', { class: 'dot', 'aria-hidden': 'true' }) : null,

@@ -175,14 +175,8 @@ function render() {
     },
   }, icon('filter', 14), ui.advancedFiltersOpen ? '收起筛选' : `更多筛选${advancedCount ? ` · ${advancedCount}` : ''}`);
 
-  page.appendChild(el('div', { class: 'page-head' },
-    el('div', {},
-      el('div', { class: 'eyebrow', text: 'REQUEST ARCHIVE' }),
-      el('h1', { class: 'page-title', text: '请求' }),
-      el('p', { class: 'page-subtitle', text: '归档请求的筛选、详情与运行日志；点击任意记录查看终端、来源与缓存命中。' }),
-    ),
-  ));
-
+  // 页面标题与范围说明都不单独占一行：标题由顶栏常驻，范围并入下方列表工具条
+  // 的摘要行，避免「范围条 + 筛选条 + 工具条」三条横条上下叠。
   if (!isAuthenticated()) {
     page.appendChild(el('div', { class: 'notice notice-info' },
       icon('info', 16),
@@ -194,11 +188,6 @@ function render() {
         class: 'btn btn-primary btn-sm', type: 'button',
         on: { click: () => openLoginModal({ message: '登录后查看请求与运行日志。' }) },
       }, '登录'),
-    ));
-  } else if (auth.role === 'user') {
-    page.appendChild(el('div', { class: 'context-strip' },
-      badge('个人范围', 'info'),
-      el('span', { class: 'context-note', text: '仅显示归属你的账号（provider/label）服务的请求。' }),
     ));
   }
 
@@ -263,6 +252,13 @@ function render() {
     el('div', { class: 'request-toolbar-summary' },
       el('span', { class: 'request-toolbar-label', text: ui.entries.length ? `当前列表 ${fmtInt(ui.entries.length)} 条` : '当前列表' }),
       el('span', { class: 'request-summary-tokens mono', text: summaryText, title: summaryTitle }),
+      // 普通用户的范围说明放在这里：它解释的正是「当前列表」为什么只有这些记录。
+      auth.role === 'user'
+        ? el('span', { class: 'request-scope-note', title: '按账号归属过滤：只看归属你的账号服务的请求' },
+          badge('个人范围', 'info'),
+          el('span', { text: 'provider/label 归属你' }),
+        )
+        : null,
       ui.entries.length ? el('a', { class: 'request-summary-link', href: '#/usage' }, '完整用量 →') : null,
     ),
     el('div', { class: 'request-toolbar-actions' },

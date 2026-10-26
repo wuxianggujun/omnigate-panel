@@ -1,9 +1,9 @@
 // overview.js — 总览：引擎健康、账号池、24h 趋势、近期请求与模型锁。
 
-import { api, isForbidden, describeError } from '../core/api.js';
+import { api, describeError } from '../core/api.js';
 import { authState, isAuthenticated, openLoginModal } from '../core/auth.js';
 import {
-  el, svgEl, card, badge, statusDot, emptyState, loadingBlock, icon, copyText,
+  el, svgEl, card, badge, statusDot, emptyState, loadingBlock, icon, copyText, pageBar,
 } from '../core/dom.js';
 import {
   fmtCompact, fmtCredits, fmtDuration, fmtInt, fmtPercent, fmtRelative, fmtTime,
@@ -100,24 +100,17 @@ function render(root, ctx, { loading = false } = {}) {
     } },
   }, icon('refresh', 15), '刷新');
 
-  page.appendChild(el('div', { class: 'page-head' },
-    el('div', {},
-      el('div', { class: 'eyebrow' },
-        el('span', { class: 'live-dot', 'aria-hidden': 'true' }),
-        'ENGINE OVERVIEW',
-      ),
-      el('h1', { class: 'page-title', text: '总览' }),
-      el('p', { class: 'page-subtitle', text: '内置 OmniGate 引擎的实时健康、供应商与近 24 小时负载。' }),
-    ),
-    el('div', { class: 'page-actions' },
-      el('span', { class: 'auto-refresh-note', text: '每 15 秒自动刷新' }),
-      refreshBtn,
-    ),
-  ));
+  page.appendChild(pageBar({
+    context: [
+      el('span', { class: 'live-dot', 'aria-hidden': 'true' }),
+      el('span', { text: '每 15 秒自动刷新' }),
+    ],
+    actions: [refreshBtn],
+  }));
 
   // 身份信息（用户名 + 角色）已由外壳常驻展示：右上角 #session-chip 与侧边栏底部
-  // #sidebar-session（见 main.js renderShellSession）。总览这里再放一条同样的
-  // context-strip 属于重复，已移除；仅保留 Mock 数据提示。
+  // #sidebar-session（见 main.js renderShellSession）。总览不再重复一条同样的
+  // 说明，只保留 Mock 数据提示。
   if (data.mock) {
     page.appendChild(el('div', { class: 'notice notice-warn' },
       icon('alert', 16),
@@ -163,7 +156,7 @@ function render(root, ctx, { loading = false } = {}) {
     return;
   }
 
-  page.appendChild(el('div', { class: 'kpi-grid' },
+  page.appendChild(el('div', { class: 'kpi-grid kpi-grid-4' },
     kpiCard('服务状态', data.version ? '运行中' : (loading ? '连接中' : '未知'), data.version ? `版本 ${data.version}` : '', data.version ? 'ok' : 'muted', { iconName: 'power', tone: data.version ? 'ok' : 'muted' }),
     kpiCard(noAccounts ? '供应商' : '账号健康',
       noAccounts ? fmtInt(totals.providers) : `${fmtInt(totals.healthy)} / ${fmtInt(totals.accounts)}`,
@@ -171,21 +164,20 @@ function render(root, ctx, { loading = false } = {}) {
       noAccounts ? 'muted' : (totals.failed ? 'warn' : 'ok'),
       { iconName: noAccounts ? 'key' : 'shield' }),
     kpiCard('近 24h 请求', fmtCompact(totals.requests), totals.requests ? `成功率 ${fmtPercent(totals.successRate)}` : '暂无流量', 'accent', { iconName: 'activity' }),
-    kpiCard('近 24h Tokens', fmtCompact(totals.tokens), `平均延迟 ${fmtDuration(totals.avgLatency)}`, 'muted', { iconName: 'models' }),
-    kpiCard('近 24h 积分', fmtCredits(totals.credits), '按上游回传的 credit 统计', 'muted', { iconName: 'usage' }),
+    kpiCard('近 24h 消耗', fmtCompact(totals.tokens),
+      `${fmtCredits(totals.credits)} 积分 · 均延迟 ${fmtDuration(totals.avgLatency)}`, 'muted', { iconName: 'models' }),
   ));
+
+  // 顺序按「先看结论，再看构成」：健康与流量表在最前，其次引擎版本与趋势，
+  // 最后是模型锁与近期请求。原来健康/供应商是两张卡并排，说的却是同一批供应商。
+  page.appendChild(healthCard(totals, providerRows, ctx));
 
   page.appendChild(el('div', { class: 'overview-main-grid' },
     engineCard(data, totals, contextOf(data)),
-    healthCard(totals, providerRows),
-  ));
-
-  page.appendChild(el('div', { class: 'overview-main-grid' },
     trendCard(series, ctx),
-    locksCard(data.model_locks || [], totals),
   ));
 
-  page.appendChild(providerCard(providerRows, ctx));
+  page.appendChild(locksCard(data.model_locks || [], totals));
   page.appendChild(recentCard(recent, ctx, state));
 
   const footer = el('div', { class: 'page-footer-note' },
@@ -346,6 +338,9 @@ function healthMeta(totals) {
 }
 
 function engineCard(data, totals, context) {
+  // 引擎卡原来的四格事实（供应商 / 健康账号 / 成功率 / 平均延迟）与顶部 KPI
+  // 完全重复。现在只回答 KPI 回答不了的问题：跑的是什么版本、跑了多久、
+  // 当前生效的路由默认值。数字统一留给 KPI 条。
   const body = el('div', { class: 'engine-card-body' },
     el('div', { class: 'engine-version' },
       el('span', { class: 'engine-mark', 'aria-hidden': 'true' }, 'OG'),
@@ -355,14 +350,6 @@ function engineCard(data, totals, context) {
       ),
       el('span', { class: 'engine-state' }, statusDot(data.version ? 'ok' : 'muted', data.version ? '运行中' : '未知')),
     ),
-    el('div', { class: 'engine-facts' },
-      fact('供应商', fmtInt(totals.providers || context.providers || 0)),
-      totals.accounts
-        ? fact('健康账号', `${fmtInt(totals.healthy)} / ${fmtInt(totals.accounts)}`)
-        : fact('密钥直连', totals.keyReady ? `${fmtInt(totals.keyReady)} 个供应商` : '未配置'),
-      fact('成功请求率', fmtPercent(totals.successRate)),
-      fact('平均延迟', fmtDuration(totals.avgLatency)),
-    ),
     context.length ? el('div', { class: 'fact-tags' }, context.map((text) => badge(text, 'muted'))) : null,
     el('div', { class: 'quick-actions' },
       el('a', { class: 'btn btn-ghost btn-sm', href: '#/providers' }, icon('server', 14), '供应商'),
@@ -370,109 +357,99 @@ function engineCard(data, totals, context) {
       el('a', { class: 'btn btn-ghost btn-sm', href: '#/usage' }, icon('usage', 14), '用量'),
     ),
   );
-  return card({ title: '引擎状态', subtitle: '单进程、内嵌面板、OmniGate 多供应商运行时', body, class: 'engine-card' });
+  return card({ title: '引擎状态', subtitle: '版本、运行时长与当前生效的路由默认值', body, class: 'engine-card' });
 }
 
-function fact(label, value) {
-  return el('div', { class: 'fact' },
-    el('span', { class: 'fact-label', text: label }),
-    el('span', { class: 'fact-value', text: value }),
-  );
-}
-
-function healthCard(totals, providerRows) {
-  if (!totals.accounts) return supplierCard(totals, providerRows);
-  const total = Math.max(1, totals.accounts);
+function healthCard(totals, providerRows, ctx) {
+  const total = Math.max(1, totals.accounts || 0);
   const segments = [
     { key: 'healthy', value: totals.healthy, tone: 'ok', label: '正常' },
     { key: 'cooling', value: totals.cooling, tone: 'warn', label: '冷却' },
     { key: 'failed', value: totals.failed, tone: 'danger', label: '异常' },
   ];
-  const bar = el('div', { class: 'health-bar', attrs: { role: 'img', 'aria-label': `账号健康分布：正常 ${totals.healthy}，冷却 ${totals.cooling}，异常 ${totals.failed}` } });
-  for (const seg of segments) {
-    if (!seg.value) continue;
-    bar.appendChild(el('span', { class: `health-seg health-${seg.tone}`, style: { width: `${(seg.value / total) * 100}%` } }));
+  const bar = el('div', {
+    class: 'health-bar',
+    attrs: { role: 'img', 'aria-label': `账号健康分布：正常 ${totals.healthy}，冷却 ${totals.cooling}，异常 ${totals.failed}` },
+  });
+  if (totals.accounts) {
+    for (const seg of segments) {
+      if (!seg.value) continue;
+      bar.appendChild(el('span', { class: `health-seg health-${seg.tone}`, style: { width: `${(seg.value / total) * 100}%` } }));
+    }
+  } else {
+    bar.appendChild(el('span', { class: 'health-seg health-empty', style: { width: '100%' } }));
   }
-  if (!totals.accounts) bar.appendChild(el('span', { class: 'health-seg health-empty', style: { width: '100%' } }));
 
-  const rows = providerRows.slice(0, 6);
-  return card({
-    title: '账号健康',
-    subtitle: '按供应商聚合，异常优先',
-    body: el('div', {},
-      el('div', { class: 'health-summary' },
-        el('div', { class: 'health-number' },
-          el('span', { class: 'health-big', text: totals.accounts ? fmtPercent((totals.healthy / totals.accounts) * 100) : '—' }),
-          el('span', { class: 'health-caption', text: '账号可用率' }),
+  // 之前「账号健康」和「供应商健康」是两张卡，列的却是同一批供应商：一张说账号
+  // 可用率、一张说 24h 请求，读的人要在两处来回对照。合并成一张表，一行说清
+  // 一个供应商的接入形态、健康与流量；账号可用率保留为表头摘要。
+  const tableRows = providerRows.map((row) => row);
+  const table = createTable({
+    columns: [
+      {
+        key: 'name',
+        label: '供应商',
+        render: (row) => el('div', { class: 'cell-title' },
+          el('span', { class: 'mono', text: row.name }),
+          el('span', { class: 'cell-sub', text: providerLabel(row.type) }),
         ),
-        el('div', { class: 'health-legend' }, segments.map((s) => el('div', { class: 'legend-row' },
-          el('span', { class: `legend-dot health-${s.tone}`, 'aria-hidden': 'true' }),
-          el('span', { class: 'legend-label', text: s.label }),
-          el('span', { class: 'legend-value', text: String(s.value) }),
-        ))),
-      ),
-      bar,
-      rows.length
-        ? el('div', { class: 'health-list' }, rows.map((row) => {
+      },
+      {
+        key: 'accounts',
+        label: '接入',
+        align: 'right',
+        render: (row) => {
+          if (row.keyBased) {
+            return el('span', { class: row.keys ? 'mono' : 'mono muted', text: row.keys ? `${row.keys} 把密钥` : '缺凭证' });
+          }
+          if (!row.accounts) return el('span', { class: 'muted', text: '未配置' });
+          return el('span', { class: 'mono', text: `${fmtInt(row.healthy)} / ${fmtInt(row.accounts)}` });
+        },
+      },
+      {
+        key: 'health',
+        label: '健康',
+        render: (row) => {
+          if (row.keyBased) {
+            return statusDot(row.keys ? 'ok' : 'warn', row.keys ? '密钥直连' : '未配置密钥');
+          }
           const parts = [];
           if (row.healthy) parts.push(`${row.healthy} 正常`);
           if (row.cooling) parts.push(`${row.cooling} 冷却`);
           if (row.failed) parts.push(`${row.failed} 异常`);
-          return el('a', { class: 'health-row', href: `#/providers?name=${encodeURIComponent(row.name)}` },
-            el('span', { class: 'health-provider', text: row.name }),
-            el('span', { class: 'health-type', text: providerLabel(row.type) }),
-            statusDot(row.failed ? 'danger' : (row.cooling ? 'warn' : (row.accounts ? 'ok' : 'muted')),
-              parts.join(' · ') || '空壳'),
+          return statusDot(
+            row.failed ? 'danger' : (row.cooling ? 'warn' : (row.accounts ? 'ok' : 'muted')),
+            parts.join(' · ') || '无账号',
           );
-        }))
-        : emptyState('暂无供应商', '配置供应商后会在这里显示健康状态。'),
-    ),
-    actions: el('a', { class: 'btn btn-ghost btn-sm', href: '#/providers' }, '查看全部'),
+        },
+      },
+      {
+        key: 'requests',
+        label: '24h 请求',
+        align: 'right',
+        render: (row) => (row.requests ? fmtCompact(row.requests) : '—'),
+      },
+    ],
+    rows: tableRows,
+    empty: '还没有配置供应商',
+    onRowClick: (row) => ctx.navigate(`/providers?name=${encodeURIComponent(row.name)}`),
   });
-}
 
-// 密钥型供应商（openai/opencode 等 AccountModeNone）没有账号池：总览不再用
-// 「账号健康 0/0」和「空壳」来描述它们，改为展示供应商与上游密钥状态。
-function supplierCard(totals, providerRows) {
-  const keyCount = providerRows.filter((row) => row.keyBased).length;
-  const rows = providerRows.slice(0, 6);
-  const legend = (tone, label, value) => el('div', { class: 'legend-row' },
-    el('span', { class: `legend-dot health-${tone}`, 'aria-hidden': 'true' }),
-    el('span', { class: 'legend-label', text: label }),
-    el('span', { class: 'legend-value', text: String(value) }),
-  );
   return card({
-    title: '供应商状态',
-    subtitle: '当前使用供应商级密钥直连，不维护账号池',
-    body: el('div', {},
-      el('div', { class: 'health-summary' },
-        el('div', { class: 'health-number' },
-          el('span', { class: 'health-big', text: fmtInt(totals.providers) }),
-          el('span', { class: 'health-caption', text: '供应商' }),
-        ),
-        el('div', { class: 'health-legend' },
-          legend('ok', '密钥直连', keyCount),
-          providerRows.length - keyCount ? legend('empty', '账号型', providerRows.length - keyCount) : null,
-        ),
-      ),
-      rows.length
-        ? el('div', { class: 'health-list' }, rows.map((row) => {
-          let tone = 'muted';
-          let text = '未配置账号';
-          if (row.keyBased) {
-            tone = row.keys ? 'ok' : 'warn';
-            text = row.keys ? `${row.keys} 把上游密钥` : '未配置密钥';
-          } else if (row.accounts) {
-            tone = row.failed ? 'danger' : (row.cooling ? 'warn' : 'ok');
-            text = `${row.healthy} / ${row.accounts} 账号`;
-          }
-          return el('a', { class: 'health-row', href: `#/providers?name=${encodeURIComponent(row.name)}` },
-            el('span', { class: 'health-provider', text: row.name }),
-            el('span', { class: 'health-type', text: providerLabel(row.type) }),
-            statusDot(tone, text),
-          );
-        }))
-        : emptyState('暂无供应商', '配置供应商后会在这里显示密钥与接入状态。'),
+    title: totals.accounts ? '账号与供应商健康' : '供应商状态',
+    subtitle: totals.accounts
+      ? `账号可用率 ${fmtPercent((totals.healthy / total) * 100)} · 异常优先`
+      : '当前使用供应商级密钥直连，不维护账号池',
+    body: el('div', { class: 'stack-sm' },
+      totals.accounts
+        ? el('div', { class: 'health-legend health-legend-inline' }, segments.map((s) => el('div', { class: 'legend-row' },
+          el('span', { class: `legend-dot health-${s.tone}`, 'aria-hidden': 'true' }),
+          el('span', { class: 'legend-label', text: s.label }),
+          el('span', { class: 'legend-value', text: String(s.value) }),
+        )))
+        : null,
+      bar,
+      table.el,
     ),
     actions: el('a', { class: 'btn btn-ghost btn-sm', href: '#/providers' }, '管理供应商'),
   });
@@ -532,61 +509,6 @@ function locksCard(locks, totals) {
         lock.reason ? el('p', { class: 'lock-reason', text: lock.reason }) : null,
       )))
       : emptyState('没有模型锁', hasAccounts ? '当前没有账号或密钥处于限流、额度耗尽状态。' : '当前没有密钥处于限流、额度耗尽状态。'),
-  });
-}
-
-function providerCard(rows, ctx) {
-  const hasAccounts = rows.some((row) => row.accounts > 0);
-  const hasKeys = rows.some((row) => row.keyBased);
-  const table = createTable({
-    columns: [
-      {
-        key: 'name',
-        label: '供应商',
-        render: (row) => el('div', { class: 'cell-title' },
-          el('span', { class: 'mono', text: row.name }),
-          el('span', { class: 'cell-sub', text: providerLabel(row.type) }),
-        ),
-      },
-      {
-        key: 'accounts',
-        label: hasAccounts ? (hasKeys ? '账号 / 接入' : '账号') : '接入方式',
-        align: 'right',
-        render: (row) => {
-          if (row.keyBased) {
-            return el('span', { class: 'mono', text: row.keys ? `${row.keys} 把密钥` : '密钥未配置' });
-          }
-          if (!row.accounts) return el('span', { class: 'muted', text: '未配置' });
-          return `${fmtInt(row.healthy)} / ${fmtInt(row.accounts)}`;
-        },
-      },
-      {
-        key: 'health',
-        label: '健康',
-        render: (row) => {
-          if (row.keyBased) {
-            return statusDot(row.keys ? 'ok' : 'warn', row.keys ? '密钥直连' : '未配置密钥');
-          }
-          return statusDot(row.failed ? 'danger' : (row.cooling ? 'warn' : (row.accounts ? 'ok' : 'muted')),
-            row.accounts ? `${row.healthy} 正常${row.cooling ? ` · ${row.cooling} 冷却` : ''}` : '空壳');
-        },
-      },
-      {
-        key: 'requests',
-        label: '24h 请求',
-        align: 'right',
-        render: (row) => (row.requests ? fmtCompact(row.requests) : '—'),
-      },
-    ],
-    rows,
-    empty: '还没有配置供应商',
-    onRowClick: (row) => ctx.navigate(`/providers?name=${encodeURIComponent(row.name)}`),
-  });
-  return card({
-    title: '供应商健康',
-    subtitle: '点击一行进入供应商详情',
-    body: table.el,
-    actions: el('a', { class: 'btn btn-ghost btn-sm', href: '#/providers' }, '管理供应商'),
   });
 }
 

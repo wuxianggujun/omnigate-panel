@@ -12,7 +12,7 @@ import {
   openLoginModal, requireAccountOperator, requireAdmin,
 } from '../core/auth.js';
 import {
-  el, card, badge, statusDot, emptyState, loadingBlock, icon, copyText,
+  el, card, badge, statusDot, emptyState, loadingBlock, icon, copyText, pageBar,
 } from '../core/dom.js';
 import {
   BUILTIN_PROVIDER_TYPES, accountBalance, accountError, capsOfModel, capabilityLabel,
@@ -278,22 +278,6 @@ function routeRank(provider) {
   return null;
 }
 
-// routeRoleLabel：讲清「这个供应商在裸模型名下到底还起不起作用」。
-//
-// routeRank 只表达 routing.prefer 里的顺位。默认供应商不在 prefer 里时顺位为空，
-// 但它依然是「别名的模型 + prefer 全都没命中」时的兜底，直接显示「未参与路由」是
-// 错的——那会让人以为把它设为默认毫无意义。这里区分三种状态：prefer 顺位、默认
-// 兜底、真的不参与。
-function routeRoleLabel(provider) {
-  const config = ui.config || {};
-  const isDefault = config.default_provider === provider.name;
-  const rank = routeRank(provider);
-  if (rank && isDefault) return `默认 · 优先级 #${rank}`;
-  if (rank) return `路由第 ${rank} 顺位`;
-  if (isDefault) return '默认兜底';
-  return '未参与路由';
-}
-
 // bareModelNames：该供应商自有模型去掉供应商前缀后的裸名集合。别名表以裸名为键，
 // 用它才能判断「这个供应商的模型是不是被别名接管了」。
 function bareModelNames(provider, models) {
@@ -338,10 +322,12 @@ function providerStatus(provider) {
   if (!accounts.length) {
     const meta = typeMeta(provider.type);
     if (isKeyBasedProvider(meta)) {
+      // 密钥型供应商的「形态」已经在类型行显示为「密钥型」，状态点必须说别的事，
+      // 否则同一行里「密钥型 · 密钥型」是纯噪音。这里只回答凭证是否就绪。
       if (provider.config && keyFieldValues(provider.config).length === 0) {
-        return { tone: 'warn', label: '空壳' };
+        return { tone: 'warn', label: '缺凭证' };
       }
-      return { tone: 'ok', label: '密钥型' };
+      return { tone: 'ok', label: '凭证就绪' };
     }
     if (role === 'user') return { tone: 'muted', label: '无归属账号' };
     return { tone: 'warn', label: '空壳' };
@@ -413,26 +399,19 @@ function render() {
     on: { click: () => { loadAll(); } },
   }, icon('refresh', 15), '刷新');
 
-  page.appendChild(el('div', { class: 'page-head' },
-    el('div', {},
-      el('div', { class: 'eyebrow', text: 'SUPPLY LAYER' }),
-      el('h1', { class: 'page-title', text: '供应商' }),
-      el('p', { class: 'page-subtitle', text: '供应商、账号、上游密钥与运行参数集中在一处；列表保持常显，空壳也能直接配置。' }),
-    ),
-    el('div', { class: 'page-actions' },
-      el('span', { class: 'auto-refresh-note' },
-        // 首次加载由列表区的 loadingBlock 提示；这里只在「已有内容、正在刷新」
-        // 时写一行刷新状态，避免手机窄屏上两个加载提示上下叠着。
-        ui.lastUpdated
-          ? `更新于 ${fmtTime(ui.lastUpdated)}`
-          : (ui.loading && list.length ? '刷新中…' : ''),
-      ),
+  page.appendChild(pageBar({
+    context: ui.lastUpdated
+      ? el('span', { class: 'auto-refresh-note', text: `更新于 ${fmtTime(ui.lastUpdated)}` })
+      // 首次加载由列表区的 loadingBlock 提示；这里只在「已有内容、正在刷新」
+      // 时写一行刷新状态，避免手机窄屏上两个加载提示上下叠着。
+      : (ui.loading && list.length ? el('span', { class: 'auto-refresh-note', text: '刷新中…' }) : null),
+    actions: [
       refreshBtn,
       (isAdmin() && ui.config)
         ? el('button', { class: 'btn btn-primary btn-sm', type: 'button', dataset: { action: 'add-provider' } }, icon('plus', 15), '添加供应商')
         : null,
-    ),
-  ));
+    ],
+  }));
 
   if (ui.balanceError) {
     page.appendChild(notice('warn', '余额刷新失败', ui.balanceError));
@@ -495,6 +474,9 @@ function providerPane(list, selected, current) {
     const rank = routeRank(provider);
     const credits = providerCredits(provider);
     const isDefault = ui.config?.default_provider === provider.name;
+    // 列表项只保留三行：名称 + 路由身份、类型 + 账号形态、健康 + 额度。
+    // 路由身份用徽标一次性表达（默认 / #顺位），不再在底部用一句话重复一遍
+    // 「默认 · 优先级 #1」，那是同一件事说两遍。
     const item = el('button', {
       class: `provider-item ${provider.name === selected?.name ? 'active' : ''}`.trim(),
       type: 'button',
@@ -507,8 +489,8 @@ function providerPane(list, selected, current) {
           el('span', { class: 'provider-name mono', text: provider.name }),
         ),
         el('span', { class: 'provider-badges' },
-          isDefault ? badge('默认', 'accent') : null,
-          rank ? badge(`#${rank}`, 'info') : null,
+          isDefault ? badge('默认', 'accent', { title: 'default_provider：仅兜住没有别名命中的裸模型' }) : null,
+          rank ? badge(`#${rank}`, 'info', { title: `裸模型优先级第 ${rank} 顺位` }) : null,
         ),
       ),
       el('div', { class: 'provider-item-type' },
@@ -521,9 +503,6 @@ function providerPane(list, selected, current) {
         el('span', { class: 'provider-quota' },
           credits != null ? `${fmtCredits(credits)} 额度` : (provider.accounts.length ? '额度未知' : '—'),
         ),
-      ),
-      el('div', { class: 'provider-item-foot' },
-        el('span', { class: rank || isDefault ? 'route-rank' : 'route-rank muted', text: routeRoleLabel(provider) }),
         el('span', { class: 'provider-arrow', 'aria-hidden': 'true' }, icon('chevron', 14)),
       ),
     );
@@ -609,21 +588,16 @@ function providerAddress(provider) {
 
 function overviewTab(provider, meta, current, models) {
   const wrap = el('div', { class: 'tab-stack' });
-  const status = providerStatus(provider);
   const credits = providerCredits(provider);
-  const rank = routeRank(provider);
   const keyBased = isKeyBasedProvider(meta);
   const keyCount = keyFieldValues(provider.config).length;
   const fields = [
-    ['供应商类型', meta.label || providerLabel(provider.type)],
-    ['运行状态', status.label],
-    // 密钥型供应商没有账号记录，显示「账号数 0」是误导：改成展示凭证形态。
+    // 供应商类型 / 运行状态 / 默认供应商 / 路由顺位 已由详情头部的徽标表达，
+    // 这里再列一遍只是把同一句话写两次。事实区只放顶部徽标放不下的量化信息。
     keyBased
       ? ['凭证', keyCount ? `上游密钥 ${keyCount} 组` : '未配置']
       : ['账号数', String(provider.accounts.length)],
     ['额度合计', credits != null ? `${fmtCredits(credits)} 积分` : '未知'],
-    ['路由顺位', routeRoleLabel(provider)],
-    ['默认供应商', ui.config?.default_provider === provider.name ? '是' : '否'],
     ['模型数量', String(models.length)],
     // 密钥型供应商上面已有「凭证」一行，不再重复。
     keyBased ? null : ['上游密钥', keyCount ? `${keyCount} 组` : '未配置'],
@@ -749,20 +723,8 @@ function adoptionCard(provider, models) {
   const canEdit = isAdmin() && canWrite();
   const keyBased = isKeyBasedProvider(typeMeta(provider.type));
 
-  const rows = [];
-  rows.push(el('div', { class: 'fact' },
-    el('span', { class: 'fact-label', text: '默认供应商' }),
-    el('span', { class: 'fact-value', text: isDefault ? '是' : '否' }),
-  ));
-  rows.push(el('div', { class: 'fact' },
-    el('span', { class: 'fact-label', text: '路由优先级' }),
-    el('span', { class: 'fact-value', text: rank ? `第 ${rank} 顺位` : (isDefault ? '默认兜底（不在优先级中）' : '未参与') }),
-  ));
-  rows.push(el('div', { class: 'fact' },
-    el('span', { class: 'fact-label', text: '模型目录' }),
-    el('span', { class: 'fact-value', text: models.length ? `${models.length} 个` : '为空' }),
-  ));
-
+  // 默认 / 优先级 / 模型目录三项已在上面的「供应商概览」里展示，这里不再重复，
+  // 只保留本卡独有的价值：能做什么（按钮）+ 为什么走不到它（提示）。
   const actions = [];
   if (canEdit) {
     if (!isDefault) {
@@ -803,7 +765,6 @@ function adoptionCard(provider, models) {
     subtitle: '新供应商如何被请求命中',
     actions: actions.length ? actions : null,
     body: el('div', {},
-      el('div', { class: 'facts-grid compact' }, rows),
       shadowed.length
         ? notice(
           'warn',

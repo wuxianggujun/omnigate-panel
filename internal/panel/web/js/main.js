@@ -26,46 +26,52 @@ const ROUTES = [
     load: () => import('./pages/overview.js'),
   },
   {
+    group: '配置',
     path: '/providers',
     label: '供应商',
     title: '供应商',
-    subtitle: '账号、密钥与供应商参数',
+    subtitle: '账号、上游密钥、模型目录与运行参数',
     icon: 'providers',
     load: () => import('./pages/providers.js'),
   },
   {
+    group: '配置',
     path: '/models',
     label: '模型',
     title: '模型',
-    subtitle: '模型目录、价格与能力',
+    subtitle: '带供应商前缀的对外模型名；别名由「路由」维护',
     icon: 'models',
     load: () => import('./pages/models.js'),
   },
   {
+    group: '配置',
     path: '/routing',
     label: '路由',
     title: '路由',
-    subtitle: '默认路由、优先级与别名',
+    subtitle: '别名优先于优先级，优先级优先于默认供应商',
     icon: 'routing',
     load: () => import('./pages/routing.js'),
   },
   {
-    path: '/usage',
-    label: '用量',
-    title: '用量',
-    subtitle: 'Token、请求与积分趋势',
-    icon: 'usage',
-    load: () => import('./pages/usage.js'),
-  },
-  {
+    group: '配置',
     path: '/users',
     label: '用户',
     title: '用户',
-    subtitle: '按入站密钥统计用量',
+    subtitle: '按入站密钥的人与访问范围：谁在用、能用哪些供应商',
     icon: 'user',
     load: () => import('./pages/users.js'),
   },
   {
+    group: '观测',
+    path: '/usage',
+    label: '用量',
+    title: '用量',
+    subtitle: 'token、请求数与积分趋势，可按供应商/账号/模型拆分',
+    icon: 'usage',
+    load: () => import('./pages/usage.js'),
+  },
+  {
+    group: '观测',
     path: '/requests',
     label: '请求',
     title: '请求',
@@ -74,6 +80,7 @@ const ROUTES = [
     load: () => import('./pages/requests.js'),
   },
   {
+    group: '观测',
     path: '/system',
     label: '系统',
     title: '系统',
@@ -136,7 +143,14 @@ function buildNav() {
   clear(bottom);
   navLinks = [];
   bottomLinks = [];
+  // 8 个平铺项看不出彼此关系。按「配置 → 观测」分组：前四页决定请求怎么走，
+  // 后四页看它到底走了哪。分组标题只在侧边栏显示，移动端底栏保持平铺。
+  let lastGroup = null;
   for (const route of ROUTES) {
+    if (route.group && route.group !== lastGroup) {
+      lastGroup = route.group;
+      nav.appendChild(el('div', { class: 'nav-group-label', text: route.group }));
+    }
     const link = el('a', {
       class: 'nav-item',
       href: `#${route.path}`,

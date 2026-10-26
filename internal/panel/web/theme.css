@@ -235,6 +235,17 @@ code, pre, .mono { font-family: var(--mono); font-variant-ligatures: none; }
 .nav-icon { display: inline-flex; color: var(--text-3); }
 .nav-item.active .nav-icon { color: var(--accent); }
 .nav-label { flex: 1; }
+/* 侧边栏分组标题：「配置」（决定请求怎么走）与「观测」（看它走了哪）。 */
+.nav-group-label {
+  margin: 10px 0 3px;
+  padding: 0 10px;
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+.nav-group-label:first-child { margin-top: 0; }
 
 .sidebar-foot {
   margin-top: auto;
@@ -344,31 +355,63 @@ code, pre, .mono { font-family: var(--mono); font-variant-ligatures: none; }
 /* ---------------------------------------------------------------- pages */
 
 .page { max-width: 1560px; margin: 0 auto; display: flex; flex-direction: column; gap: 16px; }
-.page-head {
+/* page-bar：本页操作条。顶栏已显示标题，这里只放补充说明与操作按钮。 */
+.page-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 30px;
+  flex-wrap: wrap;
+}
+.page-bar-context {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+  font-size: 11.5px;
+  color: var(--text-3);
+}
+.page-bar-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-left: auto; }
+/* section-band：一屏内同级卡片的分组标题，减少「十几张卡平铺」的迷失感。 */
+.section-band {
   display: flex;
   align-items: flex-end;
   justify-content: space-between;
-  gap: 20px;
-  padding: 2px 0 2px;
+  gap: 14px;
+  margin: 6px 0 -4px;
+  padding-bottom: 7px;
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
 }
-.eyebrow {
-  display: flex;
+.section-band:first-child { margin-top: 0; }
+.section-band-title { font-size: 12px; font-weight: 620; color: var(--text); letter-spacing: 0.01em; }
+.section-band-note { margin-top: 3px; font-size: 11px; color: var(--text-3); line-height: 1.5; }
+.section-band-actions { display: flex; align-items: center; gap: 8px; }
+/* inline-details：把次要清单折叠成一行，避免抢主结论的注意力。 */
+.inline-details { font-size: 11px; color: var(--text-3); }
+.inline-details > summary {
+  cursor: pointer;
+  list-style: none;
+  display: inline-flex;
   align-items: center;
-  gap: 7px;
-  font-family: var(--mono);
-  font-size: 9.5px;
-  letter-spacing: 1.5px;
+  gap: 5px;
+  padding: 2px 0;
   color: var(--text-3);
-  margin-bottom: 7px;
+  text-decoration: underline;
+  text-decoration-color: var(--border-strong);
+  text-underline-offset: 3px;
 }
+.inline-details > summary::-webkit-details-marker { display: none; }
+.inline-details > summary:hover { color: var(--accent); }
+.inline-details[open] > summary { color: var(--text-2); }
+.inline-details .section-note { padding-top: 5px; }
 .live-dot {
   width: 6px; height: 6px; border-radius: 50%;
   background: var(--ok);
   box-shadow: 0 0 0 3px var(--ok-soft);
 }
-.page-title { font-size: 22px; font-weight: 620; letter-spacing: -0.3px; line-height: 1.2; }
-.page-subtitle { margin-top: 5px; color: var(--text-2); font-size: 12.5px; max-width: 780px; }
-.page-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
 .auto-refresh-note { font-size: 11px; color: var(--text-3); }
 .page-footer-note {
   display: flex;
@@ -386,23 +429,6 @@ code, pre, .mono { font-family: var(--mono); font-variant-ligatures: none; }
 }
 .link-btn:hover { color: var(--accent); }
 .auto-refresh-note + .btn { margin-left: 2px; }
-
-.context-strip {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px 12px;
-  min-height: 34px;
-  padding: 7px 12px;
-  border: 1px solid var(--border);
-  border-radius: 9px;
-  background: var(--panel);
-  color: var(--text-2);
-  font-size: 11.5px;
-}
-.context-item { display: inline-flex; align-items: center; gap: 5px; color: var(--text); }
-.context-note { color: var(--text-3); }
-.context-path { margin-left: auto; color: var(--text-3); font-size: 10.5px; }
 
 /* ---------------------------------------------------------------- cards */
 
@@ -922,7 +948,6 @@ code, pre, .mono { font-family: var(--mono); font-variant-ligatures: none; }
 .engine-name { font-size: 13.5px; font-weight: 600; }
 .engine-sub { font-size: 10.5px; color: var(--text-3); margin-top: 2px; }
 .engine-state { margin-left: auto; }
-.engine-facts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
 .fact { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 .fact-label { font-size: 9.5px; color: var(--text-3); letter-spacing: 0.2px; }
 .fact-value { font-size: 12px; color: var(--text); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -935,6 +960,8 @@ code, pre, .mono { font-family: var(--mono); font-variant-ligatures: none; }
 .health-big { font-family: var(--mono); font-size: 27px; font-weight: 600; letter-spacing: -1px; line-height: 1; }
 .health-caption { font-size: 10.5px; color: var(--text-3); }
 .health-legend { display: flex; flex-direction: column; gap: 4px; min-width: 84px; }
+/* 横向图例：卡片摘要里一行放「正常 / 冷却 / 异常」，比竖排更省高度。 */
+.health-legend-inline { flex-direction: row; gap: 14px; min-width: 0; flex-wrap: wrap; }
 .legend-row { display: flex; align-items: center; gap: 6px; font-size: 10.5px; color: var(--text-3); }
 .legend-dot { width: 6px; height: 6px; border-radius: 50%; }
 .legend-dot.health-ok { background: var(--ok); }
@@ -942,26 +969,14 @@ code, pre, .mono { font-family: var(--mono); font-variant-ligatures: none; }
 .legend-dot.health-danger { background: var(--danger); }
 .legend-label { flex: 1; }
 .legend-value { font-family: var(--mono); color: var(--text-2); }
-.health-bar { display: flex; height: 6px; border-radius: 999px; background: var(--panel-3); overflow: hidden; margin-bottom: 12px; }
+.health-bar { display: flex; height: 6px; border-radius: 999px; background: var(--panel-3); overflow: hidden; }
 .health-seg { height: 100%; display: block; }
 .health-ok { background: var(--ok); }
 .health-warn { background: var(--warn); }
 .health-danger { background: var(--danger); }
 .health-empty { background: var(--panel-3); }
-.health-list { display: flex; flex-direction: column; gap: 1px; }
-.health-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1.4fr) minmax(0, 0.9fr) auto;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 5px;
-  border-radius: 6px;
-  color: var(--text-2);
-  font-size: 11px;
-}
-.health-row:hover { background: var(--panel-2); color: var(--text); }
-.health-provider { font-family: var(--mono); font-size: 11px; color: var(--text); overflow: hidden; text-overflow: ellipsis; }
-.health-type { color: var(--text-3); font-size: 10px; }
+/* stack-sm：卡片内的纵向小间距堆叠（图例 / 进度条 / 表格）。 */
+.stack-sm { display: flex; flex-direction: column; gap: 12px; }
 .trend-card-body { min-height: 84px; display: flex; align-items: center; }
 .mini-chart { width: 100%; height: 74px; display: block; overflow: visible; }
 .mini-bar { fill: var(--accent); opacity: 0.82; }
@@ -1026,12 +1041,9 @@ code, pre, .mono { font-family: var(--mono); font-variant-ligatures: none; }
 .provider-badges .badge { height: 17px; font-size: 9.5px; padding: 0 5px; }
 .provider-item-type { display: flex; align-items: center; gap: 5px; font-size: 10.5px; color: var(--text-3); }
 .dot-sep { color: var(--border-strong); }
-.provider-item-meta { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
-.provider-quota { font-family: var(--mono); font-size: 9.5px; color: var(--text-3); }
-.provider-item-foot { display: flex; align-items: center; justify-content: space-between; font-size: 9.5px; color: var(--text-3); }
-.route-rank { color: var(--info); }
-.route-rank.muted { color: var(--text-3); }
-.provider-arrow { opacity: 0; transition: opacity 120ms ease; color: var(--text-3); }
+.provider-item-meta { display: flex; align-items: center; gap: 6px; }
+.provider-quota { margin-left: auto; font-family: var(--mono); font-size: 9.5px; color: var(--text-3); }
+.provider-arrow { flex: none; opacity: 0; transition: opacity 120ms ease; color: var(--text-3); }
 .provider-item:hover .provider-arrow, .provider-item.active .provider-arrow { opacity: 1; }
 .pane-foot { border-top: 1px solid var(--border); padding: 9px 10px; }
 
@@ -1337,6 +1349,8 @@ code, pre, .mono { font-family: var(--mono); font-variant-ligatures: none; }
 .request-summary-tokens { color: var(--text); font-size: 11px; }
 .request-summary-link { color: var(--accent); text-decoration: none; font-size: 11px; white-space: nowrap; }
 .request-summary-link:hover { text-decoration: underline; }
+/* 普通用户的范围说明：紧贴「当前列表」摘要，解释这批记录为什么只有这些。 */
+.request-scope-note { display: inline-flex; align-items: center; gap: 6px; color: var(--text-3); font-size: 11px; }
 .request-toolbar-actions { display: flex; align-items: center; gap: 8px; flex: none; }
 .request-auto-control {
   display: inline-flex; align-items: center; gap: 6px;
@@ -1720,7 +1734,7 @@ code, pre, .mono { font-family: var(--mono); font-variant-ligatures: none; }
   .view { padding: 16px 14px 84px; }
   .bottomnav {
     position: fixed; left: 0; right: 0; bottom: 0; z-index: 35;
-    display: grid; grid-template-columns: repeat(7, 1fr);
+    display: grid; grid-template-columns: repeat(8, 1fr);
     height: calc(56px + env(safe-area-inset-bottom));
     padding-bottom: env(safe-area-inset-bottom);
     background: var(--panel);
@@ -1730,17 +1744,20 @@ code, pre, .mono { font-family: var(--mono); font-variant-ligatures: none; }
     display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
     color: var(--text-3); font-size: 9px;
     border-top: 2px solid transparent;
+    /* 8 个入口在窄屏上一格只有 ~48px，允许文字换行会撑高底栏，这里截断。 */
+    min-width: 0; overflow: hidden;
   }
   .bottom-item:hover { color: var(--text-2); }
   .bottom-item.active { color: var(--accent); border-top-color: var(--accent); }
   .bottom-icon { display: inline-flex; }
-  .bottom-label { line-height: 1; }
+  .bottom-label { line-height: 1; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .master-detail { grid-template-columns: 1fr; }
   .provider-pane { position: static; max-height: none; }
   .provider-list { max-height: 308px; }
   .provider-detail { min-height: 300px; }
-  .page-head { align-items: flex-start; flex-direction: column; gap: 12px; }
-  .page-actions { justify-content: flex-start; width: 100%; }
+  /* 窄屏：工具条说明与按钮上下排，按钮独占一行更好点。 */
+  .page-bar { align-items: flex-start; gap: 8px; }
+  .page-bar-actions { width: 100%; justify-content: flex-start; margin-left: 0; }
   .kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .kpi-grid-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .facts-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -1748,7 +1765,6 @@ code, pre, .mono { font-family: var(--mono); font-variant-ligatures: none; }
   .account-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .drawer-panel { width: 100vw; }
   .toast-root { bottom: 72px; right: 12px; }
-  .engine-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .hide-mobile { display: none !important; }
   .filter-bar .select { flex: 1 1 120px; }
   .filter-bar-wrap .filter-input { flex: 1 1 100px; width: auto; }
@@ -1757,7 +1773,6 @@ code, pre, .mono { font-family: var(--mono); font-variant-ligatures: none; }
   .request-filter-more { display: inline-flex; }
   .provider-detail-head { flex-direction: column; gap: 10px; }
   .provider-head-actions { width: 100%; justify-content: flex-start; }
-  .context-path { display: none; }
   .detail-facts { grid-template-columns: 1fr; }
   .use-user-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .request-table-desktop { display: none; }
@@ -1773,8 +1788,6 @@ code, pre, .mono { font-family: var(--mono); font-variant-ligatures: none; }
   .topbar-actions { gap: 5px; }
   .session-name { display: none; }
   .session-chip .badge { display: none; }
-  .page-title { font-size: 20px; }
-  .page-subtitle { font-size: 12px; }
   .card-head { padding: 12px 13px 10px; }
   .card-body { padding: 13px; }
   .card-body > .table-wrap { margin: -13px; }
@@ -1806,7 +1819,8 @@ code, pre, .mono { font-family: var(--mono); font-variant-ligatures: none; }
   .filter-bar .check-inline { padding: 4px 0; }
   .segmented { width: 100%; }
   .segment { flex: 1; }
-  .page-actions .segmented { order: -1; }
+  /* 时间窗口这类分段控件在窄屏上单独占一行，放在按钮上方。 */
+  .page-bar-actions .segmented { order: -1; }
   .mapping-row { flex-direction: column; gap: 7px; }
   .mapping-actions { width: 100%; justify-content: flex-start; }
   .access-group { flex: 1 1 100%; justify-content: space-between; }

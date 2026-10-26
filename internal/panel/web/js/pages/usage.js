@@ -3,7 +3,7 @@
 import { api, describeError } from '../core/api.js';
 import { authState, isAuthenticated, openLoginModal } from '../core/auth.js';
 import {
-  el, svgEl, card, badge, emptyState, loadingBlock, icon,
+  el, svgEl, card, badge, emptyState, loadingBlock, icon, pageBar,
 } from '../core/dom.js';
 import {
   fmtBytes, fmtChartTime, fmtCompact, fmtCredits, fmtDateTime, fmtDuration, fmtInt, fmtNum, fmtPercent,
@@ -108,20 +108,25 @@ function render() {
     on: { click: () => { if (ui.hours !== win.hours) load(win.hours); } },
   }, win.label)));
 
-  page.appendChild(el('div', { class: 'page-head' },
-    el('div', {},
-      el('div', { class: 'eyebrow', text: 'ANALYTICS' }),
-      el('h1', { class: 'page-title', text: '用量' }),
-      el('p', { class: 'page-subtitle', text: 'token、请求数与积分消耗趋势；按供应商、账号与模型拆分。' }),
-    ),
-    el('div', { class: 'page-actions' },
+  // 普通用户的范围说明与时间窗口/刷新放进同一条工具条：分成两条会上下叠着，
+  // 而它们其实是同一件事——这条工具条在说什么范围、以什么粒度看。
+  page.appendChild(pageBar({
+    context: !isAuthenticated()
+      ? null
+      : (auth.role === 'user'
+        ? [
+          badge('个人范围', 'info'),
+          el('span', { text: '仅统计归属你的账号（provider/label）；平台密钥型供应商的共享流量不在个人范围内。' }),
+        ]
+        : null),
+    actions: [
       windowButtons,
       el('button', {
         class: 'btn btn-ghost btn-sm', type: 'button',
         on: { click: () => load(ui.hours) },
       }, icon('refresh', 15), '刷新'),
-    ),
-  ));
+    ],
+  }));
 
   if (!isAuthenticated()) {
     page.appendChild(el('div', { class: 'notice notice-info' },
@@ -134,11 +139,6 @@ function render() {
         class: 'btn btn-primary btn-sm', type: 'button',
         on: { click: () => openLoginModal({ message: '登录后查看用量明细。' }) },
       }, '登录'),
-    ));
-  } else if (auth.role === 'user') {
-    page.appendChild(el('div', { class: 'context-strip' },
-      badge('个人范围', 'info'),
-      el('span', { class: 'context-note', text: '仅统计归属你的账号（provider/label）；平台密钥型供应商的共享流量不在个人范围内。' }),
     ));
   }
 

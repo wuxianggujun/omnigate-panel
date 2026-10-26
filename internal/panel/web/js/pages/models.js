@@ -2,7 +2,7 @@
 
 import { api, describeError } from '../core/api.js';
 import {
-  el, card, badge, emptyState, loadingBlock, icon, copyText, debounce,
+  el, card, badge, emptyState, loadingBlock, icon, copyText, debounce, pageBar,
 } from '../core/dom.js';
 import {
   BUILTIN_PROVIDER_TYPES, capsOfModel, capabilityLabel, fmtCompact, fmtNum, fmtTokenPrice,
@@ -81,19 +81,12 @@ function renderShell() {
   const freeCount = ui.models.filter((m) => m.is_free).length;
   const reasoningCount = ui.models.filter((m) => capsOfModel(m).includes('reasoning')).length;
 
-  page.appendChild(el('div', { class: 'page-head' },
-    el('div', {},
-      el('div', { class: 'eyebrow', text: 'MODEL CATALOG' }),
-      el('h1', { class: 'page-title', text: '模型' }),
-      el('p', { class: 'page-subtitle', text: '对外暴露的模型名带供应商前缀（provider/model）；别名由「路由」页维护。' }),
-    ),
-    el('div', { class: 'page-actions' },
-      el('button', {
-        class: 'btn btn-ghost btn-sm', type: 'button',
-        on: { click: () => load() },
-      }, icon('refresh', 15), '刷新目录'),
-    ),
-  ));
+  page.appendChild(pageBar({
+    actions: [el('button', {
+      class: 'btn btn-ghost btn-sm', type: 'button',
+      on: { click: () => load() },
+    }, icon('refresh', 15), '刷新目录')],
+  }));
 
   page.appendChild(el('div', { class: 'kpi-grid kpi-grid-4' },
     statCard('模型总数', fmtNum(ui.models.length, 0), '来自引擎聚合目录', 'models'),

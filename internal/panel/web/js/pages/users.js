@@ -12,7 +12,7 @@ import {
   authState, isAdmin, isAuthenticated, openLoginModal, requireAdmin,
 } from '../core/auth.js';
 import {
-  el, card, emptyState, loadingBlock, icon, badge,
+  el, card, emptyState, loadingBlock, icon, badge, pageBar,
 } from '../core/dom.js';
 import {
   fmtCompact, fmtDateTime, fmtDuration, fmtInt, fmtPercent, fmtRelative,
@@ -157,26 +157,27 @@ function render() {
   const totalTokens = allRows.reduce((sum, row) => sum + row.total_tokens, 0);
   const page = el('div', { class: 'page page-users' });
 
-  const windowButtons = el('div', { class: 'segmented' }, WINDOWS.map((win) => el('button', {
-    class: `segment ${ui.hours === win.hours ? 'active' : ''}`.trim(),
-    type: 'button',
-    on: { click: () => { if (ui.hours !== win.hours) load(win.hours); } },
-  }, win.label)));
+  // 该页数据只有管理员/查看者能读。普通用户与匿名访客连时间窗口和刷新都不该
+  // 看到：那些操作只会重复触发 403。先把「看不到」讲清楚并直接返回。
+  const blocked = !isAuthenticated() || authState().role === 'user';
 
-  page.appendChild(el('div', { class: 'page-head' },
-    el('div', {},
-      el('div', { class: 'eyebrow', text: 'ANALYTICS' }),
-      el('h1', { class: 'page-title', text: '用户' }),
-      el('p', { class: 'page-subtitle', text: '按入站密钥统计谁在用、用了多少；点开一行看模型拆分。' }),
-    ),
-    el('div', { class: 'page-actions' },
-      windowButtons,
-      el('button', {
-        class: 'btn btn-ghost btn-sm', type: 'button',
-        on: { click: () => load(ui.hours) },
-      }, icon('refresh', 15), '刷新'),
-    ),
-  ));
+  if (!blocked) {
+    const windowButtons = el('div', { class: 'segmented' }, WINDOWS.map((win) => el('button', {
+      class: `segment ${ui.hours === win.hours ? 'active' : ''}`.trim(),
+      type: 'button',
+      on: { click: () => { if (ui.hours !== win.hours) load(win.hours); } },
+    }, win.label)));
+
+    page.appendChild(pageBar({
+      actions: [
+        windowButtons,
+        el('button', {
+          class: 'btn btn-ghost btn-sm', type: 'button',
+          on: { click: () => load(ui.hours) },
+        }, icon('refresh', 15), '刷新'),
+      ],
+    }));
+  }
 
   if (!isAuthenticated()) {
     page.appendChild(el('div', { class: 'notice notice-info' },
@@ -200,7 +201,9 @@ function render() {
     ));
   }
 
-  if (ui.error && !data) {
+  // 角色不足是「权限决定的结果」，不是「请求失败」：重试按钮点了必然还是 403，
+  // 所以只在真正可访问时才渲染错误卡，其余情况由上面的提示条承担说明。
+  if (ui.error && !data && !blocked) {
     page.appendChild(card({
       title: '用户统计加载失败',
       body: el('div', { class: 'error-panel' },
@@ -214,6 +217,11 @@ function render() {
         ),
       ),
     }));
+    rootEl.replaceChildren(page);
+    return;
+  }
+
+  if (blocked) {
     rootEl.replaceChildren(page);
     return;
   }
@@ -237,7 +245,8 @@ function render() {
   } else if (!rows.length) {
     host.appendChild(el('div', { class: 'table-empty' },
       icon('info', 16),
-      ui.groupFilter ? '该权限分组下没有用户' : '当前窗口没有可按用户归属的请求',
+      ui.groupFilter ? '该权限分组下没有用户' : '当前窗口没有请求',
+      el('span', { class: 'muted small', text: '切换时间窗口，或确认客户端已经在用面板签发的密钥。' }),
     ));
   } else {
     host.appendChild(usersTable(rows));
@@ -254,10 +263,14 @@ function render() {
     data?.retention_days
       ? el('span', { text: `统计受请求记录保留期限制：最多回溯 ${fmtInt(data.retention_days)} 天。` })
       : el('span', { text: '统计来自请求归档，受保留期限制。' }),
-    // 这条不是客套话：升级前写入的历史请求没有入站密钥字段，无法归属到用户。
-    // 不说清楚的话，部署后第一眼看到空表会以为功能没生效。
-    el('span', { text: '本次升级前的历史请求没有记录入站密钥，无法归属到用户；新请求会立即计入。' }),
     el('span', { text: '身份取 api_keys[].name；未命名密钥显示为 unnamed-<摘要>。' }),
+    // 这条不是客套话：升级前写入的历史请求没有入站密钥字段，无法归属到用户。
+    // 不说清楚的话，部署后第一眼看到空表会以为功能没生效。但它只在部署后头几天
+    // 有用，所以折进 details，别长期占着页脚。
+    el('details', { class: 'inline-details' },
+      el('summary', { text: '历史请求为什么不在统计里？' }),
+      el('p', { class: 'section-note', text: '升级前归档的请求没有记录入站密钥，无法归属到用户；升级后的新请求会立即计入。' }),
+    ),
   ));
   rootEl.replaceChildren(page);
 }

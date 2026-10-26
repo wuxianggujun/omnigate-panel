@@ -8,7 +8,7 @@ import {
   authState, canWrite, isAdmin, isAuthenticated, openLoginModal, requireAdmin,
 } from '../core/auth.js';
 import {
-  el, card, badge, emptyState, loadingBlock, icon, copyText,
+  el, card, badge, emptyState, loadingBlock, icon, copyText, pageBar,
 } from '../core/dom.js';
 import {
   deepClone, flattenObject, fmtBytes, fmtDateTime, fmtInt, fmtRelative, fmtTime, fmtUptime,
@@ -206,14 +206,17 @@ function render() {
     onChange: (value) => { ui.tab = value; render(); },
   });
 
-  page.appendChild(el('div', { class: 'page-head' },
-    el('div', {},
-      el('div', { class: 'eyebrow', text: 'SYSTEM' }),
-      el('h1', { class: 'page-title', text: '系统' }),
-      el('p', { class: 'page-subtitle', text: '客户端访问密钥、面板多租户账号、出站代理、运行参数与存储位置。' }),
-    ),
-    el('div', { class: 'page-actions' },
-      el('span', { class: 'auto-refresh-note', text: auth.authenticated ? `${auth.username} · ${roleLabel(auth.role)}` : '匿名只读' }),
+  // 身份（用户名 + 角色）由外壳常驻展示（#session-chip / #sidebar-session）。
+  // 这里只补一句本页权限含义，并和操作按钮放在同一行，避免两条横条上下叠。
+  page.appendChild(pageBar({
+    context: auth.authenticated
+      ? el('span', {
+        text: canWrite()
+          ? '本页可完整读写：改动会立即落盘并热生效。'
+          : (auth.role === 'viewer' ? '只读角色：可查看配置，但不能保存。' : '普通用户：仅能管理自己的面板账号与归属账号。'),
+      })
+      : null,
+    actions: [
       el('button', {
         class: 'btn btn-ghost btn-sm', type: 'button',
         on: { click: () => loadAll() },
@@ -222,15 +225,8 @@ function render() {
         class: 'btn btn-primary btn-sm', type: 'button',
         on: { click: () => openLoginModal({ message: '登录系统设置需要管理员或只读角色。' }) },
       }, '登录') : null,
-    ),
-  ));
-
-  if (auth.authenticated) {
-    page.appendChild(el('div', { class: 'context-strip' },
-      badge(roleLabel(auth.role), auth.role === 'admin' ? 'accent' : 'info'),
-      el('span', { class: 'context-note', text: canWrite() ? '管理员拥有完整读写权限' : (auth.role === 'viewer' ? '只读角色：可查看配置，但不能保存' : '普通用户：仅能管理自己的面板账号与归属账号') }),
-    ));
-  }
+    ],
+  }));
 
   page.appendChild(tabs.el);
   const body = el('div', { class: 'system-tab-body' });

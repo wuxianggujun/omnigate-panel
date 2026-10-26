@@ -5,7 +5,7 @@ import {
   authState, isAdmin, isAuthenticated, openLoginModal, requireAdmin,
 } from '../core/auth.js';
 import {
-  el, card, badge, statusDot, emptyState, loadingBlock, icon, debounce,
+  el, card, badge, statusDot, emptyState, loadingBlock, icon, debounce, pageBar, sectionBand,
 } from '../core/dom.js';
 import {
   BUILTIN_PROVIDER_TYPES, healthOfAccount, isKeyBasedProvider, normalizeKeyList,
@@ -197,29 +197,35 @@ function providerHealth(name) {
 function render() {
   if (!rootEl) return;
   const page = el('div', { class: 'page page-routing' });
-  const auth = authState();
   const canEdit = isAdmin();
 
-  page.appendChild(el('div', { class: 'page-head' },
-    el('div', {},
-      el('div', { class: 'eyebrow', text: 'ROUTING CONTROL' }),
-      el('h1', { class: 'page-title', text: '路由' }),
-      el('p', { class: 'page-subtitle', text: '裸模型名的供应商优先级、全局别名映射、客户端密钥 scope 与一次完整的解析预览。' }),
-    ),
-    el('div', { class: 'page-actions' },
-      el('span', { class: 'auto-refresh-note', text: canEdit ? '修改后需保存' : '只读视图' }),
-      el('button', {
-        class: 'btn btn-ghost btn-sm', type: 'button',
-        on: { click: () => loadAll() },
-      }, icon('refresh', 15), '刷新'),
-      canEdit && ui.config
-        ? el('button', {
-          class: 'btn btn-primary btn-sm', type: 'button',
-          on: { click: () => saveRouting() },
-        }, icon('check', 15), '保存默认与优先级')
-        : null,
-    ),
-  ));
+  // 工具条只在真的读到了配置时才谈「保存」与「只读视图」：普通用户和匿名访客
+  // 连配置都读不到，写着「只读视图」会误导成「能看不能改」；而且空工具条会留下
+  // 一条 30px 的空白横条，所以读不到时整个不渲染，由下面的提示条说明原因。
+  if (ui.config) {
+    page.appendChild(pageBar({
+      context: [
+        el('span', {
+          text: canEdit
+            ? '默认值与优先级改动需点保存；别名与 scope 即时生效'
+            : '只读视图：可查看配置，但不能保存',
+        }),
+        ui.configPath ? el('span', { class: 'mono', text: ui.configPath }) : null,
+      ],
+      actions: [
+        el('button', {
+          class: 'btn btn-ghost btn-sm', type: 'button',
+          on: { click: () => loadAll() },
+        }, icon('refresh', 15), '刷新'),
+        canEdit
+          ? el('button', {
+            class: 'btn btn-primary btn-sm', type: 'button',
+            on: { click: () => saveRouting() },
+          }, icon('check', 15), '保存默认与优先级')
+          : null,
+      ],
+    }));
+  }
 
   if (!ui.config) {
     if (ui.loading) {
@@ -248,26 +254,25 @@ function render() {
     ));
   }
 
-  page.appendChild(el('div', { class: 'context-strip' },
-    badge(canEdit ? '管理员' : '只读', canEdit ? 'accent' : 'info'),
-    el('span', { class: 'context-note', text: '解析预览基于当前模型目录与账号快照，不会触发真实请求。' }),
-    ui.configPath ? el('span', { class: 'context-path mono', text: ui.configPath }) : null,
-  ));
-
+  page.appendChild(sectionBand({
+    title: '优先顺序',
+    note: '决定一个裸模型名最终打到哪个供应商：别名 > 优先级 > 默认供应商。',
+  }));
   page.appendChild(el('div', { class: 'routing-top-grid' },
     defaultsCard(canEdit),
     priorityCard(canEdit),
   ));
   page.appendChild(mappingCard(canEdit));
+
+  page.appendChild(sectionBand({
+    title: '访问控制与解析',
+    note: '密钥范围只做收窄；解析预览按同一套规则给出结论，不发真实请求。',
+  }));
   page.appendChild(el('div', { class: 'routing-bottom-grid' },
     scopeCard(canEdit),
     resolutionCard(canEdit),
   ));
 
-  page.appendChild(el('div', { class: 'page-footer-note' },
-    el('span', { text: '别名优先于 routing.prefer；带 provider/ 前缀的请求不经过优先级选择。' }),
-    el('span', { text: 'scope 由客户端 api_key 的 providers 列表决定；空列表 = 全量。' }),
-  ));
   rootEl.replaceChildren(page);
 }
 
@@ -411,13 +416,13 @@ function defaultsCard(canEdit) {
       el('div', { class: 'field' },
         el('label', { class: 'field-label' }, '默认供应商'),
         providerSelect,
-        el('p', { class: 'field-help', text: '兜底顺序：先按「裸模型名优先级」找目录命中的供应商，全都没命中才用这里。' }),
+        el('p', { class: 'field-help', text: '仅当优先级里没有供应商命中该模型时才用这里。' }),
       ),
       el('div', { class: 'field' },
         el('label', { class: 'field-label' }, '默认模型'),
         modelInput,
         modelDatalist,
-        el('p', { class: 'field-help', text: '可为裸名或带 provider/ 前缀；支持从目录中补全。' }),
+        el('p', { class: 'field-help', text: '裸名或 provider/ 前缀；可从目录补全。' }),
       ),
       el('div', { class: 'default-hint' },
         statusDot(providerHealth(ui.defaultProvider).tone, providerHealth(ui.defaultProvider).label),
@@ -452,7 +457,10 @@ function shadowNotice(host = null) {
     )] : []),
   );
   if (info.others.length) {
-    target.appendChild(el('p', { class: 'section-note', text: `以下别名同样优先于默认供应商：${info.others.join('，')}` }));
+    target.appendChild(el('details', { class: 'inline-details' },
+      el('summary', { text: `另有 ${info.others.length} 个别名也不会走默认供应商` }),
+      el('p', { class: 'section-note', text: info.others.join('，') }),
+    ));
   }
   return host ? null : target;
 }
@@ -620,7 +628,7 @@ function scopeCard(canEdit) {
         ),
       ));
     });
-    body.appendChild(el('p', { class: 'section-note', text: 'scope 由服务端按客户端密钥校验；此卡片用于配置核对与解析预览。' }));
+    body.appendChild(el('p', { class: 'section-note', text: '此处只做核对；实际校验在服务端，按密钥的 providers 列表收窄。' }));
   }
   return card({
     title: '客户端密钥 scope',

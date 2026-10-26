@@ -193,9 +193,12 @@ function render() {
   const page = el('div', { class: 'page page-system' });
   const auth = authState();
   const keys = normalizeKeyList(ui.config?.api_keys);
+  // 访问密钥的条数只在配置真的读到时才算数：普通用户与匿名访客拿不到
+  // config，此时的空数组是「看不到」，标成 0 会被读成「一个都没配」。
+  const keysKnown = !!ui.config;
   const tabs = createTabs({
     items: [
-      { id: 'access', label: '访问密钥', count: keys.length },
+      { id: 'access', label: '访问密钥', count: keysKnown ? keys.length : null },
       { id: 'accounts', label: '面板账号' },
       { id: 'outbound', label: '出站代理', count: ui.outbound?.proxies?.length },
       { id: 'runtime', label: '运行参数' },

@@ -177,20 +177,35 @@ function hasProviderKeys(provider) {
   return !!(provider.api_key || (provider.api_keys || []).length || (provider.zen_keys || []).length || (provider.go_keys || []).length);
 }
 
+// providerHealth 给优先级列表里的每一行打一个状态点。
+//
+// 这一页只有拿到 ui.config 才渲染（admin / viewer 都读得到配置），所以「有没有配
+// 供应商密钥」是已知的。但账号明细未必读得到：/panel/api/omni/accounts 可能失败，
+// 匿名/普通用户的账号数组也会被后端按归属过滤。那种情况下不能写「无账号 / 暂无
+// 健康账号」——那是把「看不到」说成「没有」。
 function providerHealth(name) {
   const accounts = accountsFor(name);
+  const accountsKnown = !!ui.accountsPayload;
+  const provider = providerList().find((p) => p.name === name);
   if (!accounts.length) {
-    const provider = providerList().find((p) => p.name === name);
     const meta = typeMeta(provider?.type);
     if (isKeyBasedProvider(meta)) {
-      return { tone: hasProviderKeys(provider?.config) ? 'ok' : 'warn', label: hasProviderKeys(provider?.config) ? '供应商密钥' : '无可用密钥' };
+      // 密钥型没有账号记录：状态由「配置里有没有密钥」决定，配置是读得到的。
+      const hasKeys = provider?.config ? hasProviderKeys(provider.config) : null;
+      if (hasKeys == null) return { tone: 'muted', label: '凭证不可见' };
+      return hasKeys
+        ? { tone: 'ok', label: '供应商密钥' }
+        : { tone: 'warn', label: '缺上游密钥' };
     }
+    // 账号型：账号数组为空只有在「读到了」的时候才等于「没有账号」。
+    if (!accountsKnown) return { tone: 'muted', label: '账号不可见' };
     return { tone: 'warn', label: '无账号' };
   }
   for (const account of accounts) {
     const health = healthOfAccount(account);
     if (health.tone === 'ok') return { tone: 'ok', label: '有可用账号' };
   }
+  // 有账号记录但没有一个是健康的：这是读到的事实，可以直说。
   return { tone: 'warn', label: '暂无健康账号' };
 }
 

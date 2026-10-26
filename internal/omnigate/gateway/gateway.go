@@ -582,8 +582,16 @@ func (g *Gateway) refreshModelsAsync(name string) {
 	// 后台刷新没有请求级的 deadline，给一个自己的上限，避免慢上游长期占着标记。
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	if _, err := g.fetchModels(ctx, name); err != nil {
+	before, _ := g.cachedModels(name)
+	models, err := g.fetchModels(ctx, name)
+	if err != nil {
 		g.log.Warn("后台刷新 %s 模型失败，继续沿用缓存: %v", name, err)
+		return
+	}
+	// 成功刷新只在目录真的变了时才说一句：静默成功会让人分不清「刷新没跑」和
+	// 「刷新跑过但上游没变」。
+	if n, o := len(models), len(before); n != o {
+		g.log.Info("后台刷新 %s 模型目录：%d → %d 个", name, o, n)
 	}
 }
 

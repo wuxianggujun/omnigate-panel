@@ -177,6 +177,9 @@ function render() {
 
   // 页面标题与范围说明都不单独占一行：标题由顶栏常驻，范围并入下方列表工具条
   // 的摘要行，避免「范围条 + 筛选条 + 工具条」三条横条上下叠。
+  //
+  // 匿名访客的归档恒为空，下面那套筛选器、自动刷新与表格无论怎么点都只会
+  // 得到同一句空提示。与其摆一屏无效控件，不如只说清「为什么看不到」。
   if (!isAuthenticated()) {
     page.appendChild(el('div', { class: 'notice notice-info' },
       icon('info', 16),
@@ -189,6 +192,8 @@ function render() {
         on: { click: () => openLoginModal({ message: '登录后查看请求与运行日志。' }) },
       }, '登录'),
     ));
+    rootEl.replaceChildren(page);
+    return;
   }
 
   const filters = el('div', { class: 'filter-bar filter-bar-wrap' },
@@ -243,9 +248,7 @@ function render() {
   const summaryText = ui.entries.length
     ? `入 ${fmtCompact(totals.prompt)} · 出 ${fmtCompact(totals.completion)} · 共 ${fmtCompact(totals.total)} tokens${totals.cacheTotal ? ` · 缓存 ${fmtCacheRate(totals.cacheRate)}` : ''}`
     // 表格自身有 loadingBlock/骨架提示；加载中不再在工具栏重复写状态文案。
-    // 匿名的空列表是「看不到」而不是「没有」，但顶部提示与表格空态已经说过
-    // 一次，这里留空，避免同一句话在一屏里出现三遍。
-    : (ui.loading ? '' : (isAuthenticated() ? '暂无记录' : ''));
+    : (ui.loading ? '' : '暂无记录');
   const summaryTitle = ui.entries.length
     ? `Prompt ${fmtInt(totals.prompt)} · Completion ${fmtInt(totals.completion)} · Total ${fmtInt(totals.total)}${totals.cacheTotal ? ` · 缓存命中 ${fmtInt(totals.cacheHit)} / ${fmtInt(totals.cacheTotal)}（${fmtCacheRate(totals.cacheRate)}）` : ' · 缓存明细未上报'}`
     : '当前列表合计';
@@ -404,10 +407,9 @@ function render() {
   page.appendChild(el('div', { class: 'page-footer-note' },
     // 加载中不报条数：0 条是结论，「还没读完」不是。表格区已有加载动画，
     // 这里直接省略那条，不再叠一行「正在读取」。
-    // 匿名同理：底部再写一次「需登录」只会在同一屏里重复第三遍。
     (ui.loading && !ui.entries.length)
       ? null
-      : (isAuthenticated() ? el('span', { text: `共 ${fmtInt(ui.entries.length)} 条可见记录` }) : null),
+      : el('span', { text: `共 ${fmtInt(ui.entries.length)} 条可见记录` }),
     ui.lastLoaded ? el('span', { text: `更新于 ${fmtTime(ui.lastLoaded)}` }) : null,
     el('span', { text: '列表最多 1000 条/次，完整日用量见「用量」页；点击记录可查看终端与缓存明细。' }),
   ));

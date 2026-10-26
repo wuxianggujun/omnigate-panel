@@ -211,6 +211,26 @@ function render() {
 
   // 身份（用户名 + 角色）由外壳常驻展示（#session-chip / #sidebar-session）。
   // 这里只补一句本页权限含义，并和操作按钮放在同一行，避免两条横条上下叠。
+  // 匿名的系统设置全是平台级配置：五个分区都只会回一句「看不到」。摆一排
+  // 点不进去的标签页与刷新按钮，等于让人反复触发 403。只留一句说明和登录入口。
+  if (!auth.authenticated) {
+    page.appendChild(pageBar({
+      actions: [el('button', {
+        class: 'btn btn-primary btn-sm', type: 'button',
+        on: { click: () => openLoginModal({ message: '登录系统设置需要管理员或只读角色。' }) },
+      }, '登录')],
+    }));
+    page.appendChild(el('div', { class: 'notice notice-info' },
+      icon('info', 16),
+      el('div', { class: 'notice-content' },
+        el('strong', { text: '系统设置需要登录' }),
+        el('span', { text: '访问密钥、面板账号、出站代理与存储都属于平台级配置；登录后按角色显示可读部分。' }),
+      ),
+    ));
+    rootEl.replaceChildren(page);
+    return;
+  }
+
   page.appendChild(pageBar({
     context: auth.authenticated
       ? el('span', {
@@ -219,16 +239,10 @@ function render() {
           : (auth.role === 'viewer' ? '只读角色：可查看配置，但不能保存。' : '普通用户：仅能管理自己的面板账号与归属账号。'),
       })
       : null,
-    actions: [
-      el('button', {
-        class: 'btn btn-ghost btn-sm', type: 'button',
-        on: { click: () => loadAll() },
-      }, icon('refresh', 15), '刷新'),
-      !auth.authenticated ? el('button', {
-        class: 'btn btn-primary btn-sm', type: 'button',
-        on: { click: () => openLoginModal({ message: '登录系统设置需要管理员或只读角色。' }) },
-      }, '登录') : null,
-    ],
+    actions: [el('button', {
+      class: 'btn btn-ghost btn-sm', type: 'button',
+      on: { click: () => loadAll() },
+    }, icon('refresh', 15), '刷新')],
   }));
 
   page.appendChild(tabs.el);

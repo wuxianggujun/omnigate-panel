@@ -33,8 +33,11 @@ func (p *Panel) omniModels(w http.ResponseWriter, r *http.Request) {
 	}
 	// issues 说明「哪家目录这次没读到」。模型变少时不能让它们无声消失：有缓存的
 	// 是「沿用上次成功目录」，没缓存的是「这家暂时看不到」。未装配回调时省略。
+	//
+	// 失败原文只给已登录用户：本端点匿名可读，上游错误里可能带上游账号信息或
+	// 回显密钥片段。
 	if p.cfg.OmniModelIssues != nil {
-		payload["issues"] = p.cfg.OmniModelIssues()
+		payload["issues"] = p.cfg.OmniModelIssues(authed(r))
 	}
 	writeJSON(w, http.StatusOK, payload)
 }

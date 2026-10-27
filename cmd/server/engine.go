@@ -241,13 +241,27 @@ func (m *omniManager) Models(ctx context.Context) (any, error) {
 }
 
 // ModelIssues 返回最近一次模型目录拉取失败的供应商（含是否仍有缓存）。
-// 面板模型页用它解释「目录里为什么少了这家」；网关日志里另有失败原文。
-func (m *omniManager) ModelIssues() any {
+// 面板模型页用它解释「目录里为什么少了这家」；detailed=false 时不含上游错误
+// 原文——/panel/api/models 匿名可读。
+func (m *omniManager) ModelIssues(detailed bool) any {
 	rt := m.cur.Load()
 	if rt == nil {
 		return []any{}
 	}
-	return rt.gw.ModelIssues()
+	issues := rt.gw.ModelIssues()
+	out := make([]map[string]any, 0, len(issues))
+	for _, is := range issues {
+		row := map[string]any{
+			"provider": is.Provider,
+			"at":       is.At,
+			"cached":   is.Cached,
+		}
+		if detailed {
+			row["error"] = is.Error
+		}
+		out = append(out, row)
+	}
+	return out
 }
 
 // Quota 查询某供应商的额度（面板供应商行的「额度」按钮）。分派交给网关的

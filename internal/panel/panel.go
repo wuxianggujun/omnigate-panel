@@ -77,8 +77,9 @@ type Config struct {
 	OmniCheckinAll func() (any, error)
 	OmniModels     func(ctx context.Context) (any, error)
 	// OmniModelIssues 返回「最近一次目录拉取失败」的供应商（网关 ModelIssues）。
-	// 面板据此说明模型为什么缺失或陈旧，而不是让它们无声消失。
-	OmniModelIssues func() any
+	// 面板据此说明模型为什么缺失或陈旧，而不是让它们无声消失。includeError 为
+	// false 时不返回上游错误原文：本端点匿名可读。
+	OmniModelIssues func(includeError bool) any
 	OmniQuota      func(provider string) (any, error)
 	// OmniProbeModels 用一份尚未保存的供应商配置探测上游模型目录（添加供应商）。
 	// OmniRefreshModels 绕过 TTL 重新拉取已有供应商的上游目录。

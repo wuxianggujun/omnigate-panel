@@ -45,6 +45,9 @@ function initialState() {
     types: BUILTIN_PROVIDER_TYPES,
     models: [],
     modelsError: '',
+    // modelsLoaded 区分「目录还没回来」与「目录真的为空」。聚合目录要访问各家
+    // 上游，冷启动时比配置慢；没有这个标记，模型页会先说该供应商没有模型目录。
+    modelsLoaded: false,
     // mappings 用于判断「改默认供应商到底有没有用」：命中别名的模型一律走别名
     // 目标链，默认供应商对它们完全无效。拿不到时按空表处理，只是少一条提示。
     mappings: {},
@@ -141,9 +144,11 @@ async function loadAll({ initial = false } = {}) {
     const payload = modelsRes.value || {};
     ui.models = Array.isArray(payload.data) ? payload.data : (Array.isArray(payload) ? payload : []);
     ui.modelsError = '';
+    ui.modelsLoaded = true;
   } else {
     ui.models = [];
     ui.modelsError = describeError(modelsRes.reason);
+    ui.modelsLoaded = false;
   }
 
   if (keyHealthRes.status === 'fulfilled') {
@@ -1137,6 +1142,7 @@ async function refreshProviderModels(providerName) {
     const p = modelsRes || {};
     ui.models = Array.isArray(p.data) ? p.data : (Array.isArray(p) ? p : []);
     ui.modelsError = '';
+    ui.modelsLoaded = true;
   } catch (error) {
     ui.modelRefreshError[providerName] = describeError(error);
     toastError(error);
@@ -1362,6 +1368,9 @@ function modelsTab(provider, models, current) {
   if (ui.modelsError && !models.length) {
     wrap.appendChild(notice('warn', '模型目录加载失败', ui.modelsError, { label: '重试', action: 'retry-load' }));
   }
+  // 目录还没回来时不能断言「该供应商没有模型」：聚合目录要访问各家上游，冷启动
+  // 时明显晚于配置到达。
+  const pending = !ui.modelsLoaded && !models.length;
   const table = createTable({
     columns: [
       {
@@ -1383,13 +1392,14 @@ function modelsTab(provider, models, current) {
       },
     ],
     rows: models,
-    empty: '该供应商还没有模型目录；可在「高级」配置 models 或刷新模型列表。',
+    empty: pending ? '正在读取模型目录…' : '该供应商还没有模型目录；可在「高级」配置 models 或刷新模型列表。',
   });
   const refreshing = ui.modelRefresh[provider.name];
   wrap.appendChild(el('div', { class: 'section-toolbar' },
     el('div', { class: 'toolbar-title' },
       el('h3', { text: '模型目录' }),
-      el('span', { class: 'muted small', text: `${models.length} 个模型；id 形如 供应商/上游模型 ID` }),
+      // 同样不为「还没读到」报数：0 个是结论。
+      el('span', { class: 'muted small', text: pending ? '' : `${models.length} 个模型；id 形如 供应商/上游模型 ID` }),
     ),
     el('div', { class: 'toolbar-actions' },
       (isAdmin() && canWrite())

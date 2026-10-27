@@ -87,6 +87,10 @@ function render(root, ctx, { loading = false } = {}) {
   // 误导人的地方。未加载完成时数字位统一留空，不写结论。
   const loaded = !!(localState.data || localState.accounts || localState.usage);
   const noAccounts = loaded && totals.accounts === 0;
+  // providersKnown：供应商清单是否真的读到了。登录用户的数据来自总览接口，
+  // 匿名访客只从 /panel/api/omni/accounts 拿到（后端按归属过滤后仍保留 provider
+  // 元信息）。两个来源都没有时只能写「—」，不能报 0 个供应商。
+  const providersKnown = !!(Array.isArray(data.providers) || localState.accounts);
   const supplierBits = [];
   if (totals.keyReady) supplierBits.push(`${fmtInt(totals.keyReady)} 个密钥直连`);
   if (totals.keyEmpty) supplierBits.push(`${fmtInt(totals.keyEmpty)} 个密钥待配置`);
@@ -166,9 +170,11 @@ function render(root, ctx, { loading = false } = {}) {
   page.appendChild(el('div', { class: 'kpi-grid kpi-grid-4' },
     kpiCard('服务状态', data.version ? '运行中' : (loading ? '连接中' : '未知'), data.version ? `版本 ${data.version}` : '', data.version ? 'ok' : 'muted', { iconName: 'power', tone: data.version ? 'ok' : 'muted' }),
     kpiCard(!loaded ? '供应商 / 账号' : (noAccounts ? '供应商' : '账号健康'),
-      !loaded ? '—' : (noAccounts ? fmtInt(totals.providers) : `${fmtInt(totals.healthy)} / ${fmtInt(totals.accounts)}`),
-      loaded ? (noAccounts ? supplierMeta : healthMeta(totals)) : '',
-      !loaded ? 'muted' : (noAccounts ? 'muted' : (totals.failed ? 'warn' : 'ok')),
+      !loaded || !providersKnown ? '—' : (noAccounts ? fmtInt(totals.providers) : `${fmtInt(totals.healthy)} / ${fmtInt(totals.accounts)}`),
+      !loaded
+        ? ''
+        : (!providersKnown ? '供应商明细未读取到' : (noAccounts ? supplierMeta : healthMeta(totals))),
+      !loaded || !providersKnown ? 'muted' : (noAccounts ? 'muted' : (totals.failed ? 'warn' : 'ok')),
       { iconName: noAccounts ? 'key' : 'shield' }),
     // 匿名的用量接口按归属过滤，返回的 0 意思是「没有你看得到的记录」，
     // 不是「平台这段时间没有请求」。直接写 0 等于替平台宣布空转。
@@ -182,7 +188,7 @@ function render(root, ctx, { loading = false } = {}) {
 
   // 顺序按「先看结论，再看构成」：健康与流量表在最前，其次引擎版本与趋势，
   // 最后是模型锁与近期请求。原来健康/供应商是两张卡并排，说的却是同一批供应商。
-  page.appendChild(healthCard(totals, providerRows, ctx, { loaded }));
+  page.appendChild(healthCard(totals, providerRows, ctx, { loaded, providersKnown }));
 
   page.appendChild(el('div', { class: 'overview-main-grid' },
     engineCard(data, totals, contextOf(data), { loading }),
@@ -394,7 +400,7 @@ function engineCard(data, totals, context, { loading = false } = {}) {
   return card({ title: '引擎状态', subtitle: '版本、运行时长与当前生效的路由默认值', body, class: 'engine-card' });
 }
 
-function healthCard(totals, providerRows, ctx, { loaded = true } = {}) {
+function healthCard(totals, providerRows, ctx, { loaded = true, providersKnown = true } = {}) {
   const total = Math.max(1, totals.accounts || 0);
   const segments = [
     { key: 'healthy', value: totals.healthy, tone: 'ok', label: '正常' },
@@ -473,7 +479,11 @@ function healthCard(totals, providerRows, ctx, { loaded = true } = {}) {
       },
     ],
     rows: tableRows,
-    empty: loaded ? '还没有配置供应商' : '正在读取供应商…',
+    // 匿名视角的供应商明细来自 /panel/api/omni/accounts；这次没读到就写「还没有
+    // 配置供应商」，等于替平台宣布它是空库。
+    empty: !loaded
+      ? '正在读取供应商…'
+      : (!providersKnown ? '供应商明细未读取到' : '还没有配置供应商'),
     onRowClick: (row) => ctx.navigate(`/providers?name=${encodeURIComponent(row.name)}`),
   });
 

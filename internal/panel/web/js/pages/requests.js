@@ -248,7 +248,8 @@ function render() {
   const summaryText = ui.entries.length
     ? `入 ${fmtCompact(totals.prompt)} · 出 ${fmtCompact(totals.completion)} · 共 ${fmtCompact(totals.total)} tokens${totals.cacheTotal ? ` · 缓存 ${fmtCacheRate(totals.cacheRate)}` : ''}`
     // 表格自身有 loadingBlock/骨架提示；加载中不再在工具栏重复写状态文案。
-    : (ui.loading ? '' : '暂无记录');
+    // 读失败时也不能写「暂无记录」——错误卡已经说明了原因，这里不该再断言平台没流量。
+    : (ui.loading || ui.error ? '' : '暂无记录');
   const summaryTitle = ui.entries.length
     ? `Prompt ${fmtInt(totals.prompt)} · Completion ${fmtInt(totals.completion)} · Total ${fmtInt(totals.total)}${totals.cacheTotal ? ` · 缓存命中 ${fmtInt(totals.cacheHit)} / ${fmtInt(totals.cacheTotal)}（${fmtCacheRate(totals.cacheRate)}）` : ' · 缓存明细未上报'}`
     : '当前列表合计';

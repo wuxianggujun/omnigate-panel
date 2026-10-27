@@ -39,12 +39,12 @@ type KeyUsageModel struct {
 // 假成功被 outcome 纠正后的失败。客户端主动中断（interrupted）同样计入
 // Errors——它确实没拿到完整结果，但 token 已经在上游消耗掉了，不能当成功。
 type KeyUsage struct {
-	Key              string          `json:"key"`
-	Requests         int64           `json:"requests"`
-	Errors           int64           `json:"errors"`
-	PromptTokens     int64           `json:"prompt_tokens"`
-	CompletionTokens int64           `json:"completion_tokens"`
-	TotalTokens      int64           `json:"total_tokens"`
+	Key              string `json:"key"`
+	Requests         int64  `json:"requests"`
+	Errors           int64  `json:"errors"`
+	PromptTokens     int64  `json:"prompt_tokens"`
+	CompletionTokens int64  `json:"completion_tokens"`
+	TotalTokens      int64  `json:"total_tokens"`
 	// AvgDurationMs 含失败请求的端到端平均耗时；0 表示没有样本。
 	AvgDurationMs int64           `json:"avg_duration_ms"`
 	LastSeen      time.Time       `json:"last_seen"`

@@ -414,7 +414,7 @@ func TestInterruptedAttemptsCountedWithoutTokens(t *testing.T) {
 
 	// 落盘往返：v5 的 int 字段必须无损恢复（否则重启后提示会消失）。
 	r.Save()
-	snap2 := New(dir + "/usage.json").Snapshot(0, nil)
+	snap2 := New(dir+"/usage.json").Snapshot(0, nil)
 	if snap2.Totals.Interrupted != 1 || snap2.Totals.PromptTokens != 1000 {
 		t.Fatalf("恢复后 intr=%d pt=%d, want 1/1000", snap2.Totals.Interrupted, snap2.Totals.PromptTokens)
 	}

@@ -51,25 +51,25 @@ const fileVersion = 5
 // bucket 一个 (时间片, realm, uid, model, rate) 的累计量。
 // JSON 字段名刻意取短，因为桶数量会随时间增长。
 type bucket struct {
-	Scope string  `json:"s"`            // "h:2006-01-02T15" 或 "d:2006-01-02"
-	Realm string  `json:"r"`            // cn / global
-	UID   string  `json:"u"`            // 账号 uid
-	Model string  `json:"m"`            // 上游裸模型名
-	Rate  string  `json:"x,omitempty"`  // 请求时生效积分倍率（规范化数值；旧桶为空）
-	Req   int64   `json:"q"`            // 请求数（含失败）
-	Err   int64   `json:"e"`            // 失败数
-	PT    int64   `json:"p"`            // prompt tokens
-	CT    int64   `json:"c"`            // completion tokens
-	TT    int64   `json:"t"`            // total tokens（上游给什么用什么的合计）
-	LatMs int64   `json:"l"`            // 延迟累计（ms）
-	LatN  int64   `json:"ln"`           // 延迟样本数
-	TPS   float64 `json:"v"`            // 吐字速率累计
-	TPSN  int64   `json:"vn"`           // 速率样本数
-	CR    float64 `json:"cr,omitempty"` // usage.credit 累计（仅明确存在的观测）
-	CRN   int64   `json:"cn,omitempty"` // usage.credit 样本数（区分缺字段与真实 0）
-	CRT   int64   `json:"ct,omitempty"` // 同时具备 credit 与 token 的 Token 合计
-	CH    int64   `json:"ch,omitempty"` // 前缀缓存命中 token 累计（上游回该维度才累计）
-	CM    int64   `json:"cm,omitempty"` // 前缀缓存未命中 token 累计
+	Scope string  `json:"s"`             // "h:2006-01-02T15" 或 "d:2006-01-02"
+	Realm string  `json:"r"`             // cn / global
+	UID   string  `json:"u"`             // 账号 uid
+	Model string  `json:"m"`             // 上游裸模型名
+	Rate  string  `json:"x,omitempty"`   // 请求时生效积分倍率（规范化数值；旧桶为空）
+	Req   int64   `json:"q"`             // 请求数（含失败）
+	Err   int64   `json:"e"`             // 失败数
+	PT    int64   `json:"p"`             // prompt tokens
+	CT    int64   `json:"c"`             // completion tokens
+	TT    int64   `json:"t"`             // total tokens（上游给什么用什么的合计）
+	LatMs int64   `json:"l"`             // 延迟累计（ms）
+	LatN  int64   `json:"ln"`            // 延迟样本数
+	TPS   float64 `json:"v"`             // 吐字速率累计
+	TPSN  int64   `json:"vn"`            // 速率样本数
+	CR    float64 `json:"cr,omitempty"`  // usage.credit 累计（仅明确存在的观测）
+	CRN   int64   `json:"cn,omitempty"`  // usage.credit 样本数（区分缺字段与真实 0）
+	CRT   int64   `json:"ct,omitempty"`  // 同时具备 credit 与 token 的 Token 合计
+	CH    int64   `json:"ch,omitempty"`  // 前缀缓存命中 token 累计（上游回该维度才累计）
+	CM    int64   `json:"cm,omitempty"`  // 前缀缓存未命中 token 累计
 	INT   int64   `json:"int,omitempty"` // 客户端中断的尝试数（Err 的子集，token 未计）
 }
 
@@ -183,13 +183,13 @@ type Delta struct {
 	HasCredit        bool
 	ModelRate        string
 	// CacheHitTokens / CacheMissTokens 前缀缓存命中/未命中观测（issue #92）。
-	HasCacheTokens   bool
-	CacheHitTokens   int64
-	CacheMissTokens  int64
-	LatencyMs        int64
-	HasLatency       bool
-	TokensPerSecond  float64
-	HasTPS           bool
+	HasCacheTokens  bool
+	CacheHitTokens  int64
+	CacheMissTokens int64
+	LatencyMs       int64
+	HasLatency      bool
+	TokensPerSecond float64
+	HasTPS          bool
 	// Interrupted 本次尝试是「客户端中断」（写失败 / 上下文取消）：上游确实已经
 	// 产生了 token 并扣了积分，但末帧 usage 永远到不了，本次只能按 0 计。
 	// 与「上游报错 / 传输失败」区分开——只有这类差额是**已知存在却没记上**的，
@@ -412,8 +412,8 @@ func (r *Recorder) Save() { r.flush(true) }
 
 // Agg 一组累计量。
 type Agg struct {
-	Requests           int64   `json:"requests"`
-	Errors             int64   `json:"errors"`
+	Requests int64 `json:"requests"`
+	Errors   int64 `json:"errors"`
 	// Interrupted 客户端中断的尝试数（Errors 的子集）：上游 token 已消耗但末帧
 	// usage 不可得，本窗口只能按 0 计入 PT/CT/CR。单列出来是为了让「面板与
 	// NewAPI 等前端数字对不上」可核对——它们会按请求体本地估算补记这部分。

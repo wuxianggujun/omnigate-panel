@@ -76,10 +76,10 @@ type Sink interface {
 // 归档里不会出现来源字段）——来源信息比 token 计数敏感，运营可自行决定是否落盘。
 // 仍然不写提示词、响应正文、Authorization 或其它凭证。
 type Event struct {
-	Time             time.Time `json:"time"`
-	RequestID        string    `json:"request_id"`
-	Path             string    `json:"path"`
-	Account          string    `json:"account,omitempty"`
+	Time      time.Time `json:"time"`
+	RequestID string    `json:"request_id"`
+	Path      string    `json:"path"`
+	Account   string    `json:"account,omitempty"`
 	// APIKey 是**入站密钥的展示标签**（`api_keys[].name`），用来回答「这条请求是
 	// 哪个用户/哪把密钥打进来的」。
 	//
@@ -87,18 +87,18 @@ type Event struct {
 	// 写入 sk- 明文等于把凭证散落到每一份备份里。没写 name 的密钥退化成
 	// 不可逆短摘要（见 server.keyLabel），不同密钥不会合并成同一行。
 	// 空 = 开放模式（网关未配任何密钥）或旧归档条目。
-	APIKey string `json:"api_key,omitempty"`
-	Model  string `json:"model,omitempty"`
-	Realm            string    `json:"realm,omitempty"` // 实际调度域 cn/global：由**实际服务账号**决定，非请求里的 "[realm:]" 前缀
-	Status           int       `json:"status"`
-	OK               bool      `json:"ok"`
-	Outcome          string    `json:"outcome"`
-	DurationMs       int64     `json:"duration_ms"`
-	TTFBMs           int64     `json:"ttfb_ms,omitempty"`
-	Attempts         int       `json:"attempts,omitempty"`
-	PromptTokens     int64     `json:"prompt_tokens,omitempty"`
-	CompletionTokens int64     `json:"completion_tokens,omitempty"`
-	TotalTokens      int64     `json:"total_tokens,omitempty"`
+	APIKey           string `json:"api_key,omitempty"`
+	Model            string `json:"model,omitempty"`
+	Realm            string `json:"realm,omitempty"` // 实际调度域 cn/global：由**实际服务账号**决定，非请求里的 "[realm:]" 前缀
+	Status           int    `json:"status"`
+	OK               bool   `json:"ok"`
+	Outcome          string `json:"outcome"`
+	DurationMs       int64  `json:"duration_ms"`
+	TTFBMs           int64  `json:"ttfb_ms,omitempty"`
+	Attempts         int    `json:"attempts,omitempty"`
+	PromptTokens     int64  `json:"prompt_tokens,omitempty"`
+	CompletionTokens int64  `json:"completion_tokens,omitempty"`
+	TotalTokens      int64  `json:"total_tokens,omitempty"`
 	// Credit 本次实际消耗积分（仅 WorkBuddy：上游 usage.credit）。**不能 omitempty**：
 	// 免费/零倍率模型回报的 0 是真实值，键被省略后前端 Number(undefined)=NaN，会把它
 	// 误判成「未知」显示成 —（实测过：deepseek-v4.1-flash 全被显示成空）。
@@ -146,8 +146,8 @@ type Event struct {
 // 便于面板用一段 IP 前缀或 UA 片段捞请求；From/To 是闭区间（零值 = 该侧不设界），
 // 供「今天 / 近 7 天 / 自定义区间」这类时间查询使用。
 type Filter struct {
-	Outcome   string
-	Account   string
+	Outcome string
+	Account string
 	// APIKey 按入站密钥标签筛选（大小写不敏感子串）。面板「请求」页据此看单个
 	// 用户打过什么，与「用户」页的聚合口径一致。
 	APIKey    string
@@ -165,13 +165,13 @@ type ArchiveStats struct {
 	Dir     string `json:"dir,omitempty"`
 	// Backend 非空表示归档落在这个持久化后端（如 "postgres"），前端据此把「JSONL 归档」
 	// 文案换成「数据库归档」。
-	Backend       string `json:"backend,omitempty"`
-	Files         int    `json:"files"`
-	Bytes         int64  `json:"bytes"`
+	Backend string `json:"backend,omitempty"`
+	Files   int    `json:"files"`
+	Bytes   int64  `json:"bytes"`
 	// RetentionDays 是归档保留天数。面板「用户」页要把它显示在时间范围旁边：
 	// 按密钥统计只能覆盖归档窗口，选「近 30 天」但归档只留 7 天时必须说清楚，
 	// 否则会把「查不到」误读成「没用过」。
-	RetentionDays int  `json:"retention_days,omitempty"`
+	RetentionDays int    `json:"retention_days,omitempty"`
 	DroppedWrites uint64 `json:"dropped_writes"`
 	LastError     string `json:"last_error,omitempty"`
 }

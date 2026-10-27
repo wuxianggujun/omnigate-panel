@@ -149,7 +149,7 @@ func (p *Provider) TokenExpired(acc *provider.Account) bool {
 		return true
 	}
 	if acc.ExpiresAt > 0 {
-		return time.Now().Add(60 * time.Second).Unix() >= acc.ExpiresAt
+		return time.Now().Add(60*time.Second).Unix() >= acc.ExpiresAt
 	}
 	// 无明确过期时间：交给 401 重试路径（与 raccoon 同口径），避免每次重启都轮换。
 	return false

@@ -102,10 +102,10 @@ type openAIError struct {
 // openAIUsage is the OpenAI-format usage block. Upstreams (raccoon included)
 // send it in a trailing chunk after the finish_reason chunk.
 type openAIUsage struct {
-	PromptTokens            int `json:"prompt_tokens"`
-	CompletionTokens        int `json:"completion_tokens"`
-	TotalTokens             int `json:"total_tokens"`
-	PromptTokensDetails     *struct {
+	PromptTokens        int `json:"prompt_tokens"`
+	CompletionTokens    int `json:"completion_tokens"`
+	TotalTokens         int `json:"total_tokens"`
+	PromptTokensDetails *struct {
 		CachedTokens int `json:"cached_tokens"`
 	} `json:"prompt_tokens_details"`
 	CompletionTokensDetails *struct {

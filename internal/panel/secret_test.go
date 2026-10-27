@@ -42,12 +42,12 @@ func TestMaskRestoreRoundTrip(t *testing.T) {
 				"api_key": "upstream-key-1234567890",
 				"accounts": []any{
 					map[string]any{
-						"label":         "浣熊账号1",
-						"email":         "a@b.c",
-						"cookie":        "abc1234567890",
-						"refresh_token": "rt-abcdefgh",
-						"password":      "p@ssw0rd",
-						"password_hash": "pbkdf2-sha256$210000$salt$hashvalue",
+						"label":          "浣熊账号1",
+						"email":          "a@b.c",
+						"cookie":         "abc1234567890",
+						"refresh_token":  "rt-abcdefgh",
+						"password":       "p@ssw0rd",
+						"password_hash":  "pbkdf2-sha256$210000$salt$hashvalue",
 						"session_cookie": "sid=sessionsecret123",
 					},
 				},
@@ -93,10 +93,10 @@ func TestMaskRestoreRoundTrip(t *testing.T) {
 		}
 	}
 	for _, keep := range []string{
-		"sk-gateway-key-must-stay", // 网关自己的 api_keys 不脱敏
-		"Bearer {{access_token}}",  // 模板占位原样
-		"{{cookie}}",               // body 里的模板占位原样
-		"http://127.0.0.1:7891",    // 无 userinfo 的 URL 原样
+		"sk-gateway-key-must-stay",                         // 网关自己的 api_keys 不脱敏
+		"Bearer {{access_token}}",                          // 模板占位原样
+		"{{cookie}}",                                       // body 里的模板占位原样
+		"http://127.0.0.1:7891",                            // 无 userinfo 的 URL 原样
 		maskURLUserinfo("http://user:pass@127.0.0.1:7890"), // 有 userinfo：只掩 userinfo
 	} {
 		if !strings.Contains(string(raw), keep) {

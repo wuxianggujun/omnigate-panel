@@ -80,11 +80,11 @@ func TestProxyPoolNormalizeErrors(t *testing.T) {
 func TestParseProxyList(t *testing.T) {
 	cases := map[string][]string{
 		`{"code":200,"data":{"proxies":["1.2.3.4:8080","5.6.7.8:1080"],"count":2}}`: {"1.2.3.4:8080", "5.6.7.8:1080"},
-		`{"proxies":["a:1","b:2"]}`:       {"a:1", "b:2"},
-		`["x:1","y:2"]`:                   {"x:1", "y:2"},
-		"1.1.1.1:1\n2.2.2.2:2\n":          {"1.1.1.1:1", "2.2.2.2:2"},
-		"1.1.1.1:1, 2.2.2.2:2":            {"1.1.1.1:1", "2.2.2.2:2"},
-		"":                                nil,
+		`{"proxies":["a:1","b:2"]}`: {"a:1", "b:2"},
+		`["x:1","y:2"]`:             {"x:1", "y:2"},
+		"1.1.1.1:1\n2.2.2.2:2\n":    {"1.1.1.1:1", "2.2.2.2:2"},
+		"1.1.1.1:1, 2.2.2.2:2":      {"1.1.1.1:1", "2.2.2.2:2"},
+		"":                          nil,
 	}
 	for body, want := range cases {
 		got := parseProxyList([]byte(body))

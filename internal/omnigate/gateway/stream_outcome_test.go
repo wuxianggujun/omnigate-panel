@@ -38,9 +38,9 @@ func (s *scriptStream) Close() error { return nil }
 // the account pool / state.
 type scriptProvider struct{ events []provider.Event }
 
-func (p *scriptProvider) Name() string                                        { return "fake" }
-func (p *scriptProvider) Type() string                                        { return "openai" }
-func (p *scriptProvider) ListModels(context.Context) ([]openai.Model, error)  { return nil, nil }
+func (p *scriptProvider) Name() string                                       { return "fake" }
+func (p *scriptProvider) Type() string                                       { return "openai" }
+func (p *scriptProvider) ListModels(context.Context) ([]openai.Model, error) { return nil, nil }
 func (p *scriptProvider) StreamChat(context.Context, *provider.Account, provider.ChatInput) (provider.Stream, error) {
 	return &scriptStream{events: p.events}, nil
 }
@@ -250,6 +250,6 @@ func (w *failWriter) Header() http.Header {
 	}
 	return w.h
 }
-func (w *failWriter) WriteHeader(int)          {}
+func (w *failWriter) WriteHeader(int)           {}
 func (w *failWriter) Write([]byte) (int, error) { return 0, errors.New("client gone") }
 func (w *failWriter) Flush()                    {}

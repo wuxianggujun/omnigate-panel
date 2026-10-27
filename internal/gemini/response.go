@@ -18,7 +18,7 @@ type chatUsage struct {
 type chatResponse struct {
 	Choices []struct {
 		Message struct {
-			Content   string           `json:"content"`
+			Content   string            `json:"content"`
 			ToolCalls []openai.ToolCall `json:"tool_calls"`
 		} `json:"message"`
 		FinishReason string `json:"finish_reason"`

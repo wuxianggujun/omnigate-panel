@@ -80,7 +80,7 @@ type Config struct {
 	// 面板据此说明模型为什么缺失或陈旧，而不是让它们无声消失。includeError 为
 	// false 时不返回上游错误原文：本端点匿名可读。
 	OmniModelIssues func(includeError bool) any
-	OmniQuota      func(provider string) (any, error)
+	OmniQuota       func(provider string) (any, error)
 	// OmniProbeModels 用一份尚未保存的供应商配置探测上游模型目录（添加供应商）。
 	// OmniRefreshModels 绕过 TTL 重新拉取已有供应商的上游目录。
 	OmniProbeModels   func(raw json.RawMessage) (any, error)

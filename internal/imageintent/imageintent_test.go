@@ -34,9 +34,9 @@ func TestMaybeImageGeneration(t *testing.T) {
 		text string
 		want bool
 	}{
-		{"绘制", true},              // strict hit, no noun+verb pair
-		{"帮我搞一张海报出来", true},      // noun + verb, not in the curated list
-		{"帮我画个 logo", true},       // noun + verb
+		{"绘制", true},        // strict hit, no noun+verb pair
+		{"帮我搞一张海报出来", true}, // noun + verb, not in the curated list
+		{"帮我画个 logo", true}, // noun + verb
 		{"what is the capital of France", false},
 		{"", false},
 		{"   ", false},

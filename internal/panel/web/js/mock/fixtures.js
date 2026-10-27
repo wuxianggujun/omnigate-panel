@@ -529,7 +529,7 @@ function keyHealth(now) {
         name: 'deepseek',
         keys: [
           { key: 'sk-deep…4f2a…(len=40)', disabled: false, strikes: 0 },
-          { key: 'sk-deep…9c1d…(len=40)', disabled: true, reason: '上游持续 429', strikes: 5, until: Math.floor((now + 2 * HOUR) / 1000), first_seen: Math.floor((now - 2 * 24 * HOUR) / 1000), cleanup_at: Math.floor((now + 5 * 24 * HOUR) / 1000), last_error: 'HTTP 429 too many requests' },
+          { key: 'sk-deep…9c1d…(len=40)', disabled: true, reason: 'quota', strikes: 5, until: Math.floor((now + 2 * HOUR) / 1000), first_seen: Math.floor((now - 2 * 24 * HOUR) / 1000), cleanup_at: Math.floor((now + 5 * 24 * HOUR) / 1000), last_error: 'Token quota exhausted.' },
         ],
       },
       {

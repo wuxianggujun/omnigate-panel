@@ -1282,10 +1282,10 @@ function keysTab(provider, meta, current) {
         { key: 'key', label: '密钥', render: (row) => el('span', { class: 'mono small', text: row.key || '—' }) },
         {
           key: 'status', label: '状态',
-          render: (row) => (row.disabled ? badge('已禁用', 'danger') : badge('轮换中', 'ok')),
+          render: (row) => keyHealthStatus(row),
         },
         { key: 'strikes', label: '连败', align: 'right', render: (row) => fmtInt(row.strikes || 0) },
-        { key: 'until', label: '禁用截止', render: (row) => (row.until ? fmtRelative(row.until) : '—') },
+        { key: 'until', label: '禁用截止', render: (row) => (row.disabled && row.until ? fmtRelative(row.until) : '—') },
         { key: 'cleanup', label: '自动清理', render: (row) => (row.cleanup_at ? fmtRelative(row.cleanup_at) : '—') },
         {
           key: 'last_error', label: '最近错误',
@@ -1309,6 +1309,23 @@ function keysTab(provider, meta, current) {
     wrap.appendChild(quotaCard(provider, current));
   }
   return wrap;
+}
+
+// keyHealthStatus 把密钥健康记录翻成三种人话状态。
+//
+// 上游禁用到期后不会立刻回到「可用」：网关保留连败记账，等下一次成功请求才清掉
+// （见 openaibackend 的「待重试试炼」）。原来非 disabled 一律写「轮换中」，而那
+// 个词在这里既不是事实也不解释任何事——额度锁刚到期时最需要看清的正是「待重试」。
+const KEY_HEALTH_REASON = { quota: '额度耗尽', auth: '鉴权失败' };
+
+function keyHealthStatus(row) {
+  if (row.disabled) {
+    // 只给已知的短原因做后缀：上游原文交给「最近错误」列，徽标里塞一整句会挤成一团。
+    const reason = KEY_HEALTH_REASON[row.reason] || '';
+    return badge(reason ? `已禁用 · ${reason}` : '已禁用', 'danger');
+  }
+  if (Number(row.strikes || 0) > 0) return badge('待重试', 'warn');
+  return badge('可用', 'ok');
 }
 
 function quotaCard(provider, current) {

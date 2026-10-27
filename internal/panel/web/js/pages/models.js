@@ -323,7 +323,8 @@ function applyFilters() {
     rows,
     // 首次加载由 load() 的 loadingBlock（动画 + 文案）独占提示；表格在
     // ui.loading=false 之后才渲染，这里不需要再放一份「加载中」。
-    empty: '没有符合筛选条件的模型',
+    // 拉取失败时也不能写「没有符合筛选条件的模型」：那是把「没读到」说成「没有」。
+    empty: ui.error ? '模型目录没读到，无法列出模型' : '没有符合筛选条件的模型',
   });
   tableHost.replaceChildren(table.el);
 }

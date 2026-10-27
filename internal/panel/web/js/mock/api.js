@@ -777,6 +777,8 @@ async function handleApi(url, init) {
     return json({ ok: true, types: MOCK_PROVIDER_TYPES });
   }
   if (path === '/omni/models' && method === 'GET') {
+    // mock_models_fail=1：模拟目录拉取失败，验证面板不再把「没读到」说成「没有」。
+    if (state.modelsFail) return fail(502, 'upstream catalog unavailable', 'upstream_error');
     const data = buildModelCatalog(state.config);
     const seen = new Set(data.map((m) => m.id));
     const whitelist = Array.isArray(state.config.model_whitelist) ? state.config.model_whitelist : [];
@@ -940,6 +942,8 @@ export function installMock() {
     ];
     state.missingCatalog = ['deepseek'];
   }
+  // mock_models_fail=1：目录接口整体失败。
+  if (params.get('mock_models_fail')) state.modelsFail = true;
 
   originalFetch = window.fetch.bind(window);
   window.fetch = async (input, init = {}) => {

@@ -30,6 +30,9 @@ function initialState() {
     mappingError: '',
     accountsPayload: null,
     models: [],
+    // modelsKnown 区分「目录里没有这家」与「目录没读到」：拉取失败时 models 也是
+    // 空数组，不能据此写下「目录内 0 个模型」这种结论。
+    modelsKnown: false,
     types: BUILTIN_PROVIDER_TYPES,
     defaultProvider: '',
     defaultModel: '',
@@ -111,8 +114,10 @@ async function loadAll() {
   if (modelsRes.status === 'fulfilled') {
     const payload = modelsRes.value || {};
     ui.models = Array.isArray(payload.data) ? payload.data : (Array.isArray(payload) ? payload : []);
+    ui.modelsKnown = true;
   } else {
     ui.models = [];
+    ui.modelsKnown = false;
   }
 
   ui.types = typesRes.status === 'fulfilled'
@@ -333,6 +338,7 @@ function aliasShadowInfo() {
     if (!parsed) return '';
     const resolution = resolveProviderForTarget(parsed, {
       providers, prefer: ui.prefer, defaultProvider, modelCatalog: ui.models,
+      modelsKnown: ui.modelsKnown,
     });
     return resolution?.provider || '';
   };
@@ -645,7 +651,11 @@ function scopeCard(canEdit) {
         ),
         el('div', { class: 'scope-key-foot' },
           el('span', { text: scope.length ? `允许 ${scope.length} 个供应商` : '可访问全部供应商' }),
-          el('span', { text: `目录内 ${allowedModels} 个模型` }),
+          el('span', {
+            text: allowedModels == null
+              ? '模型目录未读取'
+              : `目录内 ${allowedModels} 个模型`,
+          }),
         ),
       ));
     });
@@ -660,8 +670,10 @@ function scopeCard(canEdit) {
   });
 }
 
+// countModelsForScope 返回该 scope 在目录里覆盖的模型数；目录没读到时返回 null，
+// 让调用方写「模型目录未读取」而不是报 0。
 function countModelsForScope(scope) {
-  if (!ui.models.length) return 0;
+  if (!ui.modelsKnown) return null;
   if (!scope.length) return ui.models.length;
   return ui.models.filter((m) => scope.includes(m.owned_by)).length;
 }
@@ -888,6 +900,16 @@ function resolveModel(raw) {
   }
   if (!chain.length) chain = [raw];
 
+  // 目录没读到时，「哪家上游真的提供该模型」只能靠优先级推断。必须写明这一点，
+  // 否则预览会把「不知道」当成「目录里没有」，给出看起来很确定的错误供应商。
+  const needsCatalog = chain.some((target) => {
+    const parsed = parseTarget(target, providers);
+    return !!(parsed && !parsed.prefixed);
+  });
+  if (!ui.modelsKnown && needsCatalog) {
+    result.warnings.push('模型目录未读取：供应商选择只能按优先级推断，无法判断哪家上游真的有该模型。');
+  }
+
   // chainScopeSkips 记录「别名链上哪些回退目标会被入站密钥的 scope 直接跳过」。
   // 别名链是硬规则，但网关只在入口校验主目标的 scope；链上的后续目标由
   // tryFallback 按 KeyProviders 过滤，越界的那条被静默丢弃。运维配了回退却
@@ -903,6 +925,7 @@ function resolveModel(raw) {
       if (!parsed) return;
       const resolution = resolveProviderForTarget(parsed, {
         providers, prefer, defaultProvider, modelCatalog: ui.models,
+        modelsKnown: ui.modelsKnown,
       });
       if (!resolution) return;
       if (!keyProviders.includes(resolution.provider)) {
@@ -917,6 +940,7 @@ function resolveModel(raw) {
     if (!parsed) continue;
     const resolution = resolveProviderForTarget(parsed, {
       providers, prefer, defaultProvider, modelCatalog: ui.models,
+      modelsKnown: ui.modelsKnown,
     });
     if (!resolution) continue;
     const health = providerHealth(resolution.provider);
@@ -1007,7 +1031,7 @@ function parseTarget(target, providers) {
   return { prefixed: false, providerName: '', model: value };
 }
 
-function resolveProviderForTarget(parsed, { providers, prefer, defaultProvider, modelCatalog }) {
+function resolveProviderForTarget(parsed, { providers, prefer, defaultProvider, modelCatalog, modelsKnown = true }) {
   if (parsed.prefixed) {
     const exists = providers.some((p) => p.name === parsed.providerName);
     if (!exists) return null;
@@ -1028,7 +1052,10 @@ function resolveProviderForTarget(parsed, { providers, prefer, defaultProvider, 
   const chosen = candidates[0];
   const reason = orderedServing.length
     ? `routing.prefer 中第 ${prefer.indexOf(chosen) + 1} 顺位，目录命中`
-    : (serving.length ? '目录命中（未在优先级中）' : '目录未命中，回退默认供应商');
+    : (serving.length
+      ? '目录命中（未在优先级中）'
+      // 目录根本没读到时不写「未命中」——那是把「不知道」说成「没有」。
+      : (modelsKnown ? '目录未命中，回退默认供应商' : '模型目录未读取，按默认供应商回退'));
   return {
     provider: chosen,
     reason,
@@ -1213,7 +1240,12 @@ function openMappingModal(alias) {
     const name = providerSelect.value;
     const models = modelIdsForProvider(name);
     modelSelect.replaceChildren(
-      el('option', { value: '', text: models.length ? '选择模型…' : (name ? '该供应商暂无目录模型' : '先选择供应商') }),
+      el('option', {
+        value: '',
+        text: models.length
+          ? '选择模型…'
+          : (!name ? '先选择供应商' : (ui.modelsKnown ? '该供应商目录里没有模型' : '模型目录未读取；请手动输入')),
+      }),
       ...models.map((id) => el('option', { value: id, text: id })),
     );
     modelSelect.disabled = !name || !models.length;

@@ -1392,8 +1392,10 @@ function modelsTab(provider, models, current) {
     wrap.appendChild(notice('warn', '模型目录加载失败', ui.modelsError, { label: '重试', action: 'retry-load' }));
   }
   // 目录还没回来时不能断言「该供应商没有模型」：聚合目录要访问各家上游，冷启动
-  // 时明显晚于配置到达。
-  const pending = !ui.modelsLoaded && !models.length;
+  // 时明显晚于配置到达。三种状态要分开：正在读 / 读失败 / 读到了但确实没有。
+  const catalogUnread = !ui.modelsLoaded;
+  const pending = catalogUnread && !ui.modelsError && !models.length;
+  const catalogFailed = catalogUnread && !!ui.modelsError && !models.length;
   // 网关报告这家目录这次没读到、又没有缓存：模型会整体缺失，空态必须说清原因。
   const issue = (ui.modelIssues || []).find((i) => i.provider === provider.name) || null;
   const missingCatalog = !!(issue && !issue.cached && !models.length);
@@ -1423,16 +1425,18 @@ function modelsTab(provider, models, current) {
     rows: models,
     empty: pending
       ? '正在读取模型目录…'
-      : (missingCatalog
-        ? '上游目录这次没读到；可点「刷新上游目录」重试'
-        : '该供应商还没有模型目录；可在「高级」配置 models 或刷新模型列表。'),
+      : (catalogFailed
+        ? '模型目录没读到，无法列出模型；可点上方「重试」或「刷新上游目录」'
+        : (missingCatalog
+          ? '上游目录这次没读到；可点「刷新上游目录」重试'
+          : '该供应商还没有模型目录；可在「高级」配置 models 或刷新模型列表。')),
   });
   const refreshing = ui.modelRefresh[provider.name];
   wrap.appendChild(el('div', { class: 'section-toolbar' },
     el('div', { class: 'toolbar-title' },
       el('h3', { text: '模型目录' }),
       // 同样不为「还没读到」报数：0 个是结论。
-      el('span', { class: 'muted small', text: pending || missingCatalog ? '' : `${models.length} 个模型；id 形如 供应商/上游模型 ID` }),
+      el('span', { class: 'muted small', text: pending || catalogFailed || missingCatalog ? '' : `${models.length} 个模型；id 形如 供应商/上游模型 ID` }),
     ),
     el('div', { class: 'toolbar-actions' },
       (isAdmin() && canWrite())

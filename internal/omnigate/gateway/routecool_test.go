@@ -68,6 +68,7 @@ func TestRouteFailurePenalized(t *testing.T) {
 		{"nil/空响应", nil, true},
 		{"客户端取消", context.Canceled, false},
 		{"400", errors.New("upstream HTTP 400: bad request"), false},
+		{"400 quota", errors.New("upstream HTTP 400: insufficient_quota"), true},
 		{"422", errors.New("status 422: unprocessable"), false},
 		{"raccoon 400", &raccoon.UpstreamError{Status: 400, Message: "bad request"}, false},
 		{"prompt 超限", &promptTooLongErr{Provider: "p", Limit: 10}, false},
@@ -84,6 +85,123 @@ func TestRouteFailurePenalized(t *testing.T) {
 				t.Fatalf("routeFailurePenalized(%v) = %v, want %v", tc.err, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestRouteQuotaFloor(t *testing.T) {
+	now := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name string
+		err  error
+		want time.Duration
+		ok   bool
+	}{
+		{
+			"cline weekly cap",
+			errors.New(`upstream HTTP 429: {"error":{"code":"INFERENCE_CAP_ERROR","message":"Error 429: You have reached your weekly Clinepass limit. The limit resets in 2h 12m, please try again later."}}`),
+			2*time.Hour + 13*time.Minute,
+			true,
+		},
+		{
+			"minutes",
+			errors.New(`upstream HTTP 429: weekly limit resets in 28m`),
+			29 * time.Minute,
+			true,
+		},
+		{
+			"quota without reset hint",
+			errors.New(`upstream HTTP 402: insufficient_quota`),
+			routeCoolQuotaDefault,
+			true,
+		},
+		{
+			"long reset is capped",
+			errors.New(`upstream HTTP 429: weekly limit resets in 2d`),
+			routeCoolQuotaMax,
+			true,
+		},
+		{
+			"401 stays short",
+			errors.New(`upstream HTTP 401: insufficient_quota`),
+			0,
+			false,
+		},
+		{
+			"plain rate limit stays short",
+			errors.New(`upstream HTTP 429: rate limited`),
+			0,
+			false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			until, ok := routeQuotaFloor(tc.err, now)
+			if ok != tc.ok {
+				t.Fatalf("routeQuotaFloor ok = %v, want %v", ok, tc.ok)
+			}
+			if ok && until.Sub(now) != tc.want {
+				t.Fatalf("routeQuotaFloor 窗口 = %v, want %v", until.Sub(now), tc.want)
+			}
+		})
+	}
+}
+
+func TestMarkRouteFailureUsesQuotaReset(t *testing.T) {
+	g := &Gateway{routeCool: newRouteFailureLedger()}
+	now := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
+	err := errors.New(`upstream HTTP 429: {"error":{"code":"INFERENCE_CAP_ERROR","message":"You have reached your weekly Clinepass limit. The limit resets in 2h 12m."}}`)
+	g.markRouteFailure("cline-pass", "m", err, false, now)
+	snap := g.routeCool.Snapshot(now)
+	if len(snap) != 1 {
+		t.Fatalf("route_cooldowns 条数 = %d, want 1", len(snap))
+	}
+	if snap[0].Reason != "quota" {
+		t.Fatalf("reason = %q, want quota", snap[0].Reason)
+	}
+	if got, want := snap[0].Until.Sub(now), 2*time.Hour+13*time.Minute; got != want {
+		t.Fatalf("周额度窗口 = %v, want %v", got, want)
+	}
+}
+
+func TestRouteFailureLongQuotaWindow(t *testing.T) {
+	l := newRouteFailureLedger()
+	now := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
+	floor := now.Add(2*time.Hour + 13*time.Minute)
+	until, strikes := l.FailUntil("cline-pass", "m", "quota", now, floor)
+	if strikes != 1 || !until.Equal(floor) {
+		t.Fatalf("首次长窗口 = %v strikes=%d, want %v/1", until, strikes, floor)
+	}
+	if !l.Cooling("cline-pass", "m", now.Add(2*time.Hour)) {
+		t.Fatal("2 小时后仍应在周额度绕行窗口内")
+	}
+	if l.Cooling("cline-pass", "m", floor) {
+		t.Fatal("到达截止时间后应允许探针")
+	}
+
+	// 21 分钟后又探针失败一次（超过安静重置门槛），不能把长窗口缩短成 30m。
+	later := now.Add(21 * time.Minute)
+	until, strikes = l.FailUntil("cline-pass", "m", "quota", later, later.Add(routeCoolQuotaDefault))
+	if !until.Equal(floor) {
+		t.Fatalf("短失败不应缩短长窗口，得到 %v want %v", until, floor)
+	}
+	if strikes != 1 {
+		t.Fatalf("安静 21 分钟后 strikes 应重置为 1，得到 %d", strikes)
+	}
+
+	// FailUntil 自身也要把超长 floor 封顶在 24h。
+	until, _ = l.FailUntil("cline-pass", "other", "quota", now, now.Add(48*time.Hour))
+	if got := until.Sub(now); got != routeCoolQuotaMax {
+		t.Fatalf("超长窗口 = %v, want %v", got, routeCoolQuotaMax)
+	}
+}
+
+func TestRouteFailureReasonQuota(t *testing.T) {
+	err := errors.New(`upstream HTTP 429: INFERENCE_CAP_ERROR: weekly Clinepass limit resets in 2h`)
+	if got := routeFailureReason(err); got != "quota" {
+		t.Fatalf("routeFailureReason = %q, want quota", got)
+	}
+	if !routeFailurePenalized(err) {
+		t.Fatal("周额度上限应记为目标侧失败")
 	}
 }
 

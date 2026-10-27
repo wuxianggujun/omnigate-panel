@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"errors"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -20,9 +21,10 @@ import (
 // 才落到 yijia。
 //
 // 这里给「provider + 路由后的模型」记一个短期绕行窗口：失败一次，后续请求优先
-// 走别名链上下一个可用目标；窗口到期后只放一个探针回来重试，成功即清零。它只
-// 改变尝试顺序，不会把目标从配置、密钥 scope 或别名链里删掉，所以不存在「永久
-// 锁定某家」。纯进程内状态：短期信号，重启后重新观察即可。
+// 走别名链上下一个可用目标；窗口到期后只放一个探针回来重试，成功即清零。额度
+// 耗尽类错误会按上游给出的重置时间（如 cline-pass 的 weekly limit）延长窗口，
+// 避免每 5 分钟白撞一次。它只改变尝试顺序，不会把目标从配置、密钥 scope 或别名
+// 链里删掉，所以不存在「永久锁定某家」。纯进程内状态：短期信号，重启后重新观察即可。
 const (
 	routeCoolBase = 30 * time.Second
 	routeCoolMax  = 5 * time.Minute
@@ -30,6 +32,16 @@ const (
 	// 500 的目标会一路把退避顶到上限，而它并不是持续故障。
 	routeCoolReset   = 4 * routeCoolMax
 	routeCoolEntries = 2048
+	// 额度耗尽不是网络抖动：cline-pass 的周额度会明确给出「resets in 14h 24m」。
+	// 这类窗口按上游给的重置时间走，上限 24h；拿不到重置时间时保守绕行 30m，
+	// 避免每 5 分钟往一个已知没额度的目标上白打一次。
+	routeCoolQuotaMax     = 24 * time.Hour
+	routeCoolQuotaDefault = 30 * time.Minute
+)
+
+var (
+	routeResetInRe   = regexp.MustCompile(`(?i)reset(?:s)?\s+in\s+([0-9dhms\s]+)`)
+	routeResetUnitRe = regexp.MustCompile(`(?i)(\d+)\s*(d|h|m|s)`)
 )
 
 type routeFailureState struct {
@@ -75,6 +87,21 @@ func (l *routeFailureLedger) Cooling(provider, model string, now time.Time) bool
 // Fail 记一次失败并返回绕行截止时间与连续失败次数。退避与账号冷却同形：
 // base * 2^(strikes-1)，封顶 routeCoolMax。
 func (l *routeFailureLedger) Fail(provider, model, reason string, now time.Time) (time.Time, int) {
+	return l.fail(provider, model, reason, now, time.Time{})
+}
+
+// FailUntil 与 Fail 相同，但绕行至少持续到 floor。额度耗尽类错误用它把
+// 「resets in 2h 12m」这类上游重置时间落成绕行窗口；floor 最多 24h。
+func (l *routeFailureLedger) FailUntil(provider, model, reason string, now, floor time.Time) (time.Time, int) {
+	if !floor.IsZero() {
+		if max := now.Add(routeCoolQuotaMax); floor.After(max) {
+			floor = max
+		}
+	}
+	return l.fail(provider, model, reason, now, floor)
+}
+
+func (l *routeFailureLedger) fail(provider, model, reason string, now, floor time.Time) (time.Time, int) {
 	if l == nil {
 		return time.Time{}, 0
 	}
@@ -82,8 +109,14 @@ func (l *routeFailureLedger) Fail(provider, model, reason string, now time.Time)
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	s := l.m[key]
+	// 长额度窗口内如果又被探针撞了一次（例如链上备用也全冷却），不能因为
+	// 退避计数重置就把原本几小时的窗口缩短成 30 秒；保留仍然有效的旧截止时间。
+	var prevUntil time.Time
+	if s != nil && s.Until.After(now) {
+		prevUntil = s.Until
+	}
 	if s == nil || now.Sub(s.LastAt) > routeCoolReset {
-		s = &routeFailureState{}
+		s = &routeFailureState{Until: prevUntil}
 	}
 	s.Strikes++
 	s.LastAt = now
@@ -96,6 +129,12 @@ func (l *routeFailureLedger) Fail(provider, model, reason string, now time.Time)
 		d = routeCoolMax
 	}
 	s.Until = now.Add(d)
+	if floor.After(s.Until) {
+		s.Until = floor
+	}
+	if prevUntil.After(s.Until) {
+		s.Until = prevUntil
+	}
 	if l.m[key] == nil {
 		l.pruneLocked(now)
 	}
@@ -215,7 +254,13 @@ func (g *Gateway) markRouteFailure(provider, model string, err error, announce b
 		return
 	}
 	reason := routeFailureReason(err)
-	until, strikes := g.routeCool.Fail(provider, model, reason, now)
+	var until time.Time
+	var strikes int
+	if floor, ok := routeQuotaFloor(err, now); ok {
+		until, strikes = g.routeCool.FailUntil(provider, model, reason, now, floor)
+	} else {
+		until, strikes = g.routeCool.Fail(provider, model, reason, now)
+	}
 	if announce && g.log != nil {
 		// 不承诺「一定改走备用」：没有别名备用目标时该请求仍会重试它。
 		g.log.Warn("路由目标 %s/%s 暂不可用（%s，连续 %d 次），%s 内记入失败窗口；有健康备用目标时优先走备用",
@@ -235,11 +280,72 @@ func (g *Gateway) clearRouteFailure(provider, model string) {
 // provider 侧失败，值得短暂绕行，而不是当成请求错误。
 var errEmptyUpstream = errors.New("upstream returned no usable output")
 
+// isQuotaText 判断错误文案是否明确属于「额度/订阅上限」，而不是普通限流。
+// cline-pass 的 429 是 INFERENCE_CAP_ERROR + weekly limit，正文里没有 quota 字样；
+// 只看 "rate limit" 会把它当 30 秒抖动，结果每 5 分钟又去撞一次已经耗尽的周额度。
+func isQuotaText(s string) bool {
+	for _, marker := range []string{
+		"inference_cap", "weekly",
+		"quota", "credit",
+		"额度", "余额不足", "积分不足",
+	} {
+		if strings.Contains(s, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// routeQuotaFloor 从额度类错误里解析上游重置时间，返回绕行窗口的下限。
+// 解析不到时仍给一个保守窗口（30m）；第二个返回值 false 表示不是额度类错误。
+func routeQuotaFloor(err error, now time.Time) (time.Time, bool) {
+	if err == nil || upstreamHTTPStatus(err) == 401 {
+		return time.Time{}, false
+	}
+	s := strings.ToLower(err.Error())
+	if !isQuotaText(s) {
+		return time.Time{}, false
+	}
+	if m := routeResetInRe.FindStringSubmatch(s); m != nil {
+		if d := parseResetDuration(m[1]); d > 0 {
+			// 多给 1 分钟余量，避免在上游刚重置的边界上又撞一次。
+			d += time.Minute
+			if d > routeCoolQuotaMax {
+				d = routeCoolQuotaMax
+			}
+			return now.Add(d), true
+		}
+	}
+	return now.Add(routeCoolQuotaDefault), true
+}
+
+func parseResetDuration(s string) time.Duration {
+	var total time.Duration
+	for _, m := range routeResetUnitRe.FindAllStringSubmatch(s, -1) {
+		n, err := strconv.Atoi(m[1])
+		if err != nil {
+			continue
+		}
+		switch strings.ToLower(m[2]) {
+		case "d":
+			total += time.Duration(n) * 24 * time.Hour
+		case "h":
+			total += time.Duration(n) * time.Hour
+		case "m":
+			total += time.Duration(n) * time.Minute
+		case "s":
+			total += time.Duration(n) * time.Second
+		}
+	}
+	return total
+}
+
 // routeFailurePenalized 判断一次失败是否值得把该目标短暂降级。
 //
 // 关键边界：请求本身写错（400 / 405 / 413 / 422、prompt 超限）换哪家都会得到
 // 同一句拒绝，不能因此把供应商标成故障；客户端主动断开也不该记在供应商头上。
-// 401/403/402/404/408/409/425/429/5xx、网络错误、空响应则都是目标侧问题。
+// 额度耗尽例外：即使被包成 400 也是目标侧状态。401/403/402/404/408/409/425/429/
+// 5xx、网络错误、空响应则都是目标侧问题。
 func routeFailurePenalized(err error) bool {
 	if err == nil {
 		return true // 空响应
@@ -252,6 +358,11 @@ func routeFailurePenalized(err error) bool {
 		return false
 	}
 	s := strings.ToLower(err.Error())
+	// 额度耗尽有时会被上游包成 400 + invalid_request_error；它是目标侧状态，
+	// 不是请求写错，仍应进入绕行（routeQuotaFloor 会给出更长的窗口）。
+	if isQuotaText(s) {
+		return true
+	}
 	for _, marker := range []string{
 		"prompt_limit_exceeded",
 		"invalid_request_error",
@@ -281,7 +392,7 @@ func routeFailureReason(err error) string {
 	s := strings.ToLower(err.Error())
 	status := upstreamHTTPStatus(err)
 	switch {
-	case strings.Contains(s, "quota") || strings.Contains(s, "额度") || strings.Contains(s, "余额不足") || strings.Contains(s, "积分不足"):
+	case isQuotaText(s):
 		return "quota"
 	case status == 401 || status == 403 || strings.Contains(s, "unauthorized") || strings.Contains(s, "invalid api key") || strings.Contains(s, "cookie"):
 		return "auth"

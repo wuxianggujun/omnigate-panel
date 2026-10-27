@@ -459,7 +459,9 @@ function render() {
   }));
 
   if (ui.balanceError) {
-    page.appendChild(notice('warn', '余额刷新失败', ui.balanceError));
+    // 状态与余额走同一个接口：失败时不要只写「余额」，那会让「账号状态没刷新」
+    // 看起来像「余额查询失败」。
+    page.appendChild(notice('warn', '账号刷新失败', ui.balanceError));
   }
   if (ui.loadError && !list.length) {
     page.appendChild(card({
@@ -1113,8 +1115,11 @@ async function reloadAfterMutation() {
   if (accountsRes.status === 'fulfilled') {
     ui.accountsPayload = accountsRes.value?.data || accountsRes.value || null;
     ui.accountsError = '';
+    ui.balanceError = '';
   } else {
     ui.accountsError = describeError(accountsRes.reason);
+    // 刷新失败就不能把「更新于」推到当前时间：那会让旧数据看起来是刚取的。
+    ui.balanceError = ui.accountsError;
   }
   if (configRes.status === 'fulfilled' && configRes.value) {
     ui.config = configRes.value.config
@@ -1122,7 +1127,7 @@ async function reloadAfterMutation() {
     ui.configPath = configRes.value.path || ui.configPath;
   }
   ui.balanceLoading = false;
-  ui.lastUpdated = Date.now();
+  if (accountsRes.status === 'fulfilled') ui.lastUpdated = Date.now();
   render();
 }
 

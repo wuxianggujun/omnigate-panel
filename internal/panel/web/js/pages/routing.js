@@ -599,7 +599,11 @@ function mappingCard(canEdit) {
       ),
     );
   });
-  if (!rows.length) rows.push(emptyState('还没有别名映射', '把客户端常用的 gpt-4o 等名字映射到实际模型，并支持回退链。'));
+  // 别名表是独立请求：失败时上面的告警已经说明原因，这里不能再补一句
+  // 「还没有别名映射」——那是把「没读到」说成「没有」。
+  if (!rows.length && !ui.mappingError) {
+    rows.push(emptyState('还没有别名映射', '把客户端常用的 gpt-4o 等名字映射到实际模型，并支持回退链。'));
+  }
   return card({
     title: '模型别名映射',
     subtitle: '别名优先于优先级排序；目标链在失败/额度耗尽时依次回退',

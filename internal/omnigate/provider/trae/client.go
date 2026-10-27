@@ -88,6 +88,9 @@ func (e *Error) Error() string {
 	return fmt.Sprintf("TRAE 上游 %s (http %d): %s", e.Kind, e.Status, e.Msg)
 }
 
+// UpstreamStatus exposes the HTTP status to the gateway's route-failure classifier.
+func (e *Error) UpstreamStatus() int { return e.Status }
+
 // Unauthorized reports whether err is an auth failure worth a refresh+retry.
 func Unauthorized(err error) bool {
 	var e *Error

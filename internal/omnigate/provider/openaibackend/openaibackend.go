@@ -203,6 +203,20 @@ type Health struct {
 	UpdatedAt int64  `json:"updated_at,omitempty"`
 }
 
+// UpstreamError 是对上游 HTTP 失败的强类型表示：路由层据此区分「请求写错」
+// （400/422，换供应商也会被拒）和「这家上游坏了」（5xx/429，值得短期绕行）。
+type UpstreamError struct {
+	Status int
+	Body   string
+}
+
+func (e *UpstreamError) Error() string {
+	return fmt.Sprintf("upstream HTTP %d: %s", e.Status, e.Body)
+}
+
+// UpstreamStatus exposes the HTTP status to the gateway's route-failure classifier.
+func (e *UpstreamError) UpstreamStatus() int { return e.Status }
+
 // HealthStore 密钥健康状态的外部存储（可选）。实现方需保证并发安全；key 以
 // KeyID（哈希）引用，不落明文。
 type HealthStore interface {
@@ -654,7 +668,7 @@ func (p *Provider) StreamChat(ctx context.Context, acc *provider.Account, in pro
 			b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 			resp.Body.Close()
 			status := resp.StatusCode
-			lastErr = fmt.Errorf("upstream HTTP %d: %s", status, string(b))
+			lastErr = &UpstreamError{Status: status, Body: string(b)}
 			// 只有「这把 key 的问题」才换 key 重试：401/403（失效/无权限）、
 			// 429（限流）；额度耗尽类（402，或带 quota 文案的 429/403）直接长
 			// 禁用——重试换 key 有意义，原地再打只是重演同一句报错。单 key 或

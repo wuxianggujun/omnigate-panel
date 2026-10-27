@@ -4,6 +4,7 @@ import (
 	"context"
 	"math/rand"
 	"strings"
+	"time"
 
 	"github.com/wuxianggujun/omnigate-panel/internal/omnigate/openai"
 )
@@ -151,6 +152,9 @@ func (g *Gateway) tryFallback(ctx context.Context, req *openai.ChatRequest, prim
 	}
 	incognito := g.cfg.Mode == "incognito"
 	for _, c := range candidates {
+		if ctx.Err() != nil {
+			return nil
+		}
 		prov := g.providers[c.Provider]
 		if prov == nil {
 			continue
@@ -158,13 +162,24 @@ func (g *Gateway) tryFallback(ctx context.Context, req *openai.ChatRequest, prim
 		in := g.buildInput(prov, c.Model, req, incognito, hasTools)
 		res, err := g.runChat(ctx, c.Provider, prov, in, hasTools, nil, nil)
 		if err != nil {
+			if ctx.Err() == nil {
+				g.markRouteFailure(c.Provider, c.Model, err, false, time.Now())
+			}
 			g.log.Warn("兜底 %s 失败: %v", c.qualified(), err)
 			continue
 		}
 		if !resultHasOutput(res) {
+			// 上游正常收尾但正文为空（例如 max_tokens 太小）不是供应商故障：
+			// 仍然试下一个候选拿正文，但不要把这家记进绕行窗口。
+			if ctx.Err() == nil && (res == nil || !res.sawFinish) {
+				g.markRouteFailure(c.Provider, c.Model, errEmptyUpstream, false, time.Now())
+			} else {
+				g.clearRouteFailure(c.Provider, c.Model)
+			}
 			g.log.Warn("兜底 %s 返回空，试下一个", c.qualified())
 			continue
 		}
+		g.clearRouteFailure(c.Provider, c.Model)
 		// Attribute the request to the provider that actually served it.
 		// meta 可能为 nil：HandleChat 是导出的网关入口，单元测试/嵌入式调用
 		// 不一定经过 serveLogged。范围判断已由 ProviderAllowed 的 nil 接收器

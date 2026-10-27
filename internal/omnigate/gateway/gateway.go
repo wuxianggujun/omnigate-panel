@@ -124,6 +124,10 @@ type Gateway struct {
 	// cool 账号级限流冷却台账（进程内）。见 cooldown.go。
 	cool *cooldownLedger
 
+	// routeCool 路由级失败绕行台账（进程内）：主目标持续失败时，别让每个请求
+	// 都先撞一次再兜底。见 routecool.go。
+	routeCool *routeFailureLedger
+
 	// sess 会话健康台账（进程内，目前用于 runable 会话过期预警）。见 session.go。
 	sess *sessionHealth
 
@@ -294,6 +298,7 @@ func New(cfg *config.Config, st *state.State, log *logx.Logger, opts ...Option) 
 		traePend:        map[string]traePending{},
 		newapiPend:      map[string]newapiPending{},
 		cool:            newCooldownLedger(),
+		routeCool:       newRouteFailureLedger(),
 		sess:            newSessionHealth(),
 		credits:         newCreditCache(),
 	}
@@ -1374,6 +1379,12 @@ func (g *Gateway) HandleChat(ctx context.Context, req *openai.ChatRequest, w htt
 	}
 	// 模型别名引流链：主目标失败/额度耗尽时的有序回退候选（见 modelChainFallbacks）。
 	chainFB := g.modelChainFallbacksScoped(req.Model, provName, model, keyProviders)
+	// 主目标在短期绕行窗口内（例如 cline-pass 刚连续失败）时，直接把别名链上
+	// 第一个健康候选提为主目标，避免每个请求都先撞一次已知故障再兜底。链尾没有
+	// 同模型备选时不改变顺序——唯一通道仍每次尝试（见 routecool.go）。
+	if next, rest, ok := g.promoteCoolingPrimary(fallbackCandidate{Provider: provName, Model: model}, chainFB, time.Now()); ok {
+		provName, model, chainFB = next.Provider, next.Model, rest
+	}
 	prov := g.providers[provName]
 	if prov == nil {
 		writeJSON(w, 400, openai.ErrorJSON("unknown_provider", "未知 provider: "+provName))
@@ -1509,6 +1520,17 @@ func (g *Gateway) HandleChat(ctx context.Context, req *openai.ChatRequest, w htt
 			}
 		}
 		ticker.Stop()
+		// 主目标健康记账：成功（含上游正常收尾的空回复）清掉绕行；失败则记一个
+		// 短期窗口，下一次请求优先走别名链备用目标。客户端自己断开不算上游故障。
+		if err == nil && res != nil && (resultHasOutput(res) || res.sawFinish) {
+			g.clearRouteFailure(provName, model)
+		} else if ctx.Err() == nil && ew.err == nil {
+			failErr := err
+			if failErr == nil {
+				failErr = errEmptyUpstream
+			}
+			g.markRouteFailure(provName, model, failErr, true, time.Now())
+		}
 		// 失败或零正文、且还没流出任何正文 → 第三方兜底（把兜底结果转成 SSE 发出）。
 		if (err != nil || !resultHasOutput(res)) && !contentEmitted {
 			if fb := g.tryFallback(ctx, req, provName, upstreamModel, hasTools, chainFB); fb != nil {
@@ -1592,6 +1614,17 @@ func (g *Gateway) HandleChat(ctx context.Context, req *openai.ChatRequest, w htt
 	}
 
 	res, err := g.runChat(ctx, provName, prov, in, hasTools, nil, nil)
+	// 与非流式分支同一口径：失败/空响应记绕行，正常收尾（包括合法的空回复）
+	// 清掉之前的绕行状态。
+	if err == nil && res != nil && (resultHasOutput(res) || res.sawFinish) {
+		g.clearRouteFailure(provName, model)
+	} else if ctx.Err() == nil {
+		failErr := err
+		if failErr == nil {
+			failErr = errEmptyUpstream
+		}
+		g.markRouteFailure(provName, model, failErr, true, time.Now())
+	}
 	// 失败或空回复 → 第三方兜底（与参考实现 is_empty_result / 异常路径同口径）。
 	if err != nil || !resultHasOutput(res) {
 		if fb := g.tryFallback(ctx, req, provName, upstreamModel, hasTools, chainFB); fb != nil {
@@ -2225,7 +2258,17 @@ func (g *Gateway) openStream(ctx context.Context, provName string, prov provider
 					acc.Label, until.Format("15:04:05"), strikes)
 				continue
 			}
-			// 其它错误换号也大概率一样，直接返回。
+			if ctx.Err() != nil {
+				return nil, err
+			}
+			if accountRetryable(err) {
+				// 凭据失效 / 5xx / 网络错误：换号有意义。以前这里直接返回，会让
+				// ActiveIndex 永远停在同一个坏账号上——每次请求都先撞它一次，
+				// 后面的账号永远轮不到。
+				g.log.Warn("账号「%s」失败，尝试下一个: %v", acc.Label, err)
+				continue
+			}
+			// 请求本身不合法（400 / prompt 超限等）：换号只会得到同一句拒绝。
 			return nil, err
 		}
 	}
@@ -2536,12 +2579,13 @@ func (g *Gateway) Info(ctx context.Context) map[string]any {
 		}
 	}
 	return map[string]any{
-		"status":    "ok",
-		"service":   "omnigate",
-		"mode":      g.cfg.Mode,
-		"providers": providers,
-		"cooldowns": g.cool.Snapshot(),
-		"sessions":  g.sess.Snapshot(),
+		"status":          "ok",
+		"service":         "omnigate",
+		"mode":            g.cfg.Mode,
+		"providers":       providers,
+		"cooldowns":       g.cool.Snapshot(),
+		"route_cooldowns": g.routeCool.Snapshot(now),
+		"sessions":        g.sess.Snapshot(),
 	}
 }
 

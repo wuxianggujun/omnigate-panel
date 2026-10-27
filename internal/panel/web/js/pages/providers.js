@@ -1312,7 +1312,7 @@ function keysTab(provider, meta, current) {
       body: table.el,
     }));
   } else if (keyFields.length) {
-    wrap.appendChild(notice('muted', '暂无密钥健康数据', '只有配置了上游密钥池（api_keys / zen_keys / go_keys）的供应商会进入自动禁用与清理。'));
+    wrap.appendChild(notice('muted', '暂无密钥健康数据', '只有配置了上游密钥池（api_keys / zen_keys / go_keys）的供应商会进入自动禁用与清理。单密钥供应商不参与池内禁用；它失败时会由别名链在短时间内绕行，冷却到期后自动重试。'));
   }
 
   // 同上：额度卡片只看描述符是否声明了 quota，不再认类型名。

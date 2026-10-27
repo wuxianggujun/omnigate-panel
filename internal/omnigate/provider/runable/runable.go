@@ -104,6 +104,9 @@ func (e *UpstreamError) Error() string {
 	return fmt.Sprintf("upstream HTTP %d: %s", e.Status, e.Body)
 }
 
+// UpstreamStatus exposes the HTTP status to the gateway's route-failure classifier.
+func (e *UpstreamError) UpstreamStatus() int { return e.Status }
+
 // OutOfCredits reports whether err looks like an exhausted-credit failure.
 func OutOfCredits(err error) bool {
 	if err == nil {

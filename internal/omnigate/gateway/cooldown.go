@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"sort"
@@ -180,4 +181,45 @@ func truncateReason(s string) string {
 		return s[:max]
 	}
 	return s
+}
+
+// accountRetryable 判断一次账号失败是否值得换下一个账号再试。
+//
+// 账号池此前只对「限流」和「积分耗尽」换号，其它错误直接返回——这会让
+// ActiveIndex 永远停在同一个失败账号上：它先失败、请求返回、索引不前进，下一次
+// 又从它开始。401/403（凭据失效）、5xx、网络错误都是账号相关的，必须继续轮换；
+// 400/405/413/422 / prompt 超限是请求本身的问题，换号只会把同一句拒绝重演一遍，
+// 直接返回。
+func accountRetryable(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) {
+		return false
+	}
+	var tooLong *promptTooLongErr
+	if errors.As(err, &tooLong) {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	for _, marker := range []string{
+		"http 400", "status 400", "bad request",
+		"http 405", "status 405",
+		"http 413", "status 413",
+		"http 422", "status 422",
+		"invalid_request_error", "invalid request",
+		"prompt_limit_exceeded", "messages_required",
+	} {
+		if strings.Contains(s, marker) {
+			return false
+		}
+	}
+	if status := upstreamHTTPStatus(err); status != 0 {
+		switch status {
+		case http.StatusBadRequest, http.StatusMethodNotAllowed,
+			http.StatusRequestEntityTooLarge, http.StatusUnprocessableEntity:
+			return false
+		}
+	}
+	return true
 }

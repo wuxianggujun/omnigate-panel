@@ -57,6 +57,9 @@ func (e *UpstreamError) Error() string {
 	return e.Message
 }
 
+// UpstreamStatus exposes the HTTP status to the gateway's route-failure classifier.
+func (e *UpstreamError) UpstreamStatus() int { return e.Status }
+
 // Unauthorized reports whether the error is an auth failure (401 / expired).
 func Unauthorized(err error) bool {
 	var ue *UpstreamError

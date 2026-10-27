@@ -390,9 +390,23 @@ function unusedDefaultInfo() {
   const keys = keyList().filter((key) => (key.providers || []).length);
   if (!keys.length) return null; // 全是全量密钥：默认供应商对谁都可达
   if (keys.some((key) => (key.providers || []).includes(defaultProvider))) return null;
+  // 直接点名「所有受限密钥都能访问谁」：这才是操作者要的答案。没有交集时也要
+  // 说明，免得给出一个空建议。
+  const reachable = reachableDefaultCandidates(keys);
+  const advice = reachable.length
+    ? `所有受限密钥都能访问的供应商：${reachable.join('、')}。`
+    : '这些受限密钥没有共同可访问的供应商，需要先放宽授权范围。';
   return `默认供应商 ${defaultProvider} 不在任何受限密钥的授权范围内（共 ${keys.length} 把受限密钥），`
     + `请求会被路由到各密钥自己范围内的第一个供应商，这里的「默认兜底」对它们不生效。`
-    + `要么在「用户 / 访问范围」里给对应密钥加上 ${defaultProvider}，要么换一个所有密钥都能访问的默认供应商。`;
+    + `要么在「用户 / 访问范围」里给对应密钥加上 ${defaultProvider}，要么换一个所有密钥都能访问的默认供应商——`
+    + advice;
+}
+
+// reachableDefaultCandidates 返回所有受限密钥都授权的供应商（仍存在于配置里的）。
+function reachableDefaultCandidates(keys) {
+  const known = new Set(providerList().map((p) => p.name));
+  return (keys[0]?.providers || [])
+    .filter((name) => known.has(name) && keys.every((key) => (key.providers || []).includes(name)));
 }
 
 function defaultsCard(canEdit) {

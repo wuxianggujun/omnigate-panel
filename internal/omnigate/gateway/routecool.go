@@ -217,8 +217,9 @@ func (g *Gateway) markRouteFailure(provider, model string, err error, announce b
 	reason := routeFailureReason(err)
 	until, strikes := g.routeCool.Fail(provider, model, reason, now)
 	if announce && g.log != nil {
-		g.log.Warn("路由目标 %s/%s 暂不可用（%s，连续 %d 次），%s 内优先走备用目标",
-			provider, model, reason, strikes, time.Until(until).Round(time.Second))
+		// 不承诺「一定改走备用」：没有别名备用目标时该请求仍会重试它。
+		g.log.Warn("路由目标 %s/%s 暂不可用（%s，连续 %d 次），%s 内记入失败窗口；有健康备用目标时优先走备用",
+			provider, model, reason, strikes, until.Sub(now).Round(time.Second))
 	}
 }
 

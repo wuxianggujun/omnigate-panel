@@ -406,11 +406,8 @@ function render() {
   page.appendChild(cardsHost);
 
   page.appendChild(el('div', { class: 'page-footer-note' },
-    // 加载中不报条数：0 条是结论，「还没读完」不是。表格区已有加载动画，
-    // 这里直接省略那条，不再叠一行「正在读取」。
-    (ui.loading && !ui.entries.length)
-      ? null
-      : el('span', { text: `共 ${fmtInt(ui.entries.length)} 条可见记录` }),
+    // 条数在工具栏已经写过（「当前列表 N 条」）。页脚不再重复同一个数字：这里
+    // 只说更新时间和分页上限，避免同一件事在上下两端各写一遍。
     ui.lastLoaded ? el('span', { text: `更新于 ${fmtTime(ui.lastLoaded)}` }) : null,
     el('span', { text: '列表最多 1000 条/次，完整日用量见「用量」页；点击记录可查看终端与缓存明细。' }),
   ));

@@ -227,7 +227,12 @@ function applyFilters() {
     if (ui.sort === 'credits') return Number(b.credits || 0) - Number(a.credits || 0);
     return String(a.id || '').localeCompare(String(b.id || ''));
   });
-  if (countNode) countNode.textContent = `${fmtNum(rows.length, 0)} / ${fmtNum(ui.models.length, 0)} 个模型`;
+  if (countNode) {
+    // 没有筛选时不写「24 / 24」：KPI 已经报了模型总数，这里只回答「筛掉了多少」。
+    countNode.textContent = (ui.loaded && rows.length !== ui.models.length)
+      ? `${fmtNum(rows.length, 0)} / ${fmtNum(ui.models.length, 0)} 个模型`
+      : '';
+  }
   const table = createTable({
     columns: [
       {

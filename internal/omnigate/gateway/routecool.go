@@ -284,8 +284,14 @@ var errEmptyUpstream = errors.New("upstream returned no usable output")
 // cline-pass 的 429 是 INFERENCE_CAP_ERROR + weekly limit，正文里没有 quota 字样；
 // 只看 "rate limit" 会把它当 30 秒抖动，结果每 5 分钟又去撞一次已经耗尽的周额度。
 func isQuotaText(s string) bool {
+	if strings.Contains(s, "inference_cap") {
+		return true
+	}
+	if strings.Contains(s, "weekly") &&
+		(strings.Contains(s, "limit") || strings.Contains(s, "cap") || strings.Contains(s, "quota")) {
+		return true
+	}
 	for _, marker := range []string{
-		"inference_cap", "weekly",
 		"quota", "credit",
 		"额度", "余额不足", "积分不足",
 	} {

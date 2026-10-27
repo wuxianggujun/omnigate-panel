@@ -132,6 +132,12 @@ func TestRouteQuotaFloor(t *testing.T) {
 			0,
 			false,
 		},
+		{
+			"weekly maintenance is not quota",
+			errors.New(`upstream HTTP 503: weekly maintenance`),
+			0,
+			false,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

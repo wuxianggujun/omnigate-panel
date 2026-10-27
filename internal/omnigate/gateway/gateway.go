@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -56,6 +57,10 @@ type Gateway struct {
 	// modelRefreshing 标记「已有缓存但正在后台刷新」的供应商，避免过期缓存被
 	// 每个并发请求各自触发一次上游拉取（见 models 的 stale-while-revalidate）。
 	modelRefreshing map[string]bool
+	// modelProblems 记录最近一次目录拉取失败（provider → 错误 + 时间）。没有缓存
+	// 的供应商一旦上游不可用，每次目录请求都会等它超时，所以 30 秒内不再重试；
+	// 面板也据此说明「这家目录没读到」，而不是让它的模型无声消失。
+	modelProblems map[string]modelProblem
 	// modelRefreshWG 让测试能等后台刷新落定；生产路径不等待。
 	modelRefreshWG sync.WaitGroup
 
@@ -283,6 +288,7 @@ func New(cfg *config.Config, st *state.State, log *logx.Logger, opts ...Option) 
 		accounts:        map[string][]*provider.Account{},
 		modelCache:      map[string]modelEntry{},
 		modelRefreshing: map[string]bool{},
+		modelProblems:   map[string]modelProblem{},
 		convs:           map[string]*conv{},
 		pending:         map[string]raccoonPending{},
 		traePend:        map[string]traePending{},
@@ -515,6 +521,9 @@ func (g *Gateway) Accounts(name string) []*provider.Account {
 // 否则重启后第一次打开模型页（进程内缓存 at 为零值 = 全部过期）要等各家上游的
 // 延迟——线上实测 5 家串行 38 秒、并发后仍要等最慢的一家 60 秒，面板一直转圈。
 // 没有缓存时才同步拉取：那种情况没有别的东西可展示。
+//
+// 完全没有缓存且刚刚拉取失败过时，30 秒内直接返回错误（modelFailTTL），不再去
+// 等同一个上游超时——否则一家挂掉的供应商会让每次目录请求都卡一轮。
 func (g *Gateway) models(ctx context.Context, name string) ([]openai.Model, error) {
 	g.modelMu.Lock()
 	e, cached := g.modelCache[name]
@@ -540,6 +549,13 @@ func (g *Gateway) models(ctx context.Context, name string) ([]openai.Model, erro
 			go g.refreshModelsAsync(name)
 		}
 		return e.models, nil
+	}
+	// 没有缓存：先看短期负缓存。上游刚失败过就别再打过去等一次超时——那会让
+	// 每次 /v1/models 与面板模型页都卡住。
+	if p, bad := g.modelProblems[name]; bad && time.Since(p.at) < modelFailTTL {
+		g.modelMu.Unlock()
+		return nil, fmt.Errorf("%s 的模型目录暂时不可用（%s 前拉取失败：%s）",
+			name, time.Since(p.at).Truncate(time.Second), p.err)
 	}
 	g.modelMu.Unlock()
 
@@ -613,18 +629,91 @@ func (g *Gateway) fetchModels(ctx context.Context, name string) ([]openai.Model,
 		models, err = prov.ListModels(ctx)
 	}
 	if err != nil {
+		// 记一笔失败：没有缓存时，一家上游挂掉会让每次目录请求都去等它超时
+		// （实测 60 秒），/v1/models 与面板模型页会跟着一起卡住。短期负缓存挡住
+		// 这类重试；请求方自己取消（客户端断开）不算上游失败，不该被记住。
+		if ctx.Err() == nil {
+			g.noteModelFailure(name, err)
+		}
 		return models, err
 	}
 	// 空目录不落缓存、不落库：见 models 的注释。这里提前拦住，避免「短暂失败 → 空
 	// 目录」把上一次的完好目录从进程缓存与落库快照里一起抹掉。
 	if len(models) == 0 {
+		g.noteModelFailure(name, fmt.Errorf("上游返回空目录"))
 		return nil, fmt.Errorf("%s 的上游模型目录为空", name)
 	}
 	g.modelMu.Lock()
 	g.modelCache[name] = modelEntry{models: models, at: time.Now()}
+	delete(g.modelProblems, name)
 	g.modelMu.Unlock()
 	g.saveModelCache()
 	return models, nil
+}
+
+// modelFailTTL 是「拉取失败」的冷却时长：这段时间内不再重复打同一个上游。
+const modelFailTTL = 30 * time.Second
+
+// modelProblem 是一次失败的目录拉取记录。
+type modelProblem struct {
+	err string
+	at  time.Time
+}
+
+// ModelIssue 是面板展示用的目录问题：某家供应商的模型目录最近一次没读到。
+// Cached=true 表示仍能沿用上一次成功的目录（模型不会缺失，但价格/新模型可能过期）。
+type ModelIssue struct {
+	Provider string `json:"provider"`
+	Error    string `json:"error"`
+	At       int64  `json:"at"`
+	Cached   bool   `json:"cached"`
+}
+
+// noteModelFailure 记录一次目录拉取失败，供 models() 的负缓存与面板的问题提示使用。
+func (g *Gateway) noteModelFailure(name string, err error) {
+	if err == nil {
+		return
+	}
+	g.modelMu.Lock()
+	defer g.modelMu.Unlock()
+	if g.modelProblems == nil {
+		g.modelProblems = map[string]modelProblem{}
+	}
+	g.modelProblems[name] = modelProblem{err: truncateRunes(err.Error(), 200), at: time.Now()}
+}
+
+// truncateRunes 截断过长的上游错误原文：面板会把 err 直接展示给操作者。
+func truncateRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
+}
+
+// ModelIssues 返回「最近一次目录拉取失败」的供应商，供面板解释模型缺失或陈旧。
+// 返回空切片表示没有已知问题；nil 与空在这里等价，前端只在长度 > 0 时提示。
+func (g *Gateway) ModelIssues() []ModelIssue {
+	g.modelMu.Lock()
+	defer g.modelMu.Unlock()
+	if len(g.modelProblems) == 0 {
+		return nil
+	}
+	out := make([]ModelIssue, 0, len(g.modelProblems))
+	for name, p := range g.modelProblems {
+		if _, ok := g.providers[name]; !ok {
+			continue
+		}
+		e, ok := g.modelCache[name]
+		out = append(out, ModelIssue{
+			Provider: name,
+			Error:    p.err,
+			At:       p.at.Unix(),
+			Cached:   ok && len(e.models) > 0,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Provider < out[j].Provider })
+	return out
 }
 
 // modelCacheFile 是模型目录落盘的格式：provider 名 -> 最近一次成功结果。

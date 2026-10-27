@@ -263,3 +263,103 @@ func TestModelCachePersistsAcrossRestart(t *testing.T) {
 		t.Fatalf("got = %+v, want persisted priced model", got)
 	}
 }
+
+// countingFailLister 记录被调用次数，用来验证「失败后不再反复打上游」。
+type countingFailLister struct {
+	calls int
+}
+
+func (p *countingFailLister) Name() string { return "raccoon" }
+func (p *countingFailLister) Type() string { return "raccoon" }
+
+func (p *countingFailLister) ListModels(context.Context) ([]openai.Model, error) {
+	p.calls++
+	return nil, errors.New("upstream 503")
+}
+
+func (p *countingFailLister) StreamChat(context.Context, *provider.Account, provider.ChatInput) (provider.Stream, error) {
+	return nil, errors.New("not used")
+}
+
+// 目录拉取失败后短期不再重试：一家挂掉的上游会让「没有缓存」的供应商每次目录
+// 请求都去等它超时（实测 60 秒），/v1/models 与面板模型页跟着一起卡住。
+// 手动刷新是指挥性操作，必须绕过这层冷却。
+func TestModelsFailureBackoff(t *testing.T) {
+	prov := &countingFailLister{}
+	g := testGateway(prov)
+
+	if _, err := g.models(context.Background(), "raccoon"); err == nil {
+		t.Fatal("首次拉取失败必须返回错误，不能当成空目录")
+	}
+	if prov.calls != 1 {
+		t.Fatalf("calls = %d, want 1", prov.calls)
+	}
+
+	start := time.Now()
+	if _, err := g.models(context.Background(), "raccoon"); err == nil {
+		t.Fatal("负缓存期内仍应返回错误")
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("负缓存期内不该阻塞，实际 %v", elapsed)
+	}
+	if prov.calls != 1 {
+		t.Fatalf("负缓存期内不该再打上游，实际 %d 次", prov.calls)
+	}
+
+	// 手动刷新绕过冷却；失败时依然返回错误（不伪装成功）。
+	if _, err := g.RefreshModels(context.Background(), "raccoon"); err == nil {
+		t.Fatal("手动刷新失败也应返回错误")
+	}
+	if prov.calls != 2 {
+		t.Fatalf("手动刷新应绕过负缓存，实际 calls = %d", prov.calls)
+	}
+}
+
+// 失败要能被面板看见：ModelIssues 说明「哪家没读到、还剩下多少缓存」。
+// 成功后必须清掉，否则模型页会一直挂着一句过期告警。
+func TestModelIssuesTracksFailureAndRecovery(t *testing.T) {
+	prov := &emptyThenGoodLister{}
+	g := testGateway(prov)
+
+	if issues := g.ModelIssues(); len(issues) != 0 {
+		t.Fatalf("初始不该有问题: %+v", issues)
+	}
+
+	// 首次成功 → 有缓存。
+	if _, err := g.models(context.Background(), "raccoon"); err != nil {
+		t.Fatalf("first: %v", err)
+	}
+	// 上游开始返回空目录，且缓存已过期：后台刷新会失败，但旧目录仍在。
+	g.modelMu.Lock()
+	g.modelCache["raccoon"] = modelEntry{
+		models: []openai.Model{{ID: "m1", Object: "model"}},
+		at:     time.Now().Add(-modelCacheTTL - time.Minute),
+	}
+	g.modelMu.Unlock()
+	prov.empty = true
+
+	if _, err := g.models(context.Background(), "raccoon"); err != nil {
+		t.Fatalf("有过期缓存时应返回旧目录: %v", err)
+	}
+	g.modelRefreshWG.Wait()
+
+	issues := g.ModelIssues()
+	if len(issues) != 1 || issues[0].Provider != "raccoon" {
+		t.Fatalf("issues = %+v, want raccoon", issues)
+	}
+	if !issues[0].Cached {
+		t.Fatalf("仍能沿用旧目录时必须标记 cached: %+v", issues[0])
+	}
+	if issues[0].Error == "" {
+		t.Fatal("issues 必须带失败原因")
+	}
+
+	// 上游恢复 → 下一次刷新成功后问题消失。
+	prov.empty = false
+	if _, err := g.RefreshModels(context.Background(), "raccoon"); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	if issues := g.ModelIssues(); len(issues) != 0 {
+		t.Fatalf("恢复后不该再报问题: %+v", issues)
+	}
+}

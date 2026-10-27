@@ -26,9 +26,15 @@ func (p *Panel) omniModels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 与 /omni/v1/models 同形：{object:"list", data:[...]}；前端只读 data。
-	writeJSON(w, http.StatusOK, map[string]any{
+	payload := map[string]any{
 		"ok":     true,
 		"object": "list",
 		"data":   models,
-	})
+	}
+	// issues 说明「哪家目录这次没读到」。模型变少时不能让它们无声消失：有缓存的
+	// 是「沿用上次成功目录」，没缓存的是「这家暂时看不到」。未装配回调时省略。
+	if p.cfg.OmniModelIssues != nil {
+		payload["issues"] = p.cfg.OmniModelIssues()
+	}
+	writeJSON(w, http.StatusOK, payload)
 }

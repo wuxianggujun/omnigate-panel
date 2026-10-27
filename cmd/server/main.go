@@ -263,6 +263,7 @@ func main() {
 			return omni.CheckinAll(ctx)
 		}
 		pcfg.OmniModels = omni.Models
+		pcfg.OmniModelIssues = omni.ModelIssues
 		pcfg.OmniProbeModels = omni.ProbeModels
 		pcfg.OmniRefreshModels = omni.RefreshModels
 		pcfg.OmniQuota = func(provider string) (any, error) {

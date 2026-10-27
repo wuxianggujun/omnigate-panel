@@ -48,6 +48,9 @@ function initialState() {
     // modelsLoaded 区分「目录还没回来」与「目录真的为空」。聚合目录要访问各家
     // 上游，冷启动时比配置慢；没有这个标记，模型页会先说该供应商没有模型目录。
     modelsLoaded: false,
+    // modelIssues 是网关报告的「哪家目录这次没读到」（含是否仍有缓存）。模型变少
+    // 时不能让它们无声消失。
+    modelIssues: [],
     // mappings 用于判断「改默认供应商到底有没有用」：命中别名的模型一律走别名
     // 目标链，默认供应商对它们完全无效。拿不到时按空表处理，只是少一条提示。
     mappings: {},
@@ -143,10 +146,12 @@ async function loadAll({ initial = false } = {}) {
   if (modelsRes.status === 'fulfilled') {
     const payload = modelsRes.value || {};
     ui.models = Array.isArray(payload.data) ? payload.data : (Array.isArray(payload) ? payload : []);
+    ui.modelIssues = Array.isArray(payload.issues) ? payload.issues : [];
     ui.modelsError = '';
     ui.modelsLoaded = true;
   } else {
     ui.models = [];
+    ui.modelIssues = [];
     ui.modelsError = describeError(modelsRes.reason);
     ui.modelsLoaded = false;
   }
@@ -1141,6 +1146,7 @@ async function refreshProviderModels(providerName) {
     const modelsRes = await api.models.get({ signal: pageSignal?.signal });
     const p = modelsRes || {};
     ui.models = Array.isArray(p.data) ? p.data : (Array.isArray(p) ? p : []);
+    ui.modelIssues = Array.isArray(p.issues) ? p.issues : [];
     ui.modelsError = '';
     ui.modelsLoaded = true;
   } catch (error) {
@@ -1388,6 +1394,12 @@ function modelsTab(provider, models, current) {
   // 目录还没回来时不能断言「该供应商没有模型」：聚合目录要访问各家上游，冷启动
   // 时明显晚于配置到达。
   const pending = !ui.modelsLoaded && !models.length;
+  // 网关报告这家目录这次没读到、又没有缓存：模型会整体缺失，空态必须说清原因。
+  const issue = (ui.modelIssues || []).find((i) => i.provider === provider.name) || null;
+  const missingCatalog = !!(issue && !issue.cached && !models.length);
+  if (missingCatalog) {
+    wrap.appendChild(notice('warn', '上游模型目录这次没读到', issue.error || '拉取失败；当前没有可展示的缓存目录。'));
+  }
   const table = createTable({
     columns: [
       {
@@ -1409,14 +1421,18 @@ function modelsTab(provider, models, current) {
       },
     ],
     rows: models,
-    empty: pending ? '正在读取模型目录…' : '该供应商还没有模型目录；可在「高级」配置 models 或刷新模型列表。',
+    empty: pending
+      ? '正在读取模型目录…'
+      : (missingCatalog
+        ? '上游目录这次没读到；可点「刷新上游目录」重试'
+        : '该供应商还没有模型目录；可在「高级」配置 models 或刷新模型列表。'),
   });
   const refreshing = ui.modelRefresh[provider.name];
   wrap.appendChild(el('div', { class: 'section-toolbar' },
     el('div', { class: 'toolbar-title' },
       el('h3', { text: '模型目录' }),
       // 同样不为「还没读到」报数：0 个是结论。
-      el('span', { class: 'muted small', text: pending ? '' : `${models.length} 个模型；id 形如 供应商/上游模型 ID` }),
+      el('span', { class: 'muted small', text: pending || missingCatalog ? '' : `${models.length} 个模型；id 形如 供应商/上游模型 ID` }),
     ),
     el('div', { class: 'toolbar-actions' },
       (isAdmin() && canWrite())

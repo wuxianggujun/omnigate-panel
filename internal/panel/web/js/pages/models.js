@@ -23,6 +23,7 @@ function initialState() {
     loaded: false,
     error: '',
     models: [],
+    issues: [],
     types: BUILTIN_PROVIDER_TYPES,
     query: '',
     provider: '',
@@ -64,9 +65,11 @@ async function load() {
   if (modelsRes.status === 'fulfilled') {
     const payload = modelsRes.value || {};
     ui.models = Array.isArray(payload.data) ? payload.data : (Array.isArray(payload) ? payload : []);
+    ui.issues = Array.isArray(payload.issues) ? payload.issues : [];
   } else {
     ui.error = describeError(modelsRes.reason);
     ui.models = [];
+    ui.issues = [];
   }
   ui.types = typesRes.status === 'fulfilled'
     ? (normalizeProviderTypes(typesRes.value) || BUILTIN_PROVIDER_TYPES)
@@ -105,6 +108,21 @@ function renderShell() {
       icon('alert', 16),
       el('div', { class: 'notice-content' }, el('strong', { text: '模型目录加载失败' }), el('span', { text: ui.error })),
       el('button', { class: 'btn btn-ghost btn-sm', type: 'button', on: { click: () => load() } }, '重试'),
+    ));
+  }
+  // 某家上游目录这次没读到：模型会变少，必须说明「少了谁、是暂缺还是沿用缓存」，
+  // 否则用户只会看到一个悄悄缩水的目录。
+  const missingProviders = ui.issues.filter((i) => !i.cached).map((i) => i.provider).filter(Boolean);
+  const staleProviders = ui.issues.filter((i) => i.cached).map((i) => i.provider).filter(Boolean);
+  if (missingProviders.length || staleProviders.length) {
+    const bits = [];
+    if (missingProviders.length) bits.push(`${missingProviders.join('、')} 的目录这次没读到，这些供应商的模型暂缺`);
+    if (staleProviders.length) bits.push(`${staleProviders.join('、')} 正在沿用上次成功的目录（新模型与价格可能滞后）`);
+    page.appendChild(el('div', { class: `notice ${missingProviders.length ? 'notice-warn' : 'notice-info'}` },
+      icon('alert', 16),
+      el('div', { class: 'notice-content' },
+        el('strong', { text: '部分供应商目录未刷新' }),
+        el('span', { text: `${bits.join('；')}。` })),
     ));
   }
 

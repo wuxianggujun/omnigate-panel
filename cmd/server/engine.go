@@ -240,6 +240,16 @@ func (m *omniManager) Models(ctx context.Context) (any, error) {
 	return rt.gw.ListModels(ctx), nil
 }
 
+// ModelIssues 返回最近一次模型目录拉取失败的供应商（含是否仍有缓存）。
+// 面板模型页用它解释「目录里为什么少了这家」；网关日志里另有失败原文。
+func (m *omniManager) ModelIssues() any {
+	rt := m.cur.Load()
+	if rt == nil {
+		return []any{}
+	}
+	return rt.gw.ModelIssues()
+}
+
 // Quota 查询某供应商的额度（面板供应商行的「额度」按钮）。分派交给网关的
 // ProviderOps：只有声明了 quota 动作的类型（当前为 opencode）才会执行，面板侧
 // 不再感知 provider 类型。进程内直取当前运行时——出站代理路由与热重载后的密钥池

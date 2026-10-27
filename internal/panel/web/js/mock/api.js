@@ -798,7 +798,10 @@ async function handleApi(url, init) {
       seen.add(alias);
     }
     const filtered = whitelist.length ? data.filter((m) => whitelist.includes(m.id)) : data;
-    return json({ ok: true, object: 'list', data: filtered });
+    // mock_issues=1 时把「没读到目录」的供应商模型真的去掉，模拟线上少几家的样子。
+    const drop = new Set(state.missingCatalog || []);
+    const visible = drop.size ? filtered.filter((m) => !drop.has(m.owned_by)) : filtered;
+    return json({ ok: true, object: 'list', data: visible, issues: state.modelIssues || [] });
   }
 
   // ---- 模型映射 ----
@@ -926,6 +929,16 @@ export function installMock() {
         || (roleParam === 'user' ? state.users.find((u) => u.username === 'alice') : null);
       if (found) setStoredUsername(found.username);
     }
+  }
+
+  // mock_issues=1：模拟「某家上游目录这次没读到」。模型页必须说明少了谁、是暂缺
+  // 还是沿用缓存，而不是让目录静默缩水。
+  if (params.get('mock_issues')) {
+    state.modelIssues = [
+      { provider: 'deepseek', error: 'upstream HTTP 503: service unavailable', at: Math.floor((Date.now() - 180000) / 1000), cached: false },
+      { provider: 'opencode', error: 'upstream HTTP 504: gateway timeout', at: Math.floor((Date.now() - 480000) / 1000), cached: true },
+    ];
+    state.missingCatalog = ['deepseek'];
   }
 
   originalFetch = window.fetch.bind(window);

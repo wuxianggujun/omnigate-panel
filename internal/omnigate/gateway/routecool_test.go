@@ -115,6 +115,24 @@ func TestRouteQuotaFloor(t *testing.T) {
 			true,
 		},
 		{
+			"all keys disabled absolute retry",
+			errors.New(`上游 2 把密钥均因额度耗尽被自动禁用（最早 10-27 20:26 自动重试）`),
+			8*time.Hour + 27*time.Minute,
+			true,
+		},
+		{
+			"stale absolute retry falls back",
+			errors.New(`上游 2 把密钥均因额度耗尽被自动禁用（最早 01-01 00:00 自动重试）`),
+			routeCoolQuotaDefault,
+			true,
+		},
+		{
+			"far future absolute retry falls back",
+			errors.New(`上游 2 把密钥均因额度耗尽被自动禁用（最早 12-31 23:59 自动重试）`),
+			routeCoolQuotaDefault,
+			true,
+		},
+		{
 			"long reset is capped",
 			errors.New(`upstream HTTP 429: weekly limit resets in 2d`),
 			routeCoolQuotaMax,
@@ -152,20 +170,90 @@ func TestRouteQuotaFloor(t *testing.T) {
 	}
 }
 
+func TestRouteQuotaFloorYearRollover(t *testing.T) {
+	now := time.Date(2026, 12, 31, 23, 50, 0, 0, time.UTC)
+	err := errors.New(`上游 2 把密钥均因额度耗尽被自动禁用（最早 01-01 00:10 自动重试）`)
+	until, ok := routeQuotaFloor(err, now)
+	if !ok {
+		t.Fatal("跨年禁用时间应识别为额度窗口")
+	}
+	// 00:10 是下一年 1 月 1 日：20 分钟 + 1 分钟余量。
+	if got, want := until.Sub(now), 21*time.Minute; got != want {
+		t.Fatalf("跨年窗口 = %v, want %v", got, want)
+	}
+}
+
 func TestMarkRouteFailureUsesQuotaReset(t *testing.T) {
 	g := &Gateway{routeCool: newRouteFailureLedger()}
 	now := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
 	err := errors.New(`upstream HTTP 429: {"error":{"code":"INFERENCE_CAP_ERROR","message":"You have reached your weekly Clinepass limit. The limit resets in 2h 12m."}}`)
 	g.markRouteFailure("cline-pass", "m", err, false, now)
 	snap := g.routeCool.Snapshot(now)
-	if len(snap) != 1 {
-		t.Fatalf("route_cooldowns 条数 = %d, want 1", len(snap))
+	// 一条模型级、一条供应商级：额度通常跨模型生效，同供应商其它模型也不该
+	// 每个都先撞一次。
+	if len(snap) != 2 {
+		t.Fatalf("route_cooldowns 条数 = %d, want 2（模型级 + 供应商级）", len(snap))
 	}
-	if snap[0].Reason != "quota" {
-		t.Fatalf("reason = %q, want quota", snap[0].Reason)
+	var modelEntry, providerEntry *RouteCooldownEntry
+	for i := range snap {
+		switch snap[i].Scope {
+		case "provider":
+			providerEntry = &snap[i]
+		case "model":
+			modelEntry = &snap[i]
+		}
 	}
-	if got, want := snap[0].Until.Sub(now), 2*time.Hour+13*time.Minute; got != want {
-		t.Fatalf("周额度窗口 = %v, want %v", got, want)
+	if modelEntry == nil || providerEntry == nil {
+		t.Fatalf("缺少模型级或供应商级记录：%+v", snap)
+	}
+	if providerEntry.Model != routeCoolProviderModel {
+		t.Fatalf("供应商级记录的 model = %q, want %q", providerEntry.Model, routeCoolProviderModel)
+	}
+	for _, entry := range []*RouteCooldownEntry{modelEntry, providerEntry} {
+		if entry.Reason != "quota" {
+			t.Fatalf("%s reason = %q, want quota", entry.Scope, entry.Reason)
+		}
+		if got, want := entry.Until.Sub(now), 2*time.Hour+13*time.Minute; got != want {
+			t.Fatalf("%s 周额度窗口 = %v, want %v", entry.Scope, got, want)
+		}
+	}
+}
+
+// 额度窗口是供应商级的：一个模型撞到周额度上限后，同供应商的其它模型在有备用
+// 目标时也应直接绕行；普通 5xx 仍只影响具体模型，避免误伤同供应商的健康模型。
+func TestProviderWideQuotaCoolsSiblingModels(t *testing.T) {
+	g := &Gateway{routeCool: newRouteFailureLedger()}
+	now := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
+	quota := errors.New(`upstream HTTP 429: INFERENCE_CAP_ERROR: weekly limit resets in 2h 12m`)
+	g.markRouteFailure("cline-pass", "model-a", quota, false, now)
+
+	if g.routeCool.Cooling("cline-pass", "model-b", now) {
+		t.Fatal("模型级窗口不应直接命中同供应商另一个模型")
+	}
+	if !g.routeCool.CoolingAny("cline-pass", "model-b", now) {
+		t.Fatal("供应商级额度窗口应覆盖同供应商其它模型")
+	}
+	primary := fallbackCandidate{Provider: "cline-pass", Model: "model-b"}
+	chain := []fallbackCandidate{{Provider: "yijia", Model: "model-b"}}
+	next, rest, ok := g.promoteCoolingPrimary(primary, chain, now)
+	if !ok || next != chain[0] {
+		t.Fatalf("同供应商其它模型也应提升备用目标，得到 %+v ok=%v", next, ok)
+	}
+	if len(rest) != 1 || rest[0] != primary {
+		t.Fatalf("回退链应保留原目标作探针，得到 %+v", rest)
+	}
+
+	// 任一模型成功恢复即可清掉供应商级窗口；模型级记录各自按成功清除。
+	g.clearRouteFailure("cline-pass", "model-b")
+	if g.routeCool.CoolingAny("cline-pass", "model-b", now) {
+		t.Fatal("成功请求后供应商级额度窗口应被清除")
+	}
+
+	// 普通 5xx 只记具体模型，不能把同供应商其它模型一起绕开。
+	other := &Gateway{routeCool: newRouteFailureLedger()}
+	other.markRouteFailure("cline-pass", "model-a", errors.New("upstream HTTP 500: overloaded"), false, now)
+	if other.routeCool.CoolingAny("cline-pass", "model-b", now) {
+		t.Fatal("普通 5xx 不应生成供应商级窗口")
 	}
 }
 

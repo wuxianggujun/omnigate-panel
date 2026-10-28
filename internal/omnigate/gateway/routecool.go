@@ -37,11 +37,19 @@ const (
 	// 避免每 5 分钟往一个已知没额度的目标上白打一次。
 	routeCoolQuotaMax     = 24 * time.Hour
 	routeCoolQuotaDefault = 30 * time.Minute
+	// routeCoolProviderModel 是供应商级额度窗口在台账里的模型占位符。额度通常是
+	// 账号/密钥级而不是单个模型级：一家周额度耗尽后，同供应商的其它模型也不该
+	// 每个都先撞一次。它只影响别名链的候选顺序，不会把供应商从配置里删掉。
+	routeCoolProviderModel = "*"
 )
 
 var (
 	routeResetInRe   = regexp.MustCompile(`(?i)reset(?:s)?\s+in\s+([0-9dhms\s]+)`)
 	routeResetUnitRe = regexp.MustCompile(`(?i)(\d+)\s*(d|h|m|s)`)
+	// 多密钥供应商全池额度耗尽时，openaibackend 返回「最早 10-27 20:26 自动重试」。
+	// 这是绝对时间而不是 "resets in 2h"：不解析它，路由层只能按 30 分钟兜底，
+	// 会在密钥仍被禁用 16 小时的情况下反复探针。
+	routeRetryAtRe = regexp.MustCompile(`(?i)最早\s+(\d{1,2})-(\d{1,2})\s+(\d{1,2}):(\d{2})\s+自动重试`)
 )
 
 type routeFailureState struct {
@@ -55,6 +63,7 @@ type routeFailureState struct {
 type RouteCooldownEntry struct {
 	Provider string    `json:"provider"`
 	Model    string    `json:"model"`
+	Scope    string    `json:"scope,omitempty"` // model / provider
 	Until    time.Time `json:"until"`
 	Strikes  int       `json:"strikes"`
 	Reason   string    `json:"reason,omitempty"`
@@ -82,6 +91,25 @@ func (l *routeFailureLedger) Cooling(provider, model string, now time.Time) bool
 	defer l.mu.Unlock()
 	s := l.m[routeCoolKey(provider, model)]
 	return s != nil && now.Before(s.Until)
+}
+
+// CoolingAny 同时看模型级与供应商级窗口。供应商级窗口来自额度类失败：
+// 账号/密钥的额度通常跨模型生效，不能每换一个模型就重新撞一次。
+func (l *routeFailureLedger) CoolingAny(provider, model string, now time.Time) bool {
+	if l == nil {
+		return false
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, key := range []string{
+		routeCoolKey(provider, model),
+		routeCoolKey(provider, routeCoolProviderModel),
+	} {
+		if s := l.m[key]; s != nil && now.Before(s.Until) {
+			return true
+		}
+	}
+	return false
 }
 
 // Fail 记一次失败并返回绕行截止时间与连续失败次数。退避与账号冷却同形：
@@ -171,9 +199,14 @@ func (l *routeFailureLedger) Snapshot(now time.Time) []RouteCooldownEntry {
 			continue
 		}
 		provider, model, _ := strings.Cut(key, "\x00")
+		scope := "model"
+		if model == routeCoolProviderModel {
+			scope = "provider"
+		}
 		out = append(out, RouteCooldownEntry{
 			Provider: provider,
 			Model:    model,
+			Scope:    scope,
 			Until:    s.Until,
 			Strikes:  s.Strikes,
 			Reason:   s.Reason,
@@ -220,11 +253,11 @@ func (l *routeFailureLedger) pruneLocked(now time.Time) {
 // 只在存在别名链候选时生效：没有同模型备选时，绕行没有意义，保持原有「每次都
 // 试一下」的行为，避免把唯一通道也锁在冷却里。
 func (g *Gateway) promoteCoolingPrimary(primary fallbackCandidate, chain []fallbackCandidate, now time.Time) (fallbackCandidate, []fallbackCandidate, bool) {
-	if g.routeCool == nil || len(chain) == 0 || !g.routeCool.Cooling(primary.Provider, primary.Model, now) {
+	if g.routeCool == nil || len(chain) == 0 || !g.routeCool.CoolingAny(primary.Provider, primary.Model, now) {
 		return primary, chain, false
 	}
 	for i, c := range chain {
-		if g.routeCool.Cooling(c.Provider, c.Model, now) {
+		if g.routeCool.CoolingAny(c.Provider, c.Model, now) {
 			continue
 		}
 		var warm, cooling []fallbackCandidate
@@ -232,7 +265,7 @@ func (g *Gateway) promoteCoolingPrimary(primary fallbackCandidate, chain []fallb
 			if j == i {
 				continue
 			}
-			if g.routeCool.Cooling(other.Provider, other.Model, now) {
+			if g.routeCool.CoolingAny(other.Provider, other.Model, now) {
 				cooling = append(cooling, other)
 			} else {
 				warm = append(warm, other)
@@ -256,23 +289,36 @@ func (g *Gateway) markRouteFailure(provider, model string, err error, announce b
 	reason := routeFailureReason(err)
 	var until time.Time
 	var strikes int
+	providerWide := false
 	if floor, ok := routeQuotaFloor(err, now); ok {
 		until, strikes = g.routeCool.FailUntil(provider, model, reason, now, floor)
+		// 额度是账号/密钥级状态，不是模型级：同供应商的其它模型也应优先绕行，
+		// 否则每个模型都要先把同一句 quota 撞回来一次。窗口仍只影响候选顺序。
+		g.routeCool.FailUntil(provider, routeCoolProviderModel, reason, now, floor)
+		providerWide = true
 	} else {
 		until, strikes = g.routeCool.Fail(provider, model, reason, now)
 	}
 	if announce && g.log != nil {
 		// 不承诺「一定改走备用」：没有别名备用目标时该请求仍会重试它。
-		g.log.Warn("路由目标 %s/%s 暂不可用（%s，连续 %d 次），%s 内记入失败窗口；有健康备用目标时优先走备用",
-			provider, model, reason, strikes, until.Sub(now).Round(time.Second))
+		suffix := ""
+		if providerWide {
+			suffix = "；同供应商其它模型一并优先绕行"
+		}
+		g.log.Warn("路由目标 %s/%s 暂不可用（%s，连续 %d 次），%s 内记入失败窗口%s；有健康备用目标时优先走备用",
+			provider, model, reason, strikes, until.Sub(now).Round(time.Second), suffix)
 	}
 }
 
 // clearRouteFailure 在主目标/候选恢复后取消绕行，并留下一条恢复日志。
 func (g *Gateway) clearRouteFailure(provider, model string) {
 	strikes, had := g.routeCool.Clear(provider, model)
+	pstrikes, phad := g.routeCool.Clear(provider, routeCoolProviderModel)
 	if had && strikes > 0 && g.log != nil {
 		g.log.Info("路由目标 %s/%s 已恢复，取消绕行（此前连续 %d 次失败）", provider, model, strikes)
+	}
+	if phad && pstrikes > 0 && g.log != nil {
+		g.log.Info("供应商 %s 的额度绕行窗口已取消（成功请求恢复）", provider)
 	}
 }
 
@@ -322,7 +368,45 @@ func routeQuotaFloor(err error, now time.Time) (time.Time, bool) {
 			return now.Add(d), true
 		}
 	}
+	// 全池禁用的错误没有 "resets in"，只有「最早 10-27 20:26 自动重试」。
+	if at, ok := parseRouteRetryAt(s, now); ok {
+		return at, true
+	}
 	return now.Add(routeCoolQuotaDefault), true
+}
+
+// parseRouteRetryAt 解析「最早 MM-DD HH:MM 自动重试」。最多只接受约 24 小时内的
+// 未来时间：额度长禁用上限就是 24h，超出这个范围的多半是过期/错格式文案，宁可
+// 退回 30 分钟默认窗口。跨年时（12-31 → 01-01）把日期补到下一年。
+func parseRouteRetryAt(s string, now time.Time) (time.Time, bool) {
+	m := routeRetryAtRe.FindStringSubmatch(s)
+	if m == nil {
+		return time.Time{}, false
+	}
+	month, errM := strconv.Atoi(m[1])
+	day, errD := strconv.Atoi(m[2])
+	hour, errH := strconv.Atoi(m[3])
+	minute, errN := strconv.Atoi(m[4])
+	if errM != nil || errD != nil || errH != nil || errN != nil ||
+		month < 1 || month > 12 || day < 1 || day > 31 || hour > 23 || minute > 59 {
+		return time.Time{}, false
+	}
+	at := time.Date(now.Year(), time.Month(month), day, hour, minute, 0, 0, now.Location())
+	if at.Month() != time.Month(month) || at.Day() != day {
+		return time.Time{}, false
+	}
+	if !at.After(now) {
+		next := at.AddDate(1, 0, 0)
+		if next.Sub(now) > routeCoolQuotaMax+time.Hour {
+			return time.Time{}, false
+		}
+		at = next
+	}
+	if at.Sub(now) > routeCoolQuotaMax+time.Hour {
+		return time.Time{}, false
+	}
+	// 与 "resets in" 一样多留 1 分钟，避免在禁用刚到期时又撞一次。
+	return at.Add(time.Minute), true
 }
 
 func parseResetDuration(s string) time.Duration {

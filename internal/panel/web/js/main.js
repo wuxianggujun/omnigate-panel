@@ -87,7 +87,14 @@ const ROUTES = [
     path: '/system',
     label: '系统',
     title: '系统',
-    subtitle: '密钥、账号、代理与存储',
+    // 副标题只列当前角色真的能看到的系统分区；不要把访问密钥、出站代理
+    // 写进普通用户或匿名访客的标题里，否则等于承诺一个点不进去的入口。
+    subtitle: (auth) => {
+      if (!auth.authenticated) return '平台级配置与运行信息';
+      if (auth.role === 'admin') return '密钥、账号、代理、运行参数与存储';
+      if (auth.role === 'viewer') return '账号、代理、运行参数与存储';
+      return '面板账号与存储';
+    },
     icon: 'system',
     load: () => import('./pages/system.js'),
   },
@@ -274,7 +281,9 @@ function renderShellSession() {
 
 function setPageMeta(routeInfo, route) {
   const title = route?.title || '未找到';
-  const subtitle = route?.subtitle || '';
+  const subtitle = typeof route?.subtitle === 'function'
+    ? route.subtitle(authState())
+    : (route?.subtitle || '');
   const titleNode = qs('#page-title');
   const subNode = qs('#page-subtitle');
   if (titleNode) titleNode.textContent = title;

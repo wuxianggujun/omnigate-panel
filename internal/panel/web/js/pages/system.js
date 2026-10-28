@@ -245,7 +245,7 @@ function render() {
       ? el('span', {
         text: canWrite()
           ? '本页可完整读写：改动会立即落盘并热生效。'
-          : (auth.role === 'viewer' ? '只读角色：可查看配置，但不能保存。' : '普通用户：仅能管理自己的面板账号与归属账号。'),
+          : (auth.role === 'viewer' ? '只读角色：平台配置只读；可修改自己的面板密码。' : '普通用户：仅能管理自己的面板账号；存储信息只读。'),
       })
       : null,
     actions: [el('button', {
@@ -387,9 +387,7 @@ function accountsTab(auth) {
   wrap.appendChild(myAccountCard(auth));
 
   if (!isAdmin()) {
-    wrap.appendChild(notice('info', '仅显示自己的账号', auth.role === 'viewer'
-      ? '只读角色可以查看自己的会话信息与修改密码，但不能管理其他账号。'
-      : '普通用户只能看到自己的面板账号；其他账号与归属信息不可见。'));
+    wrap.appendChild(notice('info', '仅显示自己的账号', '其他面板账号与归属信息不可见。'));
     return wrap;
   }
 

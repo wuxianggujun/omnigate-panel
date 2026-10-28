@@ -44,11 +44,19 @@ function initialState() {
   };
 }
 
+function canReadUsers() {
+  const auth = authState();
+  return auth.authenticated && (auth.role === 'admin' || auth.role === 'viewer');
+}
+
 export async function mount(root) {
   pageSignal = new AbortController();
   rootEl = root;
   ui = initialState();
   render();
+  // 权限不足时连请求都不发：否则每次进入页面都会换回一个 403 和一条
+  // 「无权执行」的 toast，把「不可见」又说了一遍。
+  if (!canReadUsers()) return;
   await load(ui.hours);
 }
 
@@ -70,7 +78,7 @@ function windowRange(hours) {
 }
 
 async function load(hours) {
-  if (!pageSignal) return;
+  if (!pageSignal || !canReadUsers()) return;
   const seq = ++loadSeq;
   ui.hours = hours;
   ui.loading = true;
@@ -159,7 +167,7 @@ function render() {
 
   // 该页数据只有管理员/查看者能读。普通用户与匿名访客连时间窗口和刷新都不该
   // 看到：那些操作只会重复触发 403。先把「看不到」讲清楚并直接返回。
-  const blocked = !isAuthenticated() || authState().role === 'user';
+  const blocked = !canReadUsers();
 
   if (!blocked) {
     const windowButtons = el('div', { class: 'segmented' }, WINDOWS.map((win) => el('button', {
@@ -698,7 +706,7 @@ async function openScopeModal(name, access) {
   const body = el('div', { class: 'scope-editor' },
     el('div', { class: 'notice notice-info notice-inline' },
       icon('info', 15),
-      el('span', { text: '不勾选任何供应商 = 全量（该用户可以访问所有供应商）。勾选后，网关会同时收窄 /v1/models 与 /v1/chat/completions 等入口。' }),
+      el('span', { text: '不勾选任何供应商 = 全量（不限制供应商）；勾选后，网关会同时收窄 /v1/models 与 /v1/chat/completions 等入口。' }),
     ),
     sameName.length > 1
       ? el('div', { class: 'notice notice-warn notice-inline' },
@@ -760,7 +768,7 @@ async function openScopeModal(name, access) {
     title: `访问权限 · ${name}`,
     subtitle: keyCount > 1
       ? `该用户名下有 ${keyCount} 把密钥，保存后会一起更新`
-      : '按供应商收窄该用户可访问的模型',
+      : '按供应商收窄该用户的访问范围',
     size: 'md',
     body,
     footer: [

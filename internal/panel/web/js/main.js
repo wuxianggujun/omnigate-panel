@@ -58,6 +58,9 @@ const ROUTES = [
     label: '用户',
     title: '用户',
     subtitle: '按入站密钥的人与访问范围：谁在用、能用哪些供应商',
+    // 按用户统计需要全量归属视图；普通用户只会得到一句「不可见」，
+    // 所以不下发这个入口。直接访问 #/users 仍由页面本身说明原因。
+    roles: ['admin', 'viewer'],
     icon: 'user',
     load: () => import('./pages/users.js'),
   },
@@ -139,14 +142,17 @@ function cycleTheme() {
 function buildNav() {
   const nav = qs('#nav');
   const bottom = qs('#bottomnav');
+  if (!nav || !bottom) return;
   clear(nav);
   clear(bottom);
   navLinks = [];
   bottomLinks = [];
+  const auth = authState();
   // 8 个平铺项看不出彼此关系。按「配置 → 观测」分组：前四页决定请求怎么走，
   // 后四页看它到底走了哪。分组标题只在侧边栏显示，移动端底栏保持平铺。
   let lastGroup = null;
   for (const route of ROUTES) {
+    if (route.roles && !route.roles.includes(auth.role)) continue;
     if (route.group && route.group !== lastGroup) {
       lastGroup = route.group;
       nav.appendChild(el('div', { class: 'nav-group-label', text: route.group }));
@@ -261,6 +267,9 @@ function renderShellSession() {
     buildNote.textContent = auth.build ? `build ${auth.build}` : '';
     buildNote.title = auth.build || '';
   }
+  // 登录/登出会改变可见页面；导航必须跟着会话重绘，否则会留下点进去只会
+  // 显示「不可见」的入口。
+  buildNav();
 }
 
 function setPageMeta(routeInfo, route) {
@@ -326,7 +335,6 @@ async function boot() {
   }
 
   renderShellSession();
-  buildNav();
   wireShell();
   await refreshSession({ silent: true });
 

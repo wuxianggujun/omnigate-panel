@@ -193,17 +193,26 @@ function render() {
   const page = el('div', { class: 'page page-system' });
   const auth = authState();
   const keys = normalizeKeyList(ui.config?.api_keys);
-  // 访问密钥的条数只在配置真的读到时才算数：普通用户与匿名访客拿不到
-  // config，此时的空数组是「看不到」，标成 0 会被读成「一个都没配」。
-  const keysKnown = !!ui.config;
-  const tabs = createTabs({
-    items: [
-      { id: 'access', label: '访问密钥', count: keysKnown ? keys.length : null },
-      { id: 'accounts', label: '面板账号' },
+  // 访问密钥的条数只在「管理员且配置真的读到」时才算数：viewer 能读供应商
+  // 配置，但 api_keys 被后端隐藏；普通用户与匿名访客则连 config 都拿不到。
+  // 把这些空数组标成 0，会被读成「一个都没配」。
+  const keysKnown = isAdmin() && !!ui.config;
+  const platformReader = auth.role === 'admin' || auth.role === 'viewer';
+  // 分区本身也要按角色出现：普通用户点开「出站代理 / 运行参数」只会看到一句
+  // 无权查看，viewer 点开「访问密钥」也一样。直接不渲染这些入口，比留一个
+  // 必然失败的标签页更诚实。
+  const tabItems = [
+    ...(isAdmin() ? [{ id: 'access', label: '访问密钥', count: keysKnown ? keys.length : null }] : []),
+    { id: 'accounts', label: '面板账号' },
+    ...(platformReader ? [
       { id: 'outbound', label: '出站代理', count: ui.outbound?.proxies?.length },
       { id: 'runtime', label: '运行参数' },
-      { id: 'storage', label: '存储' },
-    ],
+    ] : []),
+    { id: 'storage', label: '存储' },
+  ];
+  if (!tabItems.some((item) => item.id === ui.tab)) ui.tab = tabItems[0].id;
+  const tabs = createTabs({
+    items: tabItems,
     value: ui.tab,
     ariaLabel: '系统设置分区',
     onChange: (value) => { ui.tab = value; render(); },

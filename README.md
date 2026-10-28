@@ -637,6 +637,26 @@ Gemini 三个入站方言则各自翻译成该方言自己的心跳（`ping` 事
 > 吃掉），整文件替换最稳；二是别用中文注释经 PowerShell/SSH 管道传输（编码会被
 > 破坏，把下一行指令吞进注释里），用 ASCII 注释或直接 `scp` 传文件。
 
+#### 出站代理报 `connection refused`
+
+如果供应商错误是 `proxyconnect tcp: dial tcp ...:17890: connect: connection refused`，
+先确认 `newapi-mihomo` 是否还挂在 `newapi` 的旧 network namespace。`network_mode:
+service:newapi` 的 sidecar 在 `newapi` 重启/重建后不会自动跟过去；这时 `mihomo`
+自己的健康检查仍然通过，但从 `newapi` 容器里访问 `127.0.0.1:17890` 会被拒绝。
+重建 sidecar 让它重新加入当前 namespace：
+
+```bash
+cd /opt/newapi
+docker compose up -d --no-deps --force-recreate mihomo
+```
+
+验证时在 `newapi` 里访问代理端口；用普通 HTTP 请求得到 `HTTP/1.1 400 Bad Request`
+是正常的，`Connection refused` 才说明没接上：
+
+```bash
+docker exec newapi wget -T 3 -S -O /dev/null http://127.0.0.1:17890
+```
+
 ## 绕过多余的 SSE 中转层
 
 如果链路里除了反代还挂了一层 SSE 再编码器（典型是 new-api / one-api 这类中转站），

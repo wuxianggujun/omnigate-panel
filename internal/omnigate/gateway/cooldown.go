@@ -202,6 +202,20 @@ func accountRetryable(err error) bool {
 		return false
 	}
 	s := strings.ToLower(err.Error())
+	// 有明确状态码时先按状态码判断。否则 403/500 + invalid_request_error
+	// 会被下面的文案兜底误判成「请求写错」，账号池会永远停在这把坏账号上。
+	// 额度类 400 是账号侧状态，仍然要换号（与路由台账的 400 额度例外一致）。
+	if isQuotaText(s) {
+		return true
+	}
+	if status := upstreamHTTPStatus(err); status != 0 {
+		switch status {
+		case http.StatusBadRequest, http.StatusMethodNotAllowed,
+			http.StatusRequestEntityTooLarge, http.StatusUnprocessableEntity:
+			return false
+		}
+		return true
+	}
 	for _, marker := range []string{
 		"http 400", "status 400", "bad request",
 		"http 405", "status 405",
@@ -211,13 +225,6 @@ func accountRetryable(err error) bool {
 		"prompt_limit_exceeded", "messages_required",
 	} {
 		if strings.Contains(s, marker) {
-			return false
-		}
-	}
-	if status := upstreamHTTPStatus(err); status != 0 {
-		switch status {
-		case http.StatusBadRequest, http.StatusMethodNotAllowed,
-			http.StatusRequestEntityTooLarge, http.StatusUnprocessableEntity:
 			return false
 		}
 	}

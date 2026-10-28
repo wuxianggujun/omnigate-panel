@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
@@ -57,6 +58,41 @@ func TestCooldownLedgerPerAccountIsolated(t *testing.T) {
 	}
 	if c.Cooling("raccoon", "b", now) || c.Cooling("runable", "a", now) {
 		t.Fatal("cooldown must be scoped to (provider,label)")
+	}
+}
+
+// 账号池换号分类：401/403/5xx/网络错误继续换号；400/405/413/422 与 prompt
+// 超限直接返回。状态码优先于文案，避免 403/500 带 invalid_request_error 时被
+// 误判成请求错误；额度类 400 例外，仍要换号。
+func TestAccountRetryableClassification(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"client canceled", context.Canceled, false},
+		{"prompt too long", &promptTooLongErr{Provider: "p", Limit: 10}, false},
+		{"401 auth", errors.New("upstream HTTP 401: unauthorized"), true},
+		{"403 auth", errors.New("upstream HTTP 403: forbidden"), true},
+		{"403 invalid_request_error", errors.New("upstream HTTP 403: invalid_request_error"), true},
+		{"500 invalid_request_error", errors.New("upstream HTTP 500: invalid_request_error"), true},
+		{"400 invalid_request_error", errors.New("upstream HTTP 400: invalid_request_error"), false},
+		{"405 method", errors.New("upstream HTTP 405: method not allowed"), false},
+		{"413 too large", errors.New("upstream HTTP 413: payload too large"), false},
+		{"422 invalid", errors.New("upstream HTTP 422: unprocessable entity"), false},
+		{"400 quota", errors.New("upstream HTTP 400: insufficient_quota"), true},
+		{"plain invalid request", errors.New("invalid request: messages required"), false},
+		{"network", errors.New("connection reset by peer"), true},
+		{"raccoon 403 invalid_request_error", &raccoon.UpstreamError{Status: 403, Message: "invalid_request_error"}, true},
+		{"raccoon 400 invalid_request_error", &raccoon.UpstreamError{Status: 400, Message: "invalid_request_error"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := accountRetryable(tc.err); got != tc.want {
+				t.Fatalf("accountRetryable(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
 	}
 }
 

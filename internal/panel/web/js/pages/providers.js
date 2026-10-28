@@ -789,10 +789,14 @@ function overviewTab(provider, meta, current, models) {
         : null,
     }));
   } else {
+    // 「上游密钥」Tab 只在配置可读时下发；匿名/普通用户看不到它，提示里再
+    // 指向一个不存在的 Tab 等于让人白点一次。改成说明凭证属于平台级配置。
     wrap.appendChild(notice(
       'muted',
       '密钥型供应商',
-      '该类型的凭证配置在「上游密钥」，没有账号记录，也无需签到。',
+      provider.config
+        ? '该类型的凭证配置在「上游密钥」，没有账号记录，也无需签到。'
+        : '该类型的凭证属于平台级配置，当前页面不可见；没有账号记录，也无需签到。',
     ));
   }
 
@@ -833,7 +837,10 @@ function adoptionCard(provider, models) {
       }, '加入路由优先级'));
     }
   }
-  actions.push(el('a', { class: 'btn btn-ghost btn-sm', href: '#/routing' }, '前往路由设置'));
+  // 路由页只对能读平台配置的角色开放；匿名/普通用户点过去只会看到登录/权限提示。
+  if (routingKnown()) {
+    actions.push(el('a', { class: 'btn btn-ghost btn-sm', href: '#/routing' }, '前往路由设置'));
+  }
 
   const hints = [];
   const shadowed = shadowingAliases(provider, models);
@@ -851,9 +858,26 @@ function adoptionCard(provider, models) {
     hints.push('它是默认供应商：未命中其它规则时，请求会回落到这里。');
   }
   if (!models.length) {
-    hints.push(keyBased
-      ? '当前没有模型目录，请在「模型」页刷新上游目录或手动填写模型列表。'
-      : '当前没有模型目录，请先添加账号，再在「模型」页刷新上游目录。');
+    // 目录可能只是还没回来 / 这次没读到；不能把「没读到」写成「没有模型」。
+    const catalogUnread = !ui.modelsLoaded;
+    const catalogFailed = catalogUnread && !!ui.modelsError;
+    const issue = (ui.modelIssues || []).find((i) => i.provider === provider.name) || null;
+    const missingCatalog = !!(issue && !issue.cached);
+    if (catalogUnread) {
+      hints.push(catalogFailed
+        ? '模型目录这次没读到；可稍后重试，或先到「模型」页查看全局目录。'
+        : '正在读取模型目录；读完后这里会显示是否可以路由。');
+    } else if (missingCatalog) {
+      hints.push(canEdit
+        ? '上游模型目录这次没读到；可在「模型」页刷新上游目录重试。'
+        : '上游模型目录这次没读到；请稍后重试。');
+    } else {
+      hints.push(canEdit
+        ? (keyBased
+          ? '当前没有模型目录，请在「模型」页刷新上游目录或手动填写模型列表。'
+          : '当前没有模型目录，请先添加账号，再在「模型」页刷新上游目录。')
+        : '当前没有模型目录；模型目录由管理员维护。');
+    }
   }
 
   return card({
@@ -880,6 +904,7 @@ function accountsTab(provider, meta, current) {
   const schema = Array.isArray(meta.account_schema) ? meta.account_schema : [];
   const actions = actionIds(meta);
   const canOperate = canOperateAccounts();
+  const canConfigure = isAdmin() && canWrite();
 
   const toolbar = el('div', { class: 'section-toolbar' },
     el('div', { class: 'toolbar-title' },
@@ -918,22 +943,31 @@ function accountsTab(provider, meta, current) {
     return wrap;
   }
   if (!canOperate) {
-    wrap.appendChild(notice('info', '只读角色', 'viewer 可以查看账号、余额与错误，但不能签到、刷新或移除。'));
+    wrap.appendChild(notice('info', '只读角色', 'viewer 可以查看账号、余额与错误，但不能签到、添加或移除；余额查询仍可使用。'));
   }
 
   if (ui.addOpen && canOperate) {
     wrap.appendChild(addAccountPanel(provider, meta, current));
   } else if (!schema.length) {
-    wrap.appendChild(notice('muted', '该供应商使用上游密钥', '账号模式下无需添加账号；请到「上游密钥」或「高级」分区配置密钥。'));
+    wrap.appendChild(notice('muted', '该供应商使用上游密钥',
+      canConfigure
+        ? '账号模式下无需添加账号；请到「上游密钥」或「高级」分区配置密钥。'
+        : '账号模式下无需添加账号；供应商级密钥由管理员配置，当前角色不可编辑。'));
   }
 
   if (!provider.accounts.length) {
     const spec = loginSpec(meta);
     wrap.appendChild(card({
       body: emptyState(
-        current.authenticated ? '没有可见账号' : '登录后查看账号',
         current.authenticated
-          ? (schema.length ? '用登录向导或手动添加账号后，即可签到、查看额度与最近错误。' : '请在上游密钥中配置密钥。')
+          ? (current.role === 'user' ? '没有归属你的账号' : '该供应商还没有账号')
+          : '登录后查看账号',
+        current.authenticated
+          ? (schema.length
+            ? (canOperate
+              ? '用登录向导或手动添加账号后，即可签到、查看额度与最近错误。'
+              : '当前角色只读；添加账号需要管理员或用户操作。')
+            : (canConfigure ? '请在上游密钥中配置密钥。' : '请让管理员在上游密钥中配置密钥。'))
           : '账号按 provider/label 归属过滤，普通用户只能看到自己的账号。',
         canOperate && spec
           ? el('button', {
@@ -1261,7 +1295,10 @@ function keysTab(provider, meta, current) {
 
   if (!keyFields.length) {
     wrap.appendChild(card({
-      body: emptyState('没有配置上游密钥字段', '账号型供应商在「账号」里维护 Cookie/Token；API Key 型供应商请在「高级」中填写密钥。'),
+      body: emptyState('没有配置上游密钥字段',
+        canWrite()
+          ? '账号型供应商在「账号」中管理 Cookie/Token；API Key 型供应商请在「高级」中填写密钥。'
+          : '账号型供应商在「账号」中管理 Cookie/Token；API Key 型供应商的密钥由管理员在「高级」中配置。'),
     }));
   }
 
@@ -1405,6 +1442,8 @@ function quotaCard(provider, current) {
 
 function modelsTab(provider, models, current) {
   const wrap = el('div', { class: 'tab-stack' });
+  const canRefresh = isAdmin() && canWrite();
+  const canConfigure = canRefresh && !!provider.config;
   if (ui.modelsError && !models.length) {
     wrap.appendChild(notice('warn', '模型目录加载失败', ui.modelsError, { label: '重试', action: 'retry-load' }));
   }
@@ -1443,10 +1482,16 @@ function modelsTab(provider, models, current) {
     empty: pending
       ? '正在读取模型目录…'
       : (catalogFailed
-        ? '模型目录没读到，无法列出模型；可点上方「重试」或「刷新上游目录」'
+        ? (canRefresh
+          ? '模型目录没读到，无法列出模型；可点上方「重试」或「刷新上游目录」'
+          : '模型目录没读到，无法列出模型；可点上方「重试」')
         : (missingCatalog
-          ? '上游目录这次没读到；可点「刷新上游目录」重试'
-          : '该供应商还没有模型目录；可在「高级」配置 models 或刷新模型列表。')),
+          ? (canRefresh
+            ? '上游目录这次没读到；可点「刷新上游目录」重试'
+            : '上游目录这次没读到；请稍后重试。')
+          : (canConfigure
+            ? '该供应商还没有模型目录；可在「高级」配置 models 或刷新模型列表。'
+            : '该供应商还没有模型目录。'))),
   });
   const refreshing = ui.modelRefresh[provider.name];
   wrap.appendChild(el('div', { class: 'section-toolbar' },
@@ -1456,7 +1501,7 @@ function modelsTab(provider, models, current) {
       el('span', { class: 'muted small', text: pending || catalogFailed || missingCatalog ? '' : `${models.length} 个模型；id 形如 供应商/上游模型 ID` }),
     ),
     el('div', { class: 'toolbar-actions' },
-      (isAdmin() && canWrite())
+      canRefresh
         ? el('button', {
           class: 'btn btn-ghost btn-sm', type: 'button',
           dataset: { action: 'refresh-provider-models', provider: provider.name },

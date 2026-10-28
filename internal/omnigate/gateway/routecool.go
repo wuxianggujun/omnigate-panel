@@ -453,6 +453,16 @@ func routeFailurePenalized(err error) bool {
 	if isQuotaText(s) {
 		return true
 	}
+	// 有状态码时先看状态码。否则 403/5xx 带 invalid_request_error 的响应会被
+	// 文案兜底误判成请求错误，主目标持续失败却始终不进入绕行。
+	if status := upstreamHTTPStatus(err); status != 0 {
+		switch status {
+		case 400, 405, 413, 422:
+			return false
+		default:
+			return true
+		}
+	}
 	for _, marker := range []string{
 		"prompt_limit_exceeded",
 		"invalid_request_error",
@@ -461,14 +471,6 @@ func routeFailurePenalized(err error) bool {
 	} {
 		if strings.Contains(s, marker) {
 			return false
-		}
-	}
-	if status := upstreamHTTPStatus(err); status != 0 {
-		switch status {
-		case 400, 405, 413, 422:
-			return false
-		default:
-			return true
 		}
 	}
 	return true

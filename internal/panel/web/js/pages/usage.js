@@ -40,6 +40,9 @@ export async function mount(root) {
   rootEl = root;
   ui = initialState();
   render();
+  // 匿名访客没有账号级用量：连时间窗口请求都不发。页面本身已经把「不可见」
+  // 说清楚，再发一次只会拿回一个空集合（或 401），徒增一条失败提示。
+  if (!isAuthenticated()) return;
   await load(ui.hours);
 }
 
@@ -51,7 +54,7 @@ export function unmount() {
 }
 
 async function load(hours) {
-  if (!pageSignal) return;
+  if (!pageSignal || !isAuthenticated()) return;
   const seq = ++loadSeq;
   ui.hours = hours;
   ui.loading = true;
@@ -110,23 +113,25 @@ function render() {
 
   // 普通用户的范围说明与时间窗口/刷新放进同一条工具条：分成两条会上下叠着，
   // 而它们其实是同一件事——这条工具条在说什么范围、以什么粒度看。
-  page.appendChild(pageBar({
-    context: !isAuthenticated()
-      ? null
-      : (auth.role === 'user'
+  // 匿名访客没有可切换的窗口，也没有可刷新的账号级数据；整条工具条都不下发，
+  // 免得留下几个点了只会重复「不可见」的控件。
+  if (isAuthenticated()) {
+    page.appendChild(pageBar({
+      context: auth.role === 'user'
         ? [
           badge('个人范围', 'info'),
           el('span', { text: '仅统计归属你的账号（provider/label）；平台密钥型供应商的共享流量不在个人范围内。' }),
         ]
-        : null),
-    actions: [
-      windowButtons,
-      el('button', {
-        class: 'btn btn-ghost btn-sm', type: 'button',
-        on: { click: () => load(ui.hours) },
-      }, icon('refresh', 15), '刷新'),
-    ],
-  }));
+        : null,
+      actions: [
+        windowButtons,
+        el('button', {
+          class: 'btn btn-ghost btn-sm', type: 'button',
+          on: { click: () => load(ui.hours) },
+        }, icon('refresh', 15), '刷新'),
+      ],
+    }));
+  }
 
   if (!isAuthenticated()) {
     page.appendChild(el('div', { class: 'notice notice-info' },
@@ -209,7 +214,7 @@ function render() {
   page.appendChild(card({
     title: '分组明细',
     subtitle: hidden ? '需要登录' : (loaded ? rangeText(data) : ''),
-    actions: groupTabs.el,
+    actions: hidden ? null : groupTabs.el,
     body: hidden
       ? emptyState('用量明细不可见', '按供应商 / 账号 / 模型的用量属于账号级数据，登录后按角色显示。')
       : (loaded ? groupTable(data, totals) : loadingBlock('加载用量')),
@@ -285,7 +290,7 @@ function chartCard(data, totals, { hidden = false, loaded = true } = {}) {
   return card({
     title: '趋势',
     subtitle: hidden ? '需要登录' : (loaded ? `按时间桶聚合的 ${current.label}；悬停查看明细` : ''),
-    actions: metricButtons,
+    actions: hidden ? null : metricButtons,
     body: el('div', { class: 'trend-chart' }, chartHost, legend),
     class: 'chart-card',
   });

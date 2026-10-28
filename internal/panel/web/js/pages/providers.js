@@ -589,19 +589,25 @@ function providerDetail(provider, current) {
   const rank = routeRank(provider);
   const models = providerModels(provider);
   // 密钥型供应商（account_mode=none/apikey）的凭证在供应商级，没有账号记录：
-  // 不显示「账号」Tab，避免空壳 / 0 账号的误导。账号型供应商始终保留 Tab——第一
-  // 个账号的添加入口就在里面，隐藏了就没地方加。
-  const showAccounts = !isKeyBasedProvider(meta);
+  // 不显示「账号」Tab，避免空壳 / 0 账号的误导。账号型供应商在有身份时保留
+  // Tab——第一个账号的添加入口就在里面，隐藏了就没地方加；匿名访客的账号列表
+  // 被后端按归属过滤为空，保留它只会得到一个「登录查看账号」的死入口。
+  const showAccounts = !isKeyBasedProvider(meta) && current.authenticated;
+  // 配置读不到时（匿名、普通用户、或接口失败），「上游密钥 / 高级」只会显示
+  // 「平台配置不可读」。直接不下发这两个 Tab，把「不可见」留在概览里说清楚。
+  const showConfig = !!provider.config;
   if (!showAccounts && ui.tab === 'accounts') ui.tab = 'overview';
+  if (!showConfig && (ui.tab === 'keys' || ui.tab === 'advanced')) ui.tab = 'overview';
   const tabItems = [
     { id: 'overview', label: '概览' },
-    // 匿名访客的账号列表被后端过滤为空，把 0 写成 Tab 计数等于断言「没有账号」。
     showAccounts
-      ? { id: 'accounts', label: '账号', count: isAuthenticated() ? provider.accounts.length : null }
+      ? { id: 'accounts', label: '账号', count: provider.accounts.length }
       : null,
-    { id: 'keys', label: '上游密钥', count: upstreamKeyCount(provider) },
+    showConfig
+      ? { id: 'keys', label: '上游密钥', count: upstreamKeyCount(provider) }
+      : null,
     { id: 'models', label: '模型', count: models.length },
-    { id: 'advanced', label: '高级' },
+    showConfig ? { id: 'advanced', label: '高级' } : null,
   ].filter(Boolean);
   const tabs = createTabs({
     items: tabItems,
@@ -624,12 +630,11 @@ function providerDetail(provider, current) {
       ),
       el('p', { class: 'provider-subtitle', text: addressLabel(provider) }),
     ),
+    // 余额刷新留在「概览」和「账号」各自的工具条里：详情头再放一个，默认打开
+    // 概览时同一屏会出现两个一模一样的按钮。匿名访客仍然只留登录入口。
     el('div', { class: 'provider-head-actions' },
       current.authenticated
-        ? el('button', {
-          class: 'btn btn-ghost btn-sm', type: 'button', dataset: { action: 'refresh-balance' },
-          disabled: ui.balanceLoading,
-        }, icon('refresh', 15), ui.balanceLoading ? '查询中…' : '刷新余额')
+        ? null
         : el('button', { class: 'btn btn-ghost btn-sm', type: 'button', dataset: { action: 'login' } }, icon('login', 14), '登录'),
     ),
   ));
@@ -696,7 +701,8 @@ function overviewTab(provider, meta, current, models) {
     subtitle: '平台级配置与实时状态',
     actions: current.authenticated ? el('button', {
       class: 'btn btn-ghost btn-sm', type: 'button', dataset: { action: 'refresh-balance' },
-    }, '刷新余额') : null,
+      disabled: ui.balanceLoading,
+    }, icon('refresh', 15), ui.balanceLoading ? '查询中…' : '刷新余额') : null,
     body: el('div', {},
       facts,
       el('div', { class: 'cap-row' },
@@ -765,16 +771,22 @@ function overviewTab(provider, meta, current, models) {
         { key: 'error', label: '最近错误', render: (row) => (accountError(row) ? el('span', { class: 'text-warn truncate', text: truncate(accountError(row), 48) }) : '—') },
       ],
       rows: accounts,
-      empty: current.authenticated ? '该供应商还没有账号' : '登录后查看账号明细',
+      empty: !current.authenticated
+        ? '登录后查看账号明细'
+        : (current.role === 'user' ? '没有归属你的账号' : '该供应商还没有账号'),
     });
     wrap.appendChild(card({
       title: '账号一览',
       subtitle: '余额为最近一次上游查询结果',
       body: table.el,
-      actions: el('button', {
-        class: 'btn btn-ghost btn-sm', type: 'button',
-        on: { click: () => { ui.tab = 'accounts'; ui.addOpen = !current.authenticated ? false : ui.addOpen; render(); } },
-      }, '管理账号'),
+      // 匿名访客的「账号」Tab 已被隐藏；这里再留一个「管理账号」按钮，
+      // 点下去只会回到概览。登录用户才需要这个入口。
+      actions: current.authenticated
+        ? el('button', {
+          class: 'btn btn-ghost btn-sm', type: 'button',
+          on: { click: () => { ui.tab = 'accounts'; render(); } },
+        }, canOperateAccounts() ? '管理账号' : '查看账号')
+        : null,
     }));
   } else {
     wrap.appendChild(notice(

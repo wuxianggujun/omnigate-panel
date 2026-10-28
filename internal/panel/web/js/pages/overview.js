@@ -92,8 +92,10 @@ function render(root, ctx, { loading = false } = {}) {
   // 元信息）。两个来源都没有时只能写「—」，不能报 0 个供应商。
   const providersKnown = !!(Array.isArray(data.providers) || localState.accounts);
   const supplierBits = [];
-  if (totals.keyReady) supplierBits.push(`${fmtInt(totals.keyReady)} 个密钥直连`);
-  if (totals.keyEmpty) supplierBits.push(`${fmtInt(totals.keyEmpty)} 个密钥待配置`);
+  // 这些数字数的是「供应商」，不是「密钥」：一个密钥型供应商可能配了多把
+  // 上游密钥（线上就有 2/2/1/1/1）。写成「N 个密钥直连」会被读成密钥总数。
+  if (totals.keyReady) supplierBits.push(`${fmtInt(totals.keyReady)} 个密钥型（直连）`);
+  if (totals.keyEmpty) supplierBits.push(`${fmtInt(totals.keyEmpty)} 个密钥型（待配置）`);
   if (totals.accountProviders) supplierBits.push(`${fmtInt(totals.accountProviders)} 个账号型`);
   const supplierMeta = !loaded ? '' : (supplierBits.join(' · ') || '暂无可用凭证');
   const recent = Array.isArray(data.recent) ? data.recent : [];
@@ -111,8 +113,18 @@ function render(root, ctx, { loading = false } = {}) {
     } },
   }, icon('refresh', 15), '刷新');
 
+  // 普通用户的账号与用量都经过归属过滤：KPI 里的「账号健康」不是平台全量。
+  // 不写清楚，用户会把自己名下的 3/5 读成平台只有 5 个账号。密钥型供应商的
+  // 流量是平台共享的，和个人账号口径不同，也要在同一句里说明。
+  const personalScope = state.authenticated && state.role === 'user';
   page.appendChild(pageBar({
     context: [
+      ...(personalScope
+        ? [
+          badge('个人范围', 'info'),
+          el('span', { text: '账号与用量仅统计归属你的账号；平台密钥型供应商的共享流量不在个人范围内。' }),
+        ]
+        : []),
       el('span', { class: 'live-dot', 'aria-hidden': 'true' }),
       el('span', { text: '每 15 秒自动刷新' }),
     ],
@@ -487,7 +499,9 @@ function healthCard(totals, providerRows, ctx, { loaded = true, providersKnown =
     onRowClick: (row) => ctx.navigate(`/providers?name=${encodeURIComponent(row.name)}`),
   });
 
-  const anonymous = !authState().authenticated;
+  const state = authState();
+  const anonymous = !state.authenticated;
+  const personal = state.authenticated && state.role === 'user';
   return card({
     title: (totals.accounts && !anonymous) ? '账号与供应商健康' : '供应商状态',
     subtitle: !loaded
@@ -496,7 +510,11 @@ function healthCard(totals, providerRows, ctx, { loaded = true, providersKnown =
         ? '匿名视角只显示供应商级凭证信息，账号池明细需登录'
         : (totals.accounts
           ? `账号可用率 ${fmtPercent((totals.healthy / total) * 100)} · 异常优先`
-          : '当前使用供应商级密钥直连，不维护账号池')),
+          : (personal
+            // 普通用户没有归属账号，不等于平台「不维护账号池」；后者是管理员
+            // 视角才能下的结论。
+            ? '仅显示归属你的账号；平台账号池不可见'
+            : '当前使用供应商级密钥直连，不维护账号池'))),
     body: el('div', { class: 'stack-sm' },
       // 匿名时 accounts 恒为 0，那不是「账号全都不可用」，所以不画健康条。
       (totals.accounts && !anonymous)

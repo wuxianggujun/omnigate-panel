@@ -8,7 +8,7 @@ import {
   api, describeError, isForbidden,
 } from '../core/api.js';
 import {
-  authState, canOperateAccounts, canWrite, isAdmin, isAuthenticated,
+  authState, canOperateAccounts, canWrite, isAdmin, isAuthenticated, isViewer,
   openLoginModal, requireAccountOperator, requireAdmin,
 } from '../core/auth.js';
 import {
@@ -699,7 +699,9 @@ function overviewTab(provider, meta, current, models) {
   wrap.appendChild(card({
     title: '供应商概览',
     subtitle: '平台级配置与实时状态',
-    actions: current.authenticated ? el('button', {
+    // 余额来自账号记录：密钥型供应商没有账号，这里的「刷新余额」无事可做。
+    // 只有存在可见账号时才下发，避免留下点了只会空转的按钮。
+    actions: current.authenticated && !keyBased && (provider.accounts || []).length ? el('button', {
       class: 'btn btn-ghost btn-sm', type: 'button', dataset: { action: 'refresh-balance' },
       disabled: ui.balanceLoading,
     }, icon('refresh', 15), ui.balanceLoading ? '查询中…' : '刷新余额') : null,
@@ -748,7 +750,8 @@ function overviewTab(provider, meta, current, models) {
   }
 
   // 额度卡片由描述符声明：哪个类型声明了 quota 动作，概览页就渲染额度卡片。
-  if (actionIds(meta).has('quota')) {
+  // 额度接口是平台级只读操作（admin/viewer）；普通用户的按钮只会换回 403。
+  if (actionIds(meta).has('quota') && (isAdmin() || isViewer())) {
     wrap.appendChild(quotaCard(provider, current));
   }
 
@@ -916,7 +919,7 @@ function accountsTab(provider, meta, current) {
         : null,
     ),
     el('div', { class: 'toolbar-actions' },
-      current.authenticated ? el('button', {
+      current.authenticated && (provider.accounts || []).length ? el('button', {
         class: 'btn btn-ghost btn-sm', type: 'button', dataset: { action: 'refresh-balance' },
         disabled: ui.balanceLoading,
       }, icon('refresh', 14), ui.balanceLoading ? '查询中…' : '刷新余额') : null,
@@ -1364,8 +1367,8 @@ function keysTab(provider, meta, current) {
     wrap.appendChild(notice('muted', '暂无密钥健康数据', '只有配置了上游密钥池（api_keys / zen_keys / go_keys）的供应商会进入自动禁用与清理。单密钥供应商不参与池内禁用；它失败时会由别名链绕行——普通故障 30 秒起退避，额度耗尽按上游重置时间（最多 24 小时），到期自动重试。'));
   }
 
-  // 同上：额度卡片只看描述符是否声明了 quota，不再认类型名。
-  if (actionIds(meta).has('quota')) {
+  // 同上：额度卡片只看描述符是否声明了 quota，不再认类型名；权限口径与概览一致。
+  if (actionIds(meta).has('quota') && (isAdmin() || isViewer())) {
     wrap.appendChild(quotaCard(provider, current));
   }
   return wrap;

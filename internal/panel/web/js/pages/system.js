@@ -233,7 +233,7 @@ function render() {
       icon('info', 16),
       el('div', { class: 'notice-content' },
         el('strong', { text: '系统设置需要登录' }),
-        el('span', { text: '访问密钥、面板账号、出站代理与存储都属于平台级配置；登录后按角色显示可读部分。' }),
+        el('span', { text: '访问密钥、面板账号、出站代理、运行参数与存储都属于平台级配置；登录后按角色显示可读部分。' }),
       ),
     ));
     rootEl.replaceChildren(page);

@@ -30,7 +30,13 @@ const ROUTES = [
     path: '/providers',
     label: '供应商',
     title: '供应商',
-    subtitle: '账号、上游密钥、模型目录与运行参数',
+    // 与系统页同理：匿名/普通用户看不到上游密钥与运行参数，副标题不能先把
+    // 这两个分区写出来；查看者与管理员可以读配置，保留完整描述。
+    subtitle: (auth) => {
+      if (!auth.authenticated) return '供应商概览与模型目录';
+      if (auth.role === 'admin' || auth.role === 'viewer') return '账号、上游密钥、模型目录与运行参数';
+      return '归属账号与模型目录';
+    },
     icon: 'providers',
     load: () => import('./pages/providers.js'),
   },
@@ -69,7 +75,11 @@ const ROUTES = [
     path: '/usage',
     label: '用量',
     title: '用量',
-    subtitle: 'token、请求数与积分趋势，可按供应商/账号/模型拆分',
+    // 匿名页只保留「不可见」说明和登录入口，没有拆分控件；副标题也不该
+    // 承诺一个当前角色用不了的拆分视图。
+    subtitle: (auth) => (auth.authenticated
+      ? 'token、请求数与积分趋势，可按供应商/账号/模型拆分'
+      : 'token、请求数与积分趋势'),
     icon: 'usage',
     load: () => import('./pages/usage.js'),
   },

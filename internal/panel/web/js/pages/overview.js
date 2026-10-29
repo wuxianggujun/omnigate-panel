@@ -1,7 +1,7 @@
 // overview.js — 总览：引擎健康、账号池、24h 趋势、近期请求与模型锁。
 
 import { api, describeError } from '../core/api.js';
-import { authState, isAuthenticated, openLoginModal } from '../core/auth.js';
+import { authState, isAdmin, isAuthenticated, isViewer, openLoginModal } from '../core/auth.js';
 import {
   el, svgEl, card, badge, statusDot, emptyState, loadingBlock, icon, copyText, pageBar,
 } from '../core/dom.js';
@@ -405,7 +405,9 @@ function engineCard(data, totals, context, { loading = false } = {}) {
     context.length ? el('div', { class: 'fact-tags' }, context.map((text) => badge(text, 'muted'))) : null,
     el('div', { class: 'quick-actions' },
       el('a', { class: 'btn btn-ghost btn-sm', href: '#/providers' }, icon('server', 14), '供应商'),
-      el('a', { class: 'btn btn-ghost btn-sm', href: '#/routing' }, icon('routing', 14), '路由'),
+      // 路由配置只对 admin/viewer 可读；普通用户与匿名访客的入口已在导航层收窄，
+      // 总览的快捷入口也必须同口径，否则会留下一条点进去只有提示的链接。
+      (isAdmin() || isViewer()) ? el('a', { class: 'btn btn-ghost btn-sm', href: '#/routing' }, icon('routing', 14), '路由') : null,
       el('a', { class: 'btn btn-ghost btn-sm', href: '#/usage' }, icon('usage', 14), '用量'),
     ),
   );
@@ -527,7 +529,9 @@ function healthCard(totals, providerRows, ctx, { loaded = true, providersKnown =
       (totals.accounts && !anonymous) ? bar : null,
       table.el,
     ),
-    actions: el('a', { class: 'btn btn-ghost btn-sm', href: '#/providers' }, '管理供应商'),
+    // 只有管理员能在供应商页改配置；其他角色点进去是只读视图，
+    // 写「管理」会误导成当前角色有写权限。
+    actions: el('a', { class: 'btn btn-ghost btn-sm', href: '#/providers' }, isAdmin() ? '管理供应商' : '查看供应商'),
   });
 }
 

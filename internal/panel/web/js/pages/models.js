@@ -1,6 +1,7 @@
 // models.js — 全局模型目录：供应商前缀、价格/积分、能力标签与搜索筛选。
 
 import { api, describeError } from '../core/api.js';
+import { isAdmin, isViewer } from '../core/auth.js';
 import {
   el, card, badge, emptyState, loadingBlock, icon, copyText, debounce, pageBar,
 } from '../core/dom.js';
@@ -182,9 +183,16 @@ function renderShell() {
   });
   page.appendChild(filterbar);
   page.appendChild(tableCard);
+  // 路由页对普通用户与匿名访客不可读，模型页脚注也不该留下一条只会
+  // 跳到登录/权限提示的「前往路由」链接。
+  const canReadRouting = isAdmin() || isViewer();
   page.appendChild(el('div', { class: 'page-footer-note' },
-    el('span', { text: '模型目录只读；模型别名在「路由」页配置后会自动出现在这里。' }),
-    el('a', { class: 'link-btn', href: '#/routing' }, '前往路由'),
+    el('span', {
+      text: canReadRouting
+        ? '模型目录只读；模型别名在「路由」页配置后会自动出现在这里。'
+        : '模型目录只读；模型别名由平台管理员配置后会自动出现在这里。',
+    }),
+    canReadRouting ? el('a', { class: 'link-btn', href: '#/routing' }, '前往路由') : null,
   ));
   rootEl.replaceChildren(page);
 }

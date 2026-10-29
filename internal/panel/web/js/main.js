@@ -55,6 +55,9 @@ const ROUTES = [
     label: '路由',
     title: '路由',
     subtitle: '别名优先于优先级，优先级优先于默认供应商',
+    // 路由页没有公开视图：普通用户读不到平台配置，匿名访客只会得到登录提示。
+    // 与「用户」页同一口径，入口只留给能真正读取配置的 admin/viewer。
+    roles: ['admin', 'viewer'],
     icon: 'routing',
     load: () => import('./pages/routing.js'),
   },

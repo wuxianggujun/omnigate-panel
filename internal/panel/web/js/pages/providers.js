@@ -1367,6 +1367,39 @@ function keysTab(provider, meta, current) {
     wrap.appendChild(notice('muted', '暂无密钥健康数据', '只有配置了上游密钥池（api_keys / zen_keys / go_keys）的供应商会进入自动禁用与清理。单密钥供应商不参与池内禁用；它失败时会由别名链绕行——普通故障 30 秒起退避，额度耗尽按上游重置时间（最多 24 小时），到期自动重试。'));
   }
 
+  // 路由绕行与密钥池禁用是两层状态：单密钥供应商不进池，但额度耗尽/5xx
+  // 仍会进入 routeFailureLedger。这里把当前供应商的窗口直接展开，避免只看
+  // 密钥健康时误以为「没有禁用的 key = 主目标可用」。
+  const routeCooling = (ui.keyHealth?.route_cooldowns || [])
+    .filter((item) => item && item.provider === provider.name);
+  if (routeCooling.length) {
+    const table = createTable({
+      columns: [
+        {
+          key: 'target', label: '目标',
+          render: (row) => el('span', { class: 'mono small', text: row.scope === 'provider' ? '全部模型' : (row.model || '—') }),
+        },
+        {
+          key: 'scope', label: '范围',
+          render: (row) => badge(row.scope === 'provider' ? '供应商级' : '模型级', row.scope === 'provider' ? 'warn' : 'muted'),
+        },
+        { key: 'until', label: '恢复', align: 'right', render: (row) => fmtRelative(row.until) },
+        { key: 'strikes', label: '连败', align: 'right', render: (row) => fmtInt(row.strikes || 0) },
+        {
+          key: 'reason', label: '最近错误',
+          render: (row) => (row.reason ? el('span', { class: 'text-warn small', text: truncate(row.reason, 60) }) : '—'),
+        },
+      ],
+      rows: routeCooling,
+      empty: '没有绕行中的目标',
+    });
+    wrap.appendChild(card({
+      title: '路由绕行',
+      subtitle: '窗口内优先走链上备用；成功即清零',
+      body: table.el,
+    }));
+  }
+
   // 同上：额度卡片只看描述符是否声明了 quota，不再认类型名；权限口径与概览一致。
   if (actionIds(meta).has('quota') && (isAdmin() || isViewer())) {
     wrap.appendChild(quotaCard(provider, current));

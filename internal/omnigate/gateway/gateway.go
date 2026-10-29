@@ -467,7 +467,6 @@ func (g *Gateway) Config() *config.Config { return g.cfg }
 // Logger exposes the logger.
 func (g *Gateway) Logger() *logx.Logger { return g.log }
 
-// ProviderNames returns configured provider names in order.
 // KeyHealthSnapshot 上游密钥健康状态快照（provider → KeyID → 状态），供面板
 // 「密钥健康」展示与后台自动清理判定用。
 func (g *Gateway) KeyHealthSnapshot() map[string]map[string]openaibackend.Health {
@@ -477,6 +476,16 @@ func (g *Gateway) KeyHealthSnapshot() map[string]map[string]openaibackend.Health
 	return g.keyHealth.Snapshot()
 }
 
+// RouteCooldowns 返回当前仍在窗口内的路由绕行记录，供面板密钥健康视图复用。
+// 与 /healthz 的 route_cooldowns 同一份进程内状态，不落库。
+func (g *Gateway) RouteCooldowns() []RouteCooldownEntry {
+	if g == nil {
+		return nil
+	}
+	return g.routeCool.Snapshot(time.Now())
+}
+
+// ProviderNames returns configured provider names in order.
 func (g *Gateway) ProviderNames() []string { return g.order }
 
 // ProviderType returns the type of a provider.

@@ -543,6 +543,12 @@ function keyHealth(now) {
     ],
     cleanup_strikes: 5,
     cleanup_days: 3,
+    // 与 /healthz route_cooldowns 同形：provider 级额度窗口用 model:*，
+    // 普通失败只影响具体模型。时间用秒，fmtRelative 与后端 RFC3339 都能解析。
+    route_cooldowns: [
+      { provider: 'deepseek', model: '*', scope: 'provider', until: Math.floor((now + 2 * HOUR) / 1000), strikes: 3, reason: 'weekly limit; resets in 2h' },
+      { provider: 'opencode', model: 'gpt-5-codex', scope: 'model', until: Math.floor((now + 30 * MIN) / 1000), strikes: 2, reason: 'HTTP 500 upstream error' },
+    ],
   };
 }
 

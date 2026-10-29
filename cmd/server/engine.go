@@ -678,6 +678,9 @@ func (m *omniManager) KeyHealthReport() (any, error) {
 		"providers":       out,
 		"cleanup_strikes": keyAutoCleanupStrikes,
 		"cleanup_days":    int(keyAutoCleanupAfter / (24 * time.Hour)),
+		// 路由绕行与密钥健康同源同权限：面板密钥 Tab 里直接展示当前仍在
+		// 窗口内的供应商级额度/模型级失败，便于确认是否已切到备用。
+		"route_cooldowns": rt.gw.RouteCooldowns(),
 	}, nil
 }
 

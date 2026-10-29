@@ -45,7 +45,11 @@ const ROUTES = [
     path: '/models',
     label: '模型',
     title: '模型',
-    subtitle: '带供应商前缀的对外模型名；别名由「路由」维护',
+    // 路由页只对 admin/viewer 开放；其他角色的模型页副标题不能把
+    // 「路由」写成一个当前点不进去的入口。
+    subtitle: (auth) => ((auth.role === 'admin' || auth.role === 'viewer')
+      ? '带供应商前缀的对外模型名；别名由「路由」维护'
+      : '带供应商前缀的对外模型名；别名由平台管理员维护'),
     icon: 'models',
     load: () => import('./pages/models.js'),
   },

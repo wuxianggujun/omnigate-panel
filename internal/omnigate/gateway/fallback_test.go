@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -209,5 +210,56 @@ func TestChainFallbackRespectsKeyScope(t *testing.T) {
 	g2.HandleChat(WithReqMeta(context.Background(), &ReqMeta{KeyProviders: []string{"fake", "alt"}}), chatReq(), w2)
 	if w2.Code != http.StatusOK || !strings.Contains(w2.Body.String(), "fallback answer") {
 		t.Fatalf("授权含 alt 时引流链应能回退，got code=%d body=%s", w2.Code, w2.Body.String())
+	}
+}
+
+// TestFallbackFailureNamesAttemptedTargets：主目标 429、备用目标也额度耗尽时，
+// 客户端拿到的错误必须同时说明「切到了谁、为什么仍失败」。此前只回主目标错误，
+// 线上看起来就像网关没有切换。
+func TestFallbackFailureNamesAttemptedTargets(t *testing.T) {
+	primary := &routeTestProvider{
+		name: "cline-pass",
+		err:  errors.New(`upstream HTTP 429: {"error":{"code":"INFERENCE_CAP_ERROR","message":"monthly Clinepass limit"}}`),
+	}
+	backup := &routeTestProvider{
+		name: "yijia",
+		err:  errors.New(`upstream HTTP 502: {"error":{"message":"weekly usage limit"}}`),
+	}
+	g := testGateway(primary)
+	g.cool = newCooldownLedger()
+	g.sess = newSessionHealth()
+	g.cfg.Providers = []config.ProviderConfig{
+		{Name: "cline-pass", Type: "openai"},
+		{Name: "yijia", Type: "openai"},
+	}
+	g.providers["yijia"] = backup
+	g.order = []string{"cline-pass", "yijia"}
+	g.cfg.DefaultProvider = "cline-pass"
+	g.cfg.DefaultModel = "m"
+	g.cfg.Fallback = &config.FallbackConfig{}
+	g.modelMap = NewModelMappingStore(filepath.Join(t.TempDir(), "mapping.json"))
+	if err := g.SetModelMappingTargets("drain", []string{"cline-pass/m", "yijia/m"}); err != nil {
+		t.Fatalf("配链: %v", err)
+	}
+
+	meta := &ReqMeta{}
+	w := httptest.NewRecorder()
+	g.HandleChat(WithReqMeta(context.Background(), meta), &openai.ChatRequest{
+		Model:    "drain",
+		Messages: []openai.Message{{Role: "user", Content: openai.Content{Text: "hi"}}},
+	}, w)
+
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502; body=%s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "monthly Clinepass limit") {
+		t.Fatalf("错误正文没有保留主目标原因: %s", body)
+	}
+	if !strings.Contains(body, "yijia/m") || !strings.Contains(body, "quota") {
+		t.Fatalf("错误正文没有说明已尝试 yijia: %s", body)
+	}
+	if !strings.Contains(meta.Failure, "yijia/m") {
+		t.Fatalf("请求记录应带上兜底尝试，Failure=%q", meta.Failure)
 	}
 }

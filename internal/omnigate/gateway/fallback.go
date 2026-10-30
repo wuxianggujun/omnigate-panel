@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"fmt"
 	"math/rand"
 	"strings"
 	"time"
@@ -39,6 +40,49 @@ type fallbackCandidate struct {
 
 // qualified is the "provider/model" name used for logging.
 func (c fallbackCandidate) qualified() string { return c.Provider + "/" + c.Model }
+
+// fallbackFailure 汇总一次兜底尝试里所有候选的失败。调用方原先只把主目标的
+// 错误写回客户端，于是「主目标 429 → 已切到 yijia → yijia 也额度耗尽」在响应
+// 里看起来像「根本没有切换」。备用目标全部失败时必须把这次尝试也说出来。
+type fallbackFailure struct {
+	Attempts []fallbackAttempt
+}
+
+type fallbackAttempt struct {
+	Candidate fallbackCandidate
+	Err       error
+}
+
+// Error 只给出候选与失败类别，完整上游正文已经由每个候选自己的 Warn 日志记录；
+// 响应里再展开一遍长 JSON 只会把真正有用的主目标错误淹没。
+func (e *fallbackFailure) Error() string {
+	if e == nil || len(e.Attempts) == 0 {
+		return "备用目标均失败"
+	}
+	parts := make([]string, 0, len(e.Attempts))
+	for _, a := range e.Attempts {
+		label := a.Candidate.qualified()
+		if a.Err != nil {
+			if reason := routeFailureReason(a.Err); reason != "" {
+				label += ": " + reason
+			}
+		}
+		parts = append(parts, label)
+	}
+	return "备用目标均失败（" + strings.Join(parts, "；") + "）"
+}
+
+// joinFallbackFailure 保留主目标错误（含上游状态码，便于 errors.As 继续识别），
+// 在正文末尾补一句兜底结果。没有主目标错误时直接返回兜底汇总。
+func joinFallbackFailure(primary error, fallback error) error {
+	if fallback == nil {
+		return primary
+	}
+	if primary == nil {
+		return fallback
+	}
+	return fmt.Errorf("%w；%s", primary, fallback.Error())
+}
 
 // fallbackCandidates resolves the ordered candidate list for a failed primary
 // request (app/core/fallback.py get_fallback_entries). Pinned
@@ -114,14 +158,16 @@ func resultHasOutput(res *chatResult) bool {
 
 // tryFallback runs the fallback chain for a failed/empty primary request and
 // returns the winning result, or nil when every candidate failed or produced
-// nothing ("one fails → try another").
+// nothing ("one fails → try another"). The second return value is a compact
+// summary of the candidates that failed, so the caller can tell the client that
+// failover was attempted instead of echoing only the primary error.
 //
 // chain holds the explicit candidates declared by a model alias chain (见
 // modelmap.go / modelChainFallbacks): they are tried FIRST and in order, so an
 // operator can drain an expiring account (prefer raccoon → fall back to
 // runable) without turning on the generic third-party fallback. The generic
 // cfg.Fallback candidates are appended afterwards and only when enabled.
-func (g *Gateway) tryFallback(ctx context.Context, req *openai.ChatRequest, primaryProvider, primaryModel string, hasTools bool, chain []fallbackCandidate) *chatResult {
+func (g *Gateway) tryFallback(ctx context.Context, req *openai.ChatRequest, primaryProvider, primaryModel string, hasTools bool, chain []fallbackCandidate) (*chatResult, error) {
 	// 入站密钥的收窄范围：主目标已在入口校验过（allowModel），但引流链的后续
 	// 目标和全局 cfg.Fallback 的候选没走过那道校验 —— 不在这里收口，一个只授了
 	// raccoon 的 key 就能顺着链打到 runable，「按供应商收窄」等于没做。
@@ -148,15 +194,21 @@ func (g *Gateway) tryFallback(ctx context.Context, req *openai.ChatRequest, prim
 		}
 	}
 	if len(candidates) == 0 {
-		return nil
+		return nil, nil
 	}
 	incognito := g.cfg.Mode == "incognito"
+	attempts := make([]fallbackAttempt, 0, len(candidates))
 	for _, c := range candidates {
 		if ctx.Err() != nil {
-			return nil
+			attempts = append(attempts, fallbackAttempt{Candidate: c, Err: ctx.Err()})
+			break
 		}
 		prov := g.providers[c.Provider]
 		if prov == nil {
+			attempts = append(attempts, fallbackAttempt{
+				Candidate: c,
+				Err:       fmt.Errorf("provider 未注册"),
+			})
 			continue
 		}
 		in := g.buildInput(prov, c.Model, req, incognito, hasTools)
@@ -166,6 +218,7 @@ func (g *Gateway) tryFallback(ctx context.Context, req *openai.ChatRequest, prim
 				g.markRouteFailure(c.Provider, c.Model, err, false, time.Now())
 			}
 			g.log.Warn("兜底 %s 失败: %v", c.qualified(), err)
+			attempts = append(attempts, fallbackAttempt{Candidate: c, Err: err})
 			continue
 		}
 		if !resultHasOutput(res) {
@@ -177,6 +230,7 @@ func (g *Gateway) tryFallback(ctx context.Context, req *openai.ChatRequest, prim
 				g.clearRouteFailure(c.Provider, c.Model)
 			}
 			g.log.Warn("兜底 %s 返回空，试下一个", c.qualified())
+			attempts = append(attempts, fallbackAttempt{Candidate: c, Err: errEmptyUpstream})
 			continue
 		}
 		g.clearRouteFailure(c.Provider, c.Model)
@@ -191,7 +245,11 @@ func (g *Gateway) tryFallback(ctx context.Context, req *openai.ChatRequest, prim
 			meta.UpstreamModel = c.Model
 		}
 		g.log.Info("兜底命中 %s", c.qualified())
-		return res
+		return res, nil
 	}
-	return nil
+	failure := &fallbackFailure{Attempts: attempts}
+	if len(attempts) > 0 {
+		g.log.Warn("%s", failure.Error())
+	}
+	return nil, failure
 }

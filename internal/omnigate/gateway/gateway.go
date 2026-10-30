@@ -1542,7 +1542,8 @@ func (g *Gateway) HandleChat(ctx context.Context, req *openai.ChatRequest, w htt
 		}
 		// 失败或零正文、且还没流出任何正文 → 第三方兜底（把兜底结果转成 SSE 发出）。
 		if (err != nil || !resultHasOutput(res)) && !contentEmitted {
-			if fb := g.tryFallback(ctx, req, provName, upstreamModel, hasTools, chainFB); fb != nil {
+			fb, fbErr := g.tryFallback(ctx, req, provName, upstreamModel, hasTools, chainFB)
+			if fb != nil {
 				if fb.text != "" {
 					_ = openai.EmitContent(ew, id, displayModel, created, fb.text)
 				}
@@ -1564,6 +1565,11 @@ func (g *Gateway) HandleChat(ctx context.Context, req *openai.ChatRequest, w htt
 				}
 				g.log.Info("✓ 完成 %s · 流式兜底 · %s", displayModel, fb.finish)
 				return
+			}
+			// 主目标失败、备用目标也全部失败时，错误正文必须同时包含兜底尝试；
+			// 只回主目标的 429 会让客户端以为网关根本没有切换（线上实际踩过）。
+			if fbErr != nil && err != nil {
+				err = joinFallbackFailure(err, fbErr)
 			}
 		}
 		if err != nil {
@@ -1636,11 +1642,20 @@ func (g *Gateway) HandleChat(ctx context.Context, req *openai.ChatRequest, w htt
 	}
 	// 失败或空回复 → 第三方兜底（与参考实现 is_empty_result / 异常路径同口径）。
 	if err != nil || !resultHasOutput(res) {
-		if fb := g.tryFallback(ctx, req, provName, upstreamModel, hasTools, chainFB); fb != nil {
+		fb, fbErr := g.tryFallback(ctx, req, provName, upstreamModel, hasTools, chainFB)
+		if fb != nil {
 			res, err = fb, nil
+		} else if fbErr != nil && err != nil {
+			// 与流式分支同一口径：保留主目标错误，但把「备用目标也失败」写进正文。
+			err = joinFallbackFailure(err, fbErr)
 		}
 	}
 	if err != nil {
+		// 非流式请求此前只在流式 markStreamFailure 里回填 Failure，导致请求记录
+		// 中的失败原因一直为空；这里补上，面板才能看到完整的兜底失败链路。
+		if m := ReqMetaFrom(ctx); m != nil && m.Failure == "" {
+			m.Failure = err.Error()
+		}
 		g.log.Error("对话失败 %s: %v", displayModel, err)
 		writeJSON(w, 502, openai.ErrorJSON("upstream_error", err.Error()))
 		return

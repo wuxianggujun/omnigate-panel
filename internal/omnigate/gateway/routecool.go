@@ -93,6 +93,32 @@ func (l *routeFailureLedger) Cooling(provider, model string, now time.Time) bool
 	return s != nil && now.Before(s.Until)
 }
 
+// Penalty 返回该目标近期连续失败次数（模型级与供应商级取较大值）。
+// 窗口已经到期但失败刚发生不久的候选仍带惩罚：退避到期只表示「可以再探一次」，
+// 不表示「已经恢复」；提升主目标时应优先选没有近期失败记录的候选，避免每次
+// 退避到期都把用户请求当成探针。超过 routeCoolReset 的旧记录视为已恢复。
+func (l *routeFailureLedger) Penalty(provider, model string, now time.Time) int {
+	if l == nil {
+		return 0
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	penalty := 0
+	for _, key := range []string{
+		routeCoolKey(provider, model),
+		routeCoolKey(provider, routeCoolProviderModel),
+	} {
+		s := l.m[key]
+		if s == nil || s.Strikes <= penalty {
+			continue
+		}
+		if now.Sub(s.LastAt) <= routeCoolReset {
+			penalty = s.Strikes
+		}
+	}
+	return penalty
+}
+
 // CoolingAny 同时看模型级与供应商级窗口。供应商级窗口来自额度类失败：
 // 账号/密钥的额度通常跨模型生效，不能每换一个模型就重新撞一次。
 func (l *routeFailureLedger) CoolingAny(provider, model string, now time.Time) bool {
@@ -247,8 +273,12 @@ func (l *routeFailureLedger) pruneLocked(now time.Time) {
 	}
 }
 
-// promoteCoolingPrimary 在主目标处于绕行窗口时，把别名链上第一个同样在窗口外
-// 的候选提为主目标；原主目标与其余候选按「非冷却优先」排进回退链。
+// promoteCoolingPrimary 在主目标处于绕行窗口时，把别名链上近期失败最少且在
+// 窗口外的候选提为主目标；原主目标与其余候选按「非冷却优先」排进回退链。
+//
+// 只看窗口是否到期还不够：一个每 5 分钟失败一次的目标，窗口刚好到期时会被
+// 反复提升，用户请求就成了探针。Penalty 保留「刚失败过」的记忆，让干净候选
+// 先服务；等旧记录超过 routeCoolReset，目标才重新获得被提升的机会。
 //
 // 只在存在别名链候选时生效：没有同模型备选时，绕行没有意义，保持原有「每次都
 // 试一下」的行为，避免把唯一通道也锁在冷却里。
@@ -256,28 +286,38 @@ func (g *Gateway) promoteCoolingPrimary(primary fallbackCandidate, chain []fallb
 	if g.routeCool == nil || len(chain) == 0 || !g.routeCool.CoolingAny(primary.Provider, primary.Model, now) {
 		return primary, chain, false
 	}
+	best := -1
+	bestPenalty := 0
 	for i, c := range chain {
 		if g.routeCool.CoolingAny(c.Provider, c.Model, now) {
 			continue
 		}
-		var warm, cooling []fallbackCandidate
-		for j, other := range chain {
-			if j == i {
-				continue
-			}
-			if g.routeCool.CoolingAny(other.Provider, other.Model, now) {
-				cooling = append(cooling, other)
-			} else {
-				warm = append(warm, other)
-			}
+		penalty := g.routeCool.Penalty(c.Provider, c.Model, now)
+		// 同惩罚保留链上原顺序；只有近期确实失败过的候选才让位。
+		if best < 0 || penalty < bestPenalty {
+			best, bestPenalty = i, penalty
 		}
-		rest := make([]fallbackCandidate, 0, len(chain))
-		rest = append(rest, warm...)
-		rest = append(rest, primary) // 原主目标放在非冷却候选之后，作为探针
-		rest = append(rest, cooling...)
-		return c, rest, true
 	}
-	return primary, chain, false
+	if best < 0 {
+		return primary, chain, false
+	}
+	i := best
+	var warm, cooling []fallbackCandidate
+	for j, other := range chain {
+		if j == i {
+			continue
+		}
+		if g.routeCool.CoolingAny(other.Provider, other.Model, now) {
+			cooling = append(cooling, other)
+		} else {
+			warm = append(warm, other)
+		}
+	}
+	rest := make([]fallbackCandidate, 0, len(chain))
+	rest = append(rest, warm...)
+	rest = append(rest, primary) // 原主目标放在非冷却候选之后，作为探针
+	rest = append(rest, cooling...)
+	return chain[i], rest, true
 }
 
 // markRouteFailure 记录一次主目标/候选失败。announce=false 用于兜底候选：调用方

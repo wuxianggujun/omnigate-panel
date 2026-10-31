@@ -337,6 +337,44 @@ func TestPromoteCoolingPrimary(t *testing.T) {
 	}
 }
 
+// 退避窗口到期不等于恢复：刚失败过的候选不应抢在干净候选前面被提升。
+// 旧记录超过 routeCoolReset 后重新获得探针机会，避免永久锁死任何一家。
+func TestPromoteCoolingPrimaryPrefersFreshCandidate(t *testing.T) {
+	g := &Gateway{routeCool: newRouteFailureLedger()}
+	now := time.Now()
+	primary := fallbackCandidate{Provider: "cline-pass", Model: "m"}
+	chain := []fallbackCandidate{
+		{Provider: "yijia", Model: "m"},
+		{Provider: "other", Model: "m"},
+	}
+
+	g.routeCool.FailUntil(primary.Provider, primary.Model, "quota", now, now.Add(time.Hour))
+	g.routeCool.Fail("yijia", "m", "upstream 502", now)
+
+	// yijia 的 30s 绕行窗口已到期，但失败记录还很新；应提升从未失败的 other。
+	eval := now.Add(31 * time.Second)
+	if got := g.routeCool.Penalty("yijia", "m", eval); got != 1 {
+		t.Fatalf("yijia penalty = %d, want 1", got)
+	}
+	next, rest, ok := g.promoteCoolingPrimary(primary, chain, eval)
+	if !ok || next.Provider != "other" {
+		t.Fatalf("应提升无近期失败的 other，得到 %+v ok=%v", next, ok)
+	}
+	if len(rest) != 2 || rest[0].Provider != "yijia" || rest[1] != primary {
+		t.Fatalf("回退链应为 [yijia, 原主目标]，得到 %+v", rest)
+	}
+
+	// 安静超过 routeCoolReset 后，旧失败不再带惩罚；yijia 重新获得探针机会。
+	later := now.Add(routeCoolReset + time.Minute)
+	if got := g.routeCool.Penalty("yijia", "m", later); got != 0 {
+		t.Fatalf("陈旧记录 penalty = %d, want 0", got)
+	}
+	next, _, ok = g.promoteCoolingPrimary(primary, chain, later)
+	if !ok || next.Provider != "yijia" {
+		t.Fatalf("陈旧记录应让 yijia 重新成为首个候选，得到 %+v ok=%v", next, ok)
+	}
+}
+
 // routeTestProvider 是可计数的假上游：err 非空时失败，否则回一段正文。
 type routeTestProvider struct {
 	name  string

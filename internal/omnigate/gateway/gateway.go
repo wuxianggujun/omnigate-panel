@@ -5,6 +5,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -2012,7 +2013,7 @@ func (g *Gateway) runChat(ctx context.Context, provName string, prov provider.Pr
 
 	// Prompt-based providers need emulated tool calling.
 	if hasTools && traitsOf(prov.Type()).ToolEmulation {
-		stream, err := g.openStream(ctx, provName, prov, in)
+		stream, err := g.openStreamRetry(ctx, provName, prov, in)
 		if err != nil {
 			return nil, friendlyUpstreamErr(provName, limit, err)
 		}
@@ -2062,7 +2063,7 @@ func (g *Gateway) runChat(ctx context.Context, provName string, prov provider.Pr
 		return res, nil
 	}
 
-	stream, err := g.openStream(ctx, provName, prov, in)
+	stream, err := g.openStreamRetry(ctx, provName, prov, in)
 	if err != nil {
 		return nil, friendlyUpstreamErr(provName, limit, err)
 	}
@@ -2146,6 +2147,68 @@ func (g *Gateway) accountRefreshLock(provName, label string) *sync.Mutex {
 	key := provName + "\x00" + label
 	m, _ := g.refreshLocks.LoadOrStore(key, &sync.Mutex{})
 	return m.(*sync.Mutex)
+}
+
+// openRetryDelay 是连接建立阶段遇到瞬时断连后，原地重试前的短暂等待。
+// 只重试一次：这足够覆盖对端偶发 EOF / 连接被中间层提前关闭，又不会在
+// 上游持续故障时把每个请求拖长。
+const openRetryDelay = 200 * time.Millisecond
+
+// transientOpenError 判断建流阶段的错误是否属于「连接没建立起来」的瞬时故障。
+//
+// 这类错误发生在拿到任何响应帧之前，重试不会重复输出正文；而 HTTP 429/5xx、
+// 鉴权失败、请求参数错误等都有明确响应，重试只会得到同一结果，交给路由冷却
+// 和兜底处理。上游有时会在发送响应头前直接断开（线上表现为
+// `Post "...": unexpected EOF`），此时同一个密钥再试一次往往就能成功。
+func transientOpenError(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	s := strings.ToLower(err.Error())
+	for _, marker := range []string{
+		"unexpected eof",
+		"connection reset by peer",
+		"broken pipe",
+		"server closed idle connection",
+		"http2: server sent goaway",
+	} {
+		if strings.Contains(s, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// openStreamRetry 在无账号池的密钥型上游上，对建流阶段的瞬时网络错误重试一次。
+//
+// 账号池型上游的 openStream 已经在账号之间轮换；这里只补上 fengshao1227 这类
+// 单密钥上游的空缺——此前一个瞬时 EOF 会直接让整次请求失败，即使上游下一秒
+// 就恢复。重试前关闭可能残留的流，避免连接泄漏。
+func (g *Gateway) openStreamRetry(ctx context.Context, provName string, prov provider.Provider, in provider.ChatInput) (provider.Stream, error) {
+	stream, err := g.openStream(ctx, provName, prov, in)
+	if err == nil || !transientOpenError(err) || ctx.Err() != nil {
+		return stream, err
+	}
+	if accountModeOf(prov.Type()) != plugin.AccountModeNone {
+		return stream, err
+	}
+	if stream != nil {
+		_ = stream.Close()
+	}
+	if g.log != nil {
+		g.log.Warn("上游连接在建立阶段中断，%s 后重试一次 %s: %v", openRetryDelay, provName, err)
+	}
+	timer := time.NewTimer(openRetryDelay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-timer.C:
+	}
+	return g.openStream(ctx, provName, prov, in)
 }
 
 // openStream picks an account (switching on exhausted credits) and opens the stream.

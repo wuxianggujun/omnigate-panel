@@ -280,6 +280,8 @@ func (s *Server) serveLogged(w http.ResponseWriter, r *http.Request, fn func(htt
 		APIKey: meta.APIKey,
 		// 真实上游模型：与 Model 不同即说明别名/目录解析生效过。
 		UpstreamModel: meta.UpstreamModel,
+		// 路由目标尝试次数：>1 表示本次请求靠兜底/切换才成功（或全部失败）。
+		Attempts: meta.Attempts,
 		// 失败原因：让 interrupted 从「猜」变成「可定位」（谁先断的）。
 		Failure:    meta.Failure,
 		Status:     status,

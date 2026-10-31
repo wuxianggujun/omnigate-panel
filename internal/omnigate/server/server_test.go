@@ -83,6 +83,7 @@ func TestServeLoggedRecordsReasoning(t *testing.T) {
 		if m := gateway.ReqMetaFrom(r.Context()); m != nil {
 			m.Provider = "runable"
 			m.Reasoning = true
+			m.Attempts = 3
 		}
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
@@ -98,6 +99,9 @@ func TestServeLoggedRecordsReasoning(t *testing.T) {
 	}
 	if e.Provider != "runable" {
 		t.Errorf("provider = %q, want runable", e.Provider)
+	}
+	if e.Attempts != 3 {
+		t.Errorf("attempts = %d, want 3", e.Attempts)
 	}
 }
 

@@ -2006,6 +2006,9 @@ func usageMap(u *provider.Usage) map[string]any {
 }
 
 func (g *Gateway) runChat(ctx context.Context, provName string, prov provider.Provider, in provider.ChatInput, hasTools bool, onText, onReasoning func(string)) (*chatResult, error) {
+	if m := ReqMetaFrom(ctx); m != nil {
+		m.Attempts++
+	}
 	res := &chatResult{finish: "stop"}
 	// 上游对单条 prompt 的字符上限（0 = 不检查）。正常路径已在 HandleChat 里预检过，
 	// 这里只用于把上游回绝的错误码换成用户看得懂的说法。

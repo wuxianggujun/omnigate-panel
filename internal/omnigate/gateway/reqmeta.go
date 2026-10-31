@@ -23,6 +23,10 @@ type ReqMeta struct {
 	// 一模一样，问题因此一直查不出来）。这里单独记真实目标。
 	UpstreamModel string
 	Account       string // 实际服务账号 label（api-key 上游为 "api-key"）
+	// Attempts 是本次请求实际尝试过的路由目标数：主目标 1 次，每调用一次
+	// runChat（包括兜底候选）加 1。它回答「这条请求是不是靠切换才成功」——
+	// 只看最终 Provider 会把「主目标失败 → 备用成功」误读成一次普通请求。
+	Attempts int
 	// APIKey 是发起请求的**入站密钥标签**（`api_keys[].name`），由 server 的鉴权
 	// 层填入。它回答「谁在用」，Account 回答「上游谁在服务」——两者不能混：
 	// 一个用户可能落到多个上游账号，按 Account 统计会把同一个人拆成好几行。

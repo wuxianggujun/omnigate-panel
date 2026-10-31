@@ -65,7 +65,8 @@ func fbChatReq(stream bool) *openai.ChatRequest {
 // TestFallbackNonStream: an empty primary result is replaced by the fallback.
 func TestFallbackNonStream(t *testing.T) {
 	g := fallbackGateway(textProvider("alt", "fallback answer"), &config.FallbackConfig{Enabled: true})
-	ctx := WithReqMeta(context.Background(), &ReqMeta{})
+	meta := &ReqMeta{}
+	ctx := WithReqMeta(context.Background(), meta)
 	w := httptest.NewRecorder()
 	g.HandleChat(ctx, fbChatReq(false), w)
 	if w.Code != http.StatusOK {
@@ -73,6 +74,9 @@ func TestFallbackNonStream(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), "fallback answer") {
 		t.Fatalf("body = %s", w.Body.String())
+	}
+	if meta.Attempts != 2 {
+		t.Fatalf("attempts = %d, want 2（主目标 + 备用目标）", meta.Attempts)
 	}
 }
 
@@ -261,5 +265,8 @@ func TestFallbackFailureNamesAttemptedTargets(t *testing.T) {
 	}
 	if !strings.Contains(meta.Failure, "yijia/m") {
 		t.Fatalf("请求记录应带上兜底尝试，Failure=%q", meta.Failure)
+	}
+	if meta.Attempts != 2 {
+		t.Fatalf("attempts = %d, want 2（主目标 + 备用目标）", meta.Attempts)
 	}
 }

@@ -60,14 +60,19 @@ func TestOpenStreamRetriesTransientFailure(t *testing.T) {
 				},
 			}
 			g := testGateway(p)
+			meta := &ReqMeta{}
 			w := httptest.NewRecorder()
-			g.HandleChat(WithReqMeta(context.Background(), &ReqMeta{}), retryReq(stream), w)
+			g.HandleChat(WithReqMeta(context.Background(), meta), retryReq(stream), w)
 
 			if w.Code != http.StatusOK {
 				t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
 			}
 			if p.calls != 2 {
 				t.Fatalf("StreamChat calls = %d, want 2 (one transient retry)", p.calls)
+			}
+			// 瞬时重试仍属同一个路由目标，不应把「尝试次数」算成两次路由切换。
+			if meta.Attempts != 1 {
+				t.Fatalf("attempts = %d, want 1（同一路由目标的瞬时重试）", meta.Attempts)
 			}
 			if !strings.Contains(w.Body.String(), "recovered") {
 				t.Fatalf("body = %s", w.Body.String())
